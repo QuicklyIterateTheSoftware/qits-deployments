@@ -1,0 +1,5 @@
+# How this repository is deployed. It is read from the git host at the built sha.
+# qits-platform-deployments is a platform service: one instance owns the topology and executes every
+# environment's deployments, so a per-tier copy would be a per-tier answer to a platform-wide
+# question — and a second one would be a second docker socket.
+deployment_target: platform
