@@ -40,7 +40,7 @@ stays green, and it has been paid for once already.
 
 ## The partition, and the one rule that keeps it
 
-Three maven modules, package root `eu.wohlben.qits.platformdeployments`:
+Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
 
 - **`environments/`** (`…environments.*`) — the topology: `entity`, `persistence`, `dto`, `mapper`,
   `control`, `error`. `EnvironmentService` (tier rows), `ServiceCatalog` (services, links and the
@@ -57,6 +57,13 @@ Three maven modules, package root `eu.wohlben.qits.platformdeployments`:
 `eu.wohlben.qits.webui` sits outside that tree, holding `WebUiRedirect` and only that. It keeps the
 sibling services' spelling rather than a component-flavoured one, so the file is recognisable across
 repos.
+
+**`platform` is a namespace qualifier, not half of a word** — hence `…qits.platform.deployments`
+rather than `…qits.platformdeployments`. The execution module therefore lands at
+`…qits.platform.deployments.deployments`, next to `…qits.platform.deployments.environments`: the
+repetition is the price of a qualifier that names the plane, and renaming the module package to
+dodge it would cost the pairing with `environments`. The artifactIds (`qits-platform-deployments-*`)
+and the REST path (`/platform-deployments/api`) are unaffected and stay as they are.
 
 **`deployments` depends on `environments` and never the reverse.** That is the partition, and it is
 the thing to defend. Execution reads and writes the topology; the topology knows nothing about
@@ -117,8 +124,8 @@ Serial execution is load-bearing twice over:
   neither of the other two covers that. `twoIdenticalEventsArrivingTogetherRegisterOnePlatformService`
   holds it.
 
-The cost is that the spec's HTTP read sits in the queue too; `qits.pd.git-host-timeout-seconds`
-bounds it. `awaitIdle()` is public for the suite, because "nothing was registered" can only be
+The cost is that the spec's HTTP read sits in the queue too;
+`qits.platform.deployments.git-host-timeout-seconds` bounds it. `awaitIdle()` is public for the suite, because "nothing was registered" can only be
 asserted after the worker has had the event.
 
 Transactions are programmatic everywhere in `control`, never `@Transactional` — partly for the
@@ -132,8 +139,8 @@ was ACTIVE before the restart is still serving. Do not "complete" the sweep with
 ## The vocabulary rename, and the alias
 
 `singleton` → `platform`, everywhere: `PdDeploymentTarget.PLATFORM`, container
-`qits-pd-platform-<app>-<id8>`, label `qits.pd.target=platform`, network `qits-platform` (unchanged
-name), key stand-in `platform:<name>` in `ApplicationKeys`.
+`qits-pd-platform-<app>-<id8>`, label `qits.platform.deployments.target=platform`, network
+`qits-platform` (unchanged name), key stand-in `platform:<name>` in `ApplicationKeys`.
 
 **`deployment_target: singleton` remains an accepted alias in the spec parser and nowhere else.** It
 parses to `PLATFORM` and nothing downstream can tell the two apart; the error message for an
@@ -142,21 +149,29 @@ pointed at the word to use. Do not add the alias to the API, the enum or the lab
 repository that has not been edited yet keeps deploying across the cutover, not as a second spelling
 to maintain.
 
-`qits.cd.*` config keys are all `qits.pd.*`. A deployment carrying an old spelling configures
-nothing and fails loudly at boot (SmallRye rejects an unsatisfied `@ConfigProperty`), which is the
-intended failure.
+**The config namespace is `qits.platform.deployments.*`** — `platform` qualifies `deployments`, it
+is not half of one word. It was `qits.cd.*` in the ancestor and `qits.pd.*` for one release here; a
+deployment carrying an old spelling configures nothing and fails loudly at boot (SmallRye rejects an
+unsatisfied `@ConfigProperty`), which is the intended failure. The env form is
+`QITS_PLATFORM_DEPLOYMENTS_*` — every wrapper and compose file that injects run-args moves with it.
 
 ## Adopting what qits-cd left behind
 
-The retired ancestor's containers and networks carry `qits.cd.*` labels. **Nothing here reads them,
-and nothing should start to.** A holder with no `qits.pd.environment` label is unclaimed — a compose
-original, a bootstrap seed, or a qits-cd container — and unclaimed means *adoptable predecessor*.
-Reading `qits.cd.environment` would make those containers look like another tier's and leave them
-running beside their replacements, which is the one failure the cutover exists to prevent.
+The labels are `qits.platform.deployments.*`. Two earlier spellings exist on the host — `qits.cd.*`
+from the retired ancestor and `qits.pd.*` from this component before the namespace was written out
+in full. **Nothing here reads either, and nothing should start to.** A holder with no
+`qits.platform.deployments.environment` label is unclaimed — a compose original, a bootstrap seed, a
+qits-cd container, a container this component started before the rename — and unclaimed means
+*adoptable predecessor*. Reading a legacy label would make those containers look like another tier's
+and leave them running beside their replacements, which is the one failure the cutover exists to
+prevent.
 
-The container **name** prefix moved from `qits-cd-` to `qits-pd-`. It is how a person reads the host
-and what a bootstrap greps; it is never how a predecessor is found (that is the alias). Wrapper and
-component changes land together.
+The container **name** prefix is `qits-pd-` (the ancestor's was `qits-cd-`), and it **stays short
+through the namespace rename**: docker's name charset has no dot, and
+`qits-platform-deployments-<env>-<app>-<id8>` spends 26 characters before the two words a person
+actually reads. So it is the namespace's abbreviation, spelled once in `ContainerNames`. It is how a
+person reads the host and what a bootstrap greps; it is never how a predecessor is found (that is
+the alias). Wrapper and component changes land together.
 
 ## Networks are docker's bookkeeping, never a row
 
@@ -165,8 +180,8 @@ Hub and spoke, as README describes. Two things to leave alone unless you mean it
 - **`aliasHolders` searches the union** of every network the fresh container will be on, legacy one
   included. Narrow it and a deploy starts a second copy beside a container that holds its alias on
   `qits-net` alone — which is every container on the platform until it has been redeployed once.
-- **…and the union is then filtered by the holder's `qits.pd.environment`**, the other half of the
-  same thought. The legacy network is shared by every tier, so the union also returns another tier's
+- **…and the union is then filtered by the holder's `qits.platform.deployments.environment`**, the
+  other half of the same thought. The legacy network is shared by every tier, so the union also returns another tier's
   healthy copy of the same application under the same alias; stopping that would be one tier reaching
   into another. This tier's label → predecessor; another tier's → left alone; **unlabelled** →
   adoptable. A platform deployment keeps only the unlabelled ones.
@@ -176,8 +191,8 @@ Hub and spoke, as README describes. Two things to leave alone unless you mean it
   container, so it passes perfectly well on a network nobody else is on, and the cutover would then
   remove the predecessor under an unreachable successor. The *reconciliation's* joins stay
   best-effort — those are a self-heal, not this deployment's own reachability.
-- **`qits.pd.legacy-network`** (default `qits-net`, `Optional<String>` because SmallRye reads an
-  empty value as absent) is the transition membership. **Emptying it is the enforcement flip**, a
+- **`qits.platform.deployments.legacy-network`** (default `qits-net`, `Optional<String>` because
+  SmallRye reads an empty value as absent) is the transition membership. **Emptying it is the enforcement flip**, a
   later phase that needs every direct cross-application URL migrated first. `LegacyNetworkOffTest`
   already runs that posture. An environment teardown never disconnects anything from it and never
   removes it, even when it IS that environment's bundle — which is exactly the dev tier's shape.
@@ -201,8 +216,8 @@ Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not l
 validation stays at the boundary and the belt stays at the argv.
 
 Mounts and extra env in a *started* container's argv come from the **deployment's own config and
-nowhere else** (`qits.pd.run-args.<application>`). Nothing arriving over HTTP may contribute a token
-to a `docker run`; the API is deliberately open on the platform's networks, and config is the trust
+nowhere else** (`qits.platform.deployments.run-args.<application>`). Nothing arriving over HTTP may
+contribute a token to a `docker run`; the API is deliberately open on the platform's networks, and config is the trust
 domain that already holds the socket.
 `DockerDeploymentDriverTest.runArgsOfAnotherApplicationDoNotLeakIn` asserts the absence as the
 security property. A `docker exec`, or run-args growing an HTTP-writable source, is the regression.
@@ -360,8 +375,9 @@ against.
   the shipped `${user.home}`-rooted H2 default (it relocates `user.home` rather than restating the
   URL), Flyway's migration surviving as a resource, and — the claim the ancestors could not make —
   both domains round-tripping in one process against one database. It points
-  `qits.pd.container-runtime` at a binary that does not exist, which keeps it free of host side
-  effects and proves every driver call degrades to a warning rather than a failure.
+  `qits.platform.deployments.container-runtime` at a binary that does not exist, which keeps it
+  free of host side effects and proves every driver call degrades to a warning rather than a
+  failure.
 - **`PdPackagedSurfaceIT` is also the only test that ever sees the client.** Quinoa is disabled in
   test mode, so no `@QuarkusTest` here has a client at all — a unit test asserting anything about the
   segment would pass against a process serving nothing.
@@ -399,6 +415,13 @@ tarballs by the absolute URL in the lockfile and ignores the configured registry
 lockfile keeps the developer-host origin, which is correct locally.
 
 **This repo is its own deployer**, and its `.config/qits/deployments.yml` says
-`deployment_target: platform` — so a push to `main` is a deployment. A green run announces this
-component to itself and it takes the self-update handoff; the `/platform-deployments` surface blips
-mid-cutover, and a successor that misses its health gate leaves the predecessor serving.
+`deployment_target: platform` — so a push to **`platform/main`** is a deployment. A green run
+announces this component to itself and it takes the self-update handoff; the `/platform-deployments`
+surface blips mid-cutover, and a successor that misses its health gate leaves the predecessor
+serving.
+
+**The platform plane's deploy branch is `platform/main`, not `main`** — `SpecSource.DeploymentSpec.
+DEFAULT_PLATFORM_BRANCH`, the mirror of a tier's `environment/<name>`. `main` is the integration
+trunk on both planes: a push to it builds and ships nothing, and a release reaches the platform by
+fast-forwarding `platform/main` onto it. A spec's own `branch:` still overrides. Changing the
+constant changes where every platform service listens, this repo included.

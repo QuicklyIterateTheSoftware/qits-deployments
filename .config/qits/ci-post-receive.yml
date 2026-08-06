@@ -23,8 +23,10 @@
 # in this file changes for that; it is worth knowing because the /platform-deployments surface blips
 # mid-cutover, and a successor that misses its health gate leaves the predecessor serving.
 #
-# This repo deploys as a PLATFORM service (.config/qits/deployments.yml), from `main`. So a push to
-# main is a deployment here, unlike the environment-tiered repos where main only builds.
+# This repo deploys as a PLATFORM service (.config/qits/deployments.yml), from `platform/main` — the
+# plane's conventional deploy branch, the mirror of a tier's `environment/<name>`. So a push to
+# `platform/main` is a deployment here; a push to `main` builds and ships nothing, the same as on
+# every environment-tiered repo.
 steps:
   - image: qits/build-images/node-docker-base:latest
     docker: true

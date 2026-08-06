@@ -81,8 +81,9 @@
 # but it also could not shrink, and the two halves had to agree over HTTP about a decision that is
 # one transaction. One component, one socket, one database.
 #
-# Only docker's CLI is here. `qits.pd.container-runtime` names the binary this component invokes, so
-# pointing it at anything else makes supplying that CLI the deployment's problem.
+# Only docker's CLI is here. `qits.platform.deployments.container-runtime` names the binary this
+# component invokes, so pointing it at anything else makes supplying that CLI the deployment's
+# problem.
 #
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
