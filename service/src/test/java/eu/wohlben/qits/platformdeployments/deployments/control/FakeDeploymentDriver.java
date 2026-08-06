@@ -59,8 +59,16 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private final List<Endpoint> platformServices = Collections.synchronizedList(new ArrayList<>());
   private final List<String> aliasSearches = Collections.synchronizedList(new ArrayList<>());
 
-  /** Networks docker refuses to join, by name — what a real join failure looks like to cd. */
+  /** Networks docker refuses to join, by name — what a real join failure looks like. */
   private final java.util.Map<String, String> refusedJoins = new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * Runs INSIDE {@link #removeEnvironmentContainers}, so a test can observe the world at the moment
+   * the docker teardown happens. It is how the "docker first, rows last" order is asserted: the
+   * ancestor could watch the registry's own socket for it, and with one service the only way to see
+   * the ordering is from inside a driver call.
+   */
+  private volatile Runnable duringContainerReap = () -> {};
 
   public void reset() {
     ensuredNetworks.clear();
@@ -89,6 +97,12 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     platformServices.clear();
     aliasSearches.clear();
     refusedJoins.clear();
+    duringContainerReap = () -> {};
+  }
+
+  /** What to run while the environment's containers are being reaped. See the field. */
+  public void scriptDuringContainerReap(Runnable hook) {
+    duringContainerReap = hook;
   }
 
   /** Script docker refusing to join anything to this network, with that message. */
@@ -307,6 +321,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   @Override
   public int removeEnvironmentContainers(String environmentId) {
     removedEnvironments.add(environmentId);
+    duringContainerReap.run();
     return 0;
   }
 }

@@ -17,6 +17,7 @@ import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -369,16 +370,28 @@ public class PdEnvironmentApiTest {
   public void theDockerTeardownRunsBeforeTheRowsGo() {
     // The order is the contract. The teardown is label-driven and needs nothing from the topology,
     // but deleting the tier first would leave a failed teardown with no row to retry it from — so a
-    // half-finished teardown stays addressable. With the two services merged this is no longer two
-    // processes agreeing on an order; it is one method, and this is what pins it.
+    // half-finished teardown stays addressable.
+    //
+    // With the two services merged this is no longer two processes agreeing on an order; it is one
+    // method, and the only place the ordering is observable from is inside a driver call. The hook
+    // below runs while the containers are being reaped and reads the tier back over HTTP: still 200
+    // there means the rows had not gone yet.
     String environmentId = create("env-order");
+    AtomicInteger statusDuringReap = new AtomicInteger();
+    driver.scriptDuringContainerReap(
+        () ->
+            statusDuringReap.set(
+                given().when().get(ENVIRONMENTS + "/" + environmentId).thenReturn().statusCode()));
 
     given().when().delete(ENVIRONMENTS + "/" + environmentId).then().statusCode(204);
 
-    List<String> calls = driver.calls();
+    assertEquals(
+        200,
+        statusDuringReap.get(),
+        "the tier is still addressable while its containers are being reaped");
     assertTrue(
-        driver.removedEnvironments().contains(environmentId) && !calls.isEmpty(),
-        "the containers were reaped: " + calls);
+        driver.removedEnvironments().contains(environmentId),
+        "the containers were reaped: " + driver.calls());
     assertTrue(
         driver.removedNetworks().contains("qits-env-env-order"),
         "and the network removed: " + driver.removedNetworks());
