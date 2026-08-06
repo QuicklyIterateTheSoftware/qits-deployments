@@ -126,14 +126,27 @@ public class EnvironmentService {
             });
   }
 
+  /**
+   * <b>Every read here brackets itself with {@link QuarkusTransaction#joiningExisting()}</b>, and
+   * that is not decoration. A JAX-RS caller has a request context and Hibernate would answer a read
+   * without a transaction — but the topology's other caller is the deploy worker, a bare daemon
+   * thread with neither, and there the same call throws {@code ContextNotActiveException}. That
+   * hazard is new with the merge: the topology used to be an HTTP call, which needs no session at
+   * all. Joining rather than requiring a new one keeps a caller that already has a transaction
+   * (this service's own writes) in it, so an entity returned to it stays managed.
+   */
   public PdEnvironment require(String environmentId) {
-    return environments
-        .findByIdOptional(environmentId)
-        .orElseThrow(() -> new NotFoundException("No such environment: " + environmentId));
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () ->
+                environments
+                    .findByIdOptional(environmentId)
+                    .orElseThrow(
+                        () -> new NotFoundException("No such environment: " + environmentId)));
   }
 
   public List<PdEnvironment> list() {
-    return environments.listNewestFirst();
+    return QuarkusTransaction.joiningExisting().call(() -> List.copyOf(environments.listNewestFirst()));
   }
 
   /**
@@ -144,7 +157,8 @@ public class EnvironmentService {
    * matched them itself. One database, one query, one index ({@code idx_pd_environment_branch}).
    */
   public List<PdEnvironment> onBranch(String branch) {
-    return environments.listByBranch(branch);
+    return QuarkusTransaction.joiningExisting()
+        .call(() -> List.copyOf(environments.listByBranch(branch)));
   }
 
   private static boolean isBlank(String value) {

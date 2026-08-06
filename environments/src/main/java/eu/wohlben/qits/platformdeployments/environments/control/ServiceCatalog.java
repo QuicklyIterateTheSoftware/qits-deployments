@@ -205,26 +205,48 @@ public class ServiceCatalog {
             });
   }
 
+  /**
+   * <b>Every read below brackets itself with {@link QuarkusTransaction#joiningExisting()}</b>, and
+   * that is not decoration. A JAX-RS caller has a request context and Hibernate would answer a read
+   * without a transaction — but the catalogue's other caller is the deploy worker, a bare daemon
+   * thread with neither, and there the same call throws {@code ContextNotActiveException}. That
+   * hazard is new with the merge: derived registration used to reach the catalogue over HTTP, which
+   * needs no session at all. Joining rather than requiring a new one keeps a caller that already
+   * has a transaction ({@link #delete}) in it, so the entity it reads stays managed.
+   */
+
   /** Every service, oldest first, each with the environments it is linked into. */
   public List<LinkedService> list() {
-    List<LinkedService> catalogue = new ArrayList<>();
-    for (PdService service : services.listOldestFirst()) {
-      catalogue.add(new LinkedService(service, links.listEnvironmentIdsOf(service.id)));
-    }
-    return catalogue;
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () -> {
+              List<LinkedService> catalogue = new ArrayList<>();
+              for (PdService service : services.listOldestFirst()) {
+                catalogue.add(new LinkedService(service, links.listEnvironmentIdsOf(service.id)));
+              }
+              return List.copyOf(catalogue);
+            });
   }
 
   /** The one row a name can have, or empty — the deploy orchestration's read half. */
   public Optional<LinkedService> find(String name) {
-    return services
-        .findByName(name)
-        .map(service -> new LinkedService(service, links.listEnvironmentIdsOf(service.id)));
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () ->
+                services
+                    .findByName(name)
+                    .map(
+                        service ->
+                            new LinkedService(service, links.listEnvironmentIdsOf(service.id))));
   }
 
   public PdService require(String name) {
-    return services
-        .findByName(name)
-        .orElseThrow(() -> new NotFoundException("No such service: " + name));
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () ->
+                services
+                    .findByName(name)
+                    .orElseThrow(() -> new NotFoundException("No such service: " + name)));
   }
 
   /**
@@ -239,12 +261,17 @@ public class ServiceCatalog {
    * @throws NotFoundException if the environment does not exist
    */
   public List<PdService> linksOf(String environmentId) {
-    environments
-        .findByIdOptional(environmentId)
-        .orElseThrow(() -> new NotFoundException("No such environment: " + environmentId));
-    List<PdService> present = new ArrayList<>(links.listServicesOf(environmentId));
-    present.addAll(services.listPlatformServices());
-    return present;
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () -> {
+              environments
+                  .findByIdOptional(environmentId)
+                  .orElseThrow(
+                      () -> new NotFoundException("No such environment: " + environmentId));
+              List<PdService> present = new ArrayList<>(links.listServicesOf(environmentId));
+              present.addAll(services.listPlatformServices());
+              return List.copyOf(present);
+            });
   }
 
   /**
@@ -256,11 +283,15 @@ public class ServiceCatalog {
    * through the flat listing, which is why that listing exists.
    */
   public List<ApplicationView> applicationsOf(PdEnvironment environment) {
-    List<ApplicationView> scoped = new ArrayList<>();
-    for (PdService service : links.listServicesOf(environment.id)) {
-      scoped.add(new ApplicationView(service, environment.id, environment.name));
-    }
-    return List.copyOf(scoped);
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () -> {
+              List<ApplicationView> scoped = new ArrayList<>();
+              for (PdService service : links.listServicesOf(environment.id)) {
+                scoped.add(new ApplicationView(service, environment.id, environment.name));
+              }
+              return List.copyOf(scoped);
+            });
   }
 
   /**
@@ -272,23 +303,28 @@ public class ServiceCatalog {
    * most wants to find.
    */
   public List<ApplicationView> allApplications() {
-    Map<String, String> environmentNames = new LinkedHashMap<>();
-    for (PdEnvironment environment : environments.listNewestFirst()) {
-      environmentNames.put(environment.id, environment.name);
-    }
-    List<ApplicationView> views = new ArrayList<>();
-    for (LinkedService linked : list()) {
-      if (linked.service().deploymentTarget == PdDeploymentTarget.PLATFORM
-          || linked.environmentIds().isEmpty()) {
-        views.add(new ApplicationView(linked.service(), null, null));
-        continue;
-      }
-      for (String environmentId : linked.environmentIds()) {
-        views.add(
-            new ApplicationView(linked.service(), environmentId, environmentNames.get(environmentId)));
-      }
-    }
-    return List.copyOf(views);
+    return QuarkusTransaction.joiningExisting()
+        .call(
+            () -> {
+              Map<String, String> environmentNames = new LinkedHashMap<>();
+              for (PdEnvironment environment : environments.listNewestFirst()) {
+                environmentNames.put(environment.id, environment.name);
+              }
+              List<ApplicationView> views = new ArrayList<>();
+              for (LinkedService linked : list()) {
+                if (linked.service().deploymentTarget == PdDeploymentTarget.PLATFORM
+                    || linked.environmentIds().isEmpty()) {
+                  views.add(new ApplicationView(linked.service(), null, null));
+                  continue;
+                }
+                for (String environmentId : linked.environmentIds()) {
+                  views.add(
+                      new ApplicationView(
+                          linked.service(), environmentId, environmentNames.get(environmentId)));
+                }
+              }
+              return List.copyOf(views);
+            });
   }
 
   private static boolean isBlank(String value) {

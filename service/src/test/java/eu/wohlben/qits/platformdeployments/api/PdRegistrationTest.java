@@ -1,0 +1,339 @@
+package eu.wohlben.qits.platformdeployments.api;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+import eu.wohlben.qits.platformdeployments.deployments.control.DeployService;
+import eu.wohlben.qits.platformdeployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platformdeployments.deployments.control.FakeSpecSource;
+import eu.wohlben.qits.platformdeployments.deployments.control.SpecSource;
+import eu.wohlben.qits.platformdeployments.environments.entity.PdDeploymentTarget;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
+import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Derived registration and deploy resolution: what a green build <b>writes</b> into the catalogue,
+ * and what it <b>reads back</b> to decide where to deploy.
+ *
+ * <p>The ancestor's version of this suite ran against a stub HTTP server standing in for
+ * qits-serviceregistry, and had a twin ({@code CdRegistryOutageTest}) for the case where the peer
+ * was down. Both dissolved with the merge: registration is a local transaction, so there is no wire
+ * to stub and no outage to have a posture about. Every claim the first suite made survives here,
+ * asserted through this component's own read surface instead of through a stub's recorded calls.
+ * The claims of the second are gone with the failure mode — except one, which was never about the
+ * peer at all and is held by {@code PdPinApiTest}: the pins read nothing but deployment rows.
+ */
+@QuarkusTest
+public class PdRegistrationTest {
+
+  private static final String SHA_A = "a".repeat(40);
+  private static final String SHA_B = "b".repeat(40);
+
+  @Inject FakeDeploymentDriver driver;
+  @Inject FakeSpecSource specs;
+  @Inject DeployService deployService;
+
+  @BeforeEach
+  void reset() {
+    driver.reset();
+    specs.reset();
+  }
+
+  @Test
+  public void aGreenBuildRegistersTheServiceAndLinksItIntoEveryMatchingTier() {
+    // Two tiers on one branch is legitimate, and the link set written has to carry both: the upsert
+    // replaces the whole set, so one link at a time would unlink the other.
+    String one = createEnvironment("reg-one", "environment/reg-shared");
+    String two = createEnvironment("reg-two", "environment/reg-shared");
+    postBuildSucceeded("repo-reg", "environment/reg-shared", SHA_A);
+    awaitStarted(2);
+
+    Map<String, Object> service = service("repo-reg");
+    assertEquals("ENVIRONMENT", service.get("target"));
+    assertNull(service.get("branch"), "an environment service takes its branch from its tier");
+    assertEquals(List.of(one, two), service.get("environmentIds"));
+  }
+
+  @Test
+  public void aBuildOnOneBranchKeepsTheLinksAnotherTierAlreadyHad() {
+    // The regression this guards: the upsert replaces the link set, so a build on environment/dev
+    // that sent only dev's id would silently unlink preprod.
+    String dev = createEnvironment("reg-dev", "environment/reg-dev");
+    String preprod = createEnvironment("reg-preprod", "environment/reg-preprod");
+    postBuildSucceeded("repo-both", "environment/reg-preprod", SHA_A);
+    awaitStarted(1);
+    postBuildSucceeded("repo-both", "environment/reg-dev", SHA_B);
+    awaitStarted(2);
+
+    assertEquals(
+        List.of(preprod, dev),
+        service("repo-both").get("environmentIds"),
+        "the preprod link survived the dev build");
+  }
+
+  @Test
+  public void aPublicNodeIsRegisteredWithAvailableOnEnv() {
+    String environmentId = createEnvironment("reg-hub", "environment/reg-hub");
+    specs.script(
+        "repo-reg-gw",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null));
+    postBuildSucceeded("repo-reg-gw", "environment/reg-hub", SHA_A);
+    awaitStarted(1);
+
+    Map<String, Object> service = service("repo-reg-gw");
+    assertEquals(true, service.get("availableOnEnv"), "the spec's availableOnEnv is written down");
+    assertEquals(List.of(environmentId), service.get("environmentIds"));
+  }
+
+  @Test
+  public void aPlatformServiceIsRegisteredWithItsOwnBranchAndNoLinks() {
+    // A platform service has NO links, and that absence is the model: it is implicitly present
+    // everywhere, which is what makes a new environment pick it up without anyone editing it.
+    createEnvironment("reg-platform", "environment/reg-platform");
+    specs.script(
+        "repo-reg-idp",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, "release", null));
+    postBuildSucceeded("repo-reg-idp", "release", SHA_A);
+    awaitStarted(1);
+
+    Map<String, Object> service = service("repo-reg-idp");
+    assertEquals("PLATFORM", service.get("target"));
+    assertEquals("release", service.get("branch"));
+    assertEquals(List.of(), service.get("environmentIds"));
+  }
+
+  @Test
+  public void theRetiredSingletonSpellingStillRegistersAPlatformService() {
+    // The alias is not a parser curiosity: a repository still carrying the word must keep deploying
+    // across the cutover, and what it gets has to be the platform plane in every respect.
+    createEnvironment("reg-alias", "environment/reg-alias");
+    specs.script(
+        "repo-alias", DeploymentSpecParserAlias.parse("deployment_target: singleton\n"));
+    postBuildSucceeded("repo-alias", "main", SHA_A);
+    awaitStarted(1);
+
+    assertEquals("PLATFORM", service("repo-alias").get("target"));
+    assertTrue(
+        driver.started().get(0).containerName().startsWith("qits-pd-platform-repo-alias-"),
+        driver.started().get(0).containerName());
+  }
+
+  @Test
+  public void aRepositoryThatNamesNoHealthPathGetsTheConventionOne() {
+    // The debt this closes: registration once had no source for the path, so every row was written
+    // null and every service mounted under its own prefix failed a gate against a URL that 404s.
+    createEnvironment("reg-health", "environment/reg-health");
+    postBuildSucceeded("qits-observability", "environment/reg-health", SHA_A);
+    awaitStarted(1);
+
+    assertEquals(
+        "/observability/q/health/ready",
+        service("qits-observability").get("healthPath"),
+        "the convention is derived from the name and WRITTEN, not left to the deploy default");
+    assertEquals("/observability/q/health/ready", driver.started().get(0).healthPath());
+  }
+
+  @Test
+  public void theRepositorysOwnHealthPathWinsOverTheConvention() {
+    // The gateway owns the root path space, so the convention would send its gate to a 404.
+    createEnvironment("reg-health-gw", "environment/reg-health-gw");
+    specs.script(
+        "qits-gateway",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, "/q/health/ready"));
+    postBuildSucceeded("qits-gateway", "environment/reg-health-gw", SHA_A);
+    awaitStarted(1);
+
+    assertEquals("/q/health/ready", service("qits-gateway").get("healthPath"));
+  }
+
+  @Test
+  public void anOperatorsHealthPathSurvivesAReRegistration() {
+    // A path already on the row is somebody's fix for a service the convention could not guess. A
+    // later green build that says nothing about the path must leave it alone.
+    String environmentId = createEnvironment("reg-health-keep", "environment/reg-health-keep");
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            Map.of(
+                "deploymentTarget", "ENVIRONMENT",
+                "availableOnEnv", false,
+                "healthPath", "/hand/placed/health",
+                "environmentIds", List.of(environmentId)))
+        .when()
+        .put("/platform-deployments/api/services/qits-odd")
+        .then()
+        .statusCode(201);
+
+    postBuildSucceeded("qits-odd", "environment/reg-health-keep", SHA_A);
+    awaitStarted(1);
+
+    assertEquals("/hand/placed/health", service("qits-odd").get("healthPath"));
+  }
+
+  @Test
+  public void aPlatformServiceGetsTheSameHealthPathResolution() {
+    // The platform plane is not a different rule: the convention, the spec and an existing value
+    // rank the same way there.
+    specs.script(
+        "qits-idp", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
+    postBuildSucceeded("qits-idp", "main", SHA_A);
+    awaitStarted(1);
+
+    assertEquals("/idp/q/health/ready", service("qits-idp").get("healthPath"));
+    assertEquals("/idp/q/health/ready", driver.started().get(0).healthPath());
+  }
+
+  @Test
+  public void aBranchNoTierTracksWritesNothingAtAll() {
+    // 202 and silence is the normal answer for a green build on a branch without an environment,
+    // and it must not leave a service row behind that later looks like a registration.
+    createEnvironment("reg-quiet", "environment/reg-quiet");
+    postBuildSucceeded("repo-quiet", "main", SHA_A);
+    awaitWorkerIdle();
+
+    assertNull(service("repo-quiet"), "nothing was registered");
+    assertEquals(List.of(), driver.started());
+  }
+
+  @Test
+  public void aRepositoryWhoseIdIsNotADnsLabelRegistersNothing() {
+    // The name is the image path segment and the network alias, so a repository that cannot be one
+    // cannot be deployed by convention at all. The intake is fire-and-forget, so this is a log line
+    // and a silence rather than a row nobody can act on.
+    createEnvironment("reg-badname", "environment/reg-badname");
+    postBuildSucceeded("Repo-Bad", "environment/reg-badname", SHA_A);
+    awaitWorkerIdle();
+
+    assertEquals(List.of(), driver.started());
+  }
+
+  @Test
+  public void anUnreadableSpecResolvesFromTheLinksTheServiceAlreadyHas() {
+    // The spec read is the one remote call left, so it is the one that can still fail. When it
+    // does, the failure is recorded where the service is already registered — never guessed at.
+    String environmentId = createEnvironment("reg-fallback", "environment/reg-fallback");
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            Map.of(
+                "deploymentTarget", "ENVIRONMENT",
+                "availableOnEnv", false,
+                "environmentIds", List.of(environmentId)))
+        .when()
+        .put("/platform-deployments/api/services/repo-fallback")
+        .then()
+        .statusCode(201);
+    specs.scriptFailure("repo-fallback", "the git host answered 500");
+
+    postBuildSucceeded("repo-fallback", "environment/reg-fallback", SHA_A);
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+    assertEquals("FAILED", deployments.get(0).get("status"));
+    assertTrue(
+        ((String) deployments.get(0).get("detail")).contains("the git host answered 500"),
+        "the cause is on the row: " + deployments.get(0).get("detail"));
+    assertEquals(List.of(), driver.pulledRefs(), "a topology is never guessed");
+  }
+
+  // --- helpers ----------------------------------------------------------------------------------
+
+  /** The spec parser, reached through its own package so the alias case reads as a real file. */
+  private static final class DeploymentSpecParserAlias {
+    static SpecSource.DeploymentSpec parse(String yaml) {
+      return eu.wohlben.qits.platformdeployments.deployments.control.DeploymentSpecParser.parse(
+          yaml, "a test file");
+    }
+  }
+
+  private String createEnvironment(String name, String branch) {
+    return given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("name", name, "branch", branch))
+        .when()
+        .post("/platform-deployments/api/environments")
+        .then()
+        .statusCode(201)
+        .extract()
+        .path("environment.id");
+  }
+
+  private void postBuildSucceeded(String repoId, String branch, String sha) {
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("runId", "run-reg", "repoId", repoId, "branch", branch, "commitSha", sha))
+        .when()
+        .post("/platform-deployments/api/events/build-succeeded")
+        .then()
+        .statusCode(202);
+  }
+
+  /** One service off the catalogue read, or null — the surface a caller checks registration on. */
+  private Map<String, Object> service(String name) {
+    return given()
+        .when()
+        .get("/platform-deployments/api/services")
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .<Map<String, Object>>getList("services")
+        .stream()
+        .filter(s -> name.equals(s.get("name")))
+        .findFirst()
+        .orElse(null);
+  }
+
+  private void awaitStarted(int count) {
+    long deadline = System.currentTimeMillis() + 15_000;
+    while (driver.started().size() < count && System.currentTimeMillis() < deadline) {
+      sleep();
+    }
+    assertEquals(count, driver.started().size(), "started containers");
+  }
+
+  private List<Map<String, Object>> awaitDeployments(String environmentId, int count) {
+    long deadline = System.currentTimeMillis() + 15_000;
+    while (System.currentTimeMillis() < deadline) {
+      List<Map<String, Object>> deployments =
+          given()
+              .when()
+              .get("/platform-deployments/api/deployments?environmentId=" + environmentId)
+              .then()
+              .statusCode(200)
+              .extract()
+              .jsonPath()
+              .getList("deployments");
+      if (deployments.size() == count
+          && deployments.stream()
+              .noneMatch(
+                  d -> "QUEUED".equals(d.get("status")) || "STARTING".equals(d.get("status")))) {
+        return deployments;
+      }
+      sleep();
+    }
+    return fail("deployments of " + environmentId + " did not settle to " + count);
+  }
+
+  private void awaitWorkerIdle() {
+    try {
+      deployService.awaitIdle();
+    } catch (Exception e) {
+      throw new IllegalStateException("the deploy worker did not drain", e);
+    }
+  }
+
+  private static void sleep() {
+    try {
+      Thread.sleep(50);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+}
