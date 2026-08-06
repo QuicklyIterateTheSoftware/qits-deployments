@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-platform-deployments</artifactId>
+        <version>2026.0.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The TOPOLOGY domain: environments (tiers), services (one row per service, not one per
+         tier), and the links that say which service runs in which environment. A plain library jar
+         — entities, persistence, control, mapper, dto — with NO web/JAX-RS, no HTTP client and no
+         process shell-out. It stores rows and enforces rules; it decides nothing about containers.
+
+         It knows nothing about deployments, and that direction is the partition: `deployments`
+         depends on this module, never the reverse. A service is identified by its NAME — the same
+         name that is its image path segment, its network alias and part of every container name —
+         and no column here holds another context's key.
+
+         IT ALSO OWNS THE PERSISTENCE CONFIGURATION AND THE SCHEMA for the whole component, and
+         that is deliberate rather than an accident of layering. The component is ONE database
+         (`platformdeployments`) with ONE Flyway lineage, so both have to be declared exactly once:
+         two library jars each shipping a META-INF/microprofile-config.properties at ordinal 100
+         with the same datasource key would make the winner arbitrary. This module is the one both
+         others depend on, so it is where "once" can live. The persistence unit therefore lists the
+         entity packages of BOTH domains — see src/main/resources/META-INF/microprofile-config.properties.
+
+         The directory is `environments/` and the artifactId is
+         `qits-platform-deployments-environments`. -->
+    <artifactId>qits-platform-deployments-environments</artifactId>
+    <name>qits-platform-deployments :: environments</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <!-- ObjectMapper bean availability for consumers (no REST needed). -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-validator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mapstruct</groupId>
+            <artifactId>mapstruct</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- The consuming Quarkus app needs an index of this jar's beans and entities. -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

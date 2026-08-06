@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Standalone parent for the qits-platform-deployments repo: the platform component that owns
+         BOTH halves of "what runs where" — the topology (which environments exist, which services
+         are linked into each, what shape each service has) and the execution (pull an image, start
+         a container, health-gate it, cut over, record it).
+
+         IT IS ONE COMPONENT BECAUSE THE TWO HALVES ARE ONE DECISION. They were split across
+         qits-cd and qits-serviceregistry for one release, and the boundary was wrong in both
+         directions: the executor held a docker socket and fanned every green build out over every
+         matching environment — cross-environment behaviour wearing an environment citizen's label —
+         while the registry that owned the topology could act on none of it. Registration and
+         resolution became an HTTP round trip between two databases for a decision that is one
+         transaction. This repo puts them back together and partitions them properly instead:
+
+           environments/  the topology domain — environments, services, links, and the rules over
+                          them (a link is presence; a platform service has none and is therefore
+                          everywhere). Owns the datasource and the schema.
+           deployments/   the execution domain — deployment rows, the deploy orchestration, the
+                          rollback pins, the run-args convention, and the docker SEAM.
+           service/       the adapters — JAX-RS for both domains, the docker driver, the git-host
+                          spec reader, the build-succeeded intake, and the web client.
+
+         `deployments` depends on `environments` and never the reverse: execution reads and writes
+         the topology, the topology knows nothing about containers. Neither domain module carries
+         JAX-RS, an HTTP client or a process shell-out — those live in `service/`, behind the seams
+         the domain declares.
+
+         The qits-ci case exactly: DELIBERATELY ITS OWN GAV, no <parent>, versions that must stay in
+         step with the platform (Quarkus, JDK release, MapStruct, Lombok) duplicated on purpose — a
+         clone of THIS repo alone must build, with no monorepo and no parent to inherit from. The
+         coordinates are namespaced (`eu.wohlben.qits:qits-platform-deployments-*`) so generic
+         module names cannot collide in a shared ~/.m2. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-platform-deployments</artifactId>
+    <!-- A PLACEHOLDER until this repo's first release train runs. The platform's release flow stamps
+         a calver version (`<year>.<mmdd-ish>.<hhmmss>`, as every released sibling carries) onto the
+         merge commit, so nothing here is meant to be edited by hand and nothing depends on the
+         value. It is deliberately NOT a `-SNAPSHOT`: the image build resolves this reactor from
+         source, so a snapshot coordinate would only invite a resolver to look for one in a
+         repository that will never hold it. -->
+    <version>2026.0.0</version>
+    <packaging>pom</packaging>
+    <name>qits-platform-deployments</name>
+
+    <modules>
+        <!-- Listed in dependency order: `deployments` depends on `environments`, `service` on both. -->
+        <module>environments</module>
+        <module>deployments</module>
+        <module>service</module>
+    </modules>
+
+    <properties>
+        <qits.auth-core.version>2026.802.154953</qits.auth-core.version>
+        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+
+        <!-- Quinoa is in NO BOM, so the version is pinned here rather than inherited, and it is
+             pinned in the PARENT rather than beside the dependency so there is one place to read it
+             from when the platform's Quarkus moves. 2.8.2 is the last release built against a
+             Quarkus OLDER than the platform's 3.34.6 (3.27.3 LTS — the compatible direction); 2.8.3
+             is built against 3.36.2, ahead of us. Bump only when the platform's Quarkus passes the
+             version a Quinoa release is built against
+             (docs/project-setup-quinoa-angular.md in the qits superproject). -->
+        <quinoa.version>2.8.2</quinoa.version>
+
+        <compiler-plugin.version>3.15.0</compiler-plugin.version>
+        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+        <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
+        <jandex-plugin.version>3.4.0</jandex-plugin.version>
+        <lombok.version>1.18.38</lombok.version>
+        <lombok-mapstruct-binding.version>0.2.0</lombok-mapstruct-binding.version>
+        <mapstruct.version>1.6.3</mapstruct.version>
+
+        <!-- `mvn verify` must be green on a clone with no docker — the suites fake the one seam
+             that needs it (FakeDeploymentDriver). The packaged-artifact IT runs with
+             -DskipITs=false, and `service`'s `native` profile flips it so a -Dnative build
+             exercises the binary it just compiled instead of packaging it and asserting nothing.
+             It is skipped by default for a second reason: it runs against the BUILT artifact, so it
+             needs a `package` to have happened, and a package here needs a checked-out webui
+             submodule and a node on PATH — neither of which the clone-alone rule promises. Ask for
+             it explicitly. -->
+        <skipITs>true</skipITs>
+
+        <!-- Surefire's @{argLine} has no value unless something (jacoco/quarkus) sets it. -->
+        <argLine/>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>${lombok.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mapstruct</groupId>
+                <artifactId>mapstruct</artifactId>
+                <version>${mapstruct.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The Angular client in service/src/main/webui. See the pin's reasoning at
+                     quinoa.version above; the dependency itself is declared in service/pom.xml. -->
+                <groupId>io.quarkiverse.quinoa</groupId>
+                <artifactId>quarkus-quinoa</artifactId>
+                <version>${quinoa.version}</version>
+            </dependency>
+            <!-- The reactor's own modules, so the dependants declare them version-less. -->
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-platform-deployments-environments</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-platform-deployments-deployments</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Published by qits-integrations-quarkus into the platform Maven repository. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-auth-core</artifactId>
+                <version>${qits.auth-core.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>${quarkus.platform.group-id}</groupId>
+                    <artifactId>quarkus-maven-plugin</artifactId>
+                    <version>${quarkus.platform.version}</version>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${compiler-plugin.version}</version>
+                    <configuration>
+                        <parameters>true</parameters>
+                        <!-- Incremental compilation leaves stale MapStruct *Impl classes behind
+                             when a mapper's shape changes; the siblings disable it for the same
+                             reason. -->
+                        <useIncrementalCompilation>false</useIncrementalCompilation>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.mapstruct</groupId>
+                                <artifactId>mapstruct-processor</artifactId>
+                                <version>${mapstruct.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok-mapstruct-binding</artifactId>
+                                <version>${lombok-mapstruct-binding.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire-plugin.version}</version>
+                    <configuration>
+                        <systemPropertyVariables>
+                            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${failsafe-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>io.smallrye</groupId>
+                    <artifactId>jandex-maven-plugin</artifactId>
+                    <version>${jandex-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>make-index</id>
+                            <goals>
+                                <goal>jandex</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

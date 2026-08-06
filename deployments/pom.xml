@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-platform-deployments</artifactId>
+        <version>2026.0.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- The EXECUTION domain: the recorded deployments, the orchestration that produces them, the
+         rollback pins read off them, the strict deployment-spec parser, and the two SEAMS this
+         module cannot implement itself — the docker driver and the git-host spec source. A plain
+         library jar: NO web/JAX-RS, no HTTP client, no docker client. The whole of what reaches
+         outside the process is an interface here and an implementation in `service/`.
+
+         It depends on `environments` because deploying is a decision about the topology: a green
+         build registers the repository's service and asks which tiers track the branch. That
+         dependency is one-way and is the partition — the topology knows nothing about containers.
+         In-process, so registration writes rows in the same transaction and resolution is a
+         repository query; the HTTP client, the stub server and the outage posture the previous
+         two-service split needed all dissolved with the merge.
+
+         The directory is `deployments/` and the artifactId is
+         `qits-platform-deployments-deployments`. Doubled, and deliberately so: the module is the
+         deployments domain of the qits-platform-deployments repo, and shortening either half would
+         make the coordinate ambiguous in a shared ~/.m2. -->
+    <artifactId>qits-platform-deployments-deployments</artifactId>
+    <name>qits-platform-deployments :: deployments</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-platform-deployments-environments</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-orm-panache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jackson</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-hibernate-validator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mapstruct</groupId>
+            <artifactId>mapstruct</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <!-- The consuming Quarkus app needs an index of this jar's beans and entities. -->
+                <groupId>io.smallrye</groupId>
+                <artifactId>jandex-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
