@@ -85,6 +85,20 @@ public class PdPackagedSurfaceIT {
     given().when().get(SEGMENT + "/").then().statusCode(200).contentType(ContentType.HTML);
   }
 
+  /**
+   * The fourth spelling of the segment, and the only one no build here can check any other way: the
+   * client's own baseHref, set in qits-platform-spa-deployments' angular.json. A page served with
+   * the wrong one loads and then fetches its own JavaScript from a segment nothing serves — green
+   * build, blank screen. The other three are {@code quarkus.quinoa.ui-root-path}, {@code
+   * quarkus.rest.path} and {@code quarkus.http.non-application-root-path}.
+   */
+  @Test
+  public void theClientAsksForItsAssetsUnderThisSegment() {
+    String index = given().when().get(SEGMENT + "/").then().statusCode(200).extract().asString();
+    String expected = "<base href=\"" + SEGMENT + "/\">";
+    assertTrue(index.contains(expected), "index.html does not carry " + expected);
+  }
+
   @Test
   public void aDeepLinkFallsBackToTheClientSoItsRouterOwnsIt() {
     given()
