@@ -21,7 +21,7 @@
          A DEPLOYABLE APP, not a library JAR — <packaging>quarkus</packaging> binds augmentation
          into the lifecycle so it cannot be silently misplaced (the migration-deployables-plan.md
          reasoning, verbatim from the siblings). It serves its own client: src/main/webui is the
-         qits-spa-cd submodule, which Quinoa builds into this artifact during augmentation, so one
+         qits-platform-spa-deployments submodule, which Quinoa builds into this artifact during augmentation, so one
          process answers /platform-deployments/ and /platform-deployments/api and the gateway needs
          no second upstream.
 
@@ -97,7 +97,7 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
-            <!-- The Angular SPA in src/main/webui (a submodule on qits-spa-cd's main): Quinoa runs
+            <!-- The Angular SPA in src/main/webui (a submodule on qits-platform-spa-deployments's main): Quinoa runs
                  its npm build during augmentation and registers the output as static resources.
                  Quinoa is in NO BOM, so the version is pinned — in the ROOT pom's
                  dependencyManagement, with the reasoning for 2.8.2 beside the property. Its build

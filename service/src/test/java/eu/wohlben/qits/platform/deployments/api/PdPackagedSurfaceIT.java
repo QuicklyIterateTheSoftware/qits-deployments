@@ -40,13 +40,13 @@ import org.junit.jupiter.api.Test;
  * is actually served as is proven here or nowhere, and the probe list is the platform's, from
  * {@code docs/project-setup-quinoa-angular.md}.
  *
- * <p><b>The base-href probe is deliberately absent, and its absence is a known debt.</b> The client
- * is qits-spa-cd, whose {@code angular.json} still says {@code /cd/} — its cutover onto this
- * component's segment is a commit in that repository. Asserting {@code <base href="/platform-
- * deployments/">} here would fail the build for something no change in this repo can fix, and
- * asserting {@code /cd/} would pin the wrong value into a test. So this suite asserts what the
- * SERVER owes — the client is served at the segment, deep links reach it, machine paths never do —
- * and the base href joins it in the commit that fixes it. See AGENTS.md.
+ * <p><b>The base-href probe is still absent, and the reason it was absent has gone.</b> It was left
+ * out while the client said {@code /cd/}: asserting the right value would have failed the build for
+ * something no change in this repo could fix, and asserting {@code /cd/} would have pinned the wrong
+ * value into a test. The client is qits-platform-spa-deployments now and its {@code angular.json}
+ * says {@code /platform-deployments/}, so what remains is an ordinary open debt rather than a
+ * blocked one. This suite asserts what the SERVER owes — the client is served at the segment, deep
+ * links reach it, machine paths never do. See AGENTS.md.
  *
  * <p>No deployment is driven here: that needs docker, and the packaged process carries the real
  * {@link eu.wohlben.qits.platform.deployments.dockerhost.DockerDeploymentDriver}. The container

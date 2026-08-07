@@ -13,7 +13,7 @@
 #     docker build -t qits/platform-deployments:latest -f docker/Dockerfile .
 #
 # The first two lines are not optional and are not a convenience: this image carries the web client
-# (service/src/main/webui = the qits-spa-cd submodule), and the builder stage below packages a
+# (service/src/main/webui = the qits-platform-spa-deployments submodule), and the builder stage below packages a
 # bundle that was ALREADY BUILT rather than building one. See the Quinoa flags on the mvnw line for
 # why the build cannot happen inside that stage.
 #
@@ -122,7 +122,7 @@ COPY . .
 # The three command overrides are the load-bearing part, and the reason this file deviates from that
 # recipe (which has the builder run the client's real install and build):
 #
-#   service/src/main/webui is qits-spa-cd, and it depends on @qits/ui-components. That package
+#   service/src/main/webui is qits-platform-spa-deployments, and it depends on @qits/ui-components. That package
 #   exists ONLY on the platform's own npm registry (qits-artifacts). A RUN step in a docker build
 #   reaches the public internet — Maven Central, npmjs.org, nodejs.org — and can reach the platform
 #   registry by NO address: not a network alias, not localhost:8081, not host.docker.internal. So
@@ -145,14 +145,14 @@ COPY . .
 # Quinoa does not copy build-dir into target/quinoa/build, it MOVES it, and overlayfs cannot rename a
 # directory that still lives in a LOWER image layer. It answers EXDEV, the JDK falls back to its
 # cross-file-store path, and that path refuses a non-empty directory — the build dies seconds in with
-# `DirectoryNotEmptyException: …/dist/qits-spa-cd/browser`, which names the source and explains
+# `DirectoryNotEmptyException: …/dist/qits-platform-spa-deployments/browser`, which names the source and explains
 # nothing. A builder stage that *creates* dist itself is immune by accident; ours arrives by COPY.
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
 ARG QITS_MAVEN_REPOSITORY_URL=http://localhost:8081/artifacts/maven/maven
 ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
-RUN d=service/src/main/webui/dist/qits-spa-cd/browser; \
+RUN d=service/src/main/webui/dist/qits-platform-spa-deployments/browser; \
     test -f "$d/index.html" || { \
       echo "No built client at $d." >&2; \
       echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \

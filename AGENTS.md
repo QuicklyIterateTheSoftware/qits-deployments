@@ -260,23 +260,19 @@ so they are **relative** (`/platform-deployments/api` written there matches noth
 failure that hides); and `@WebSocket` or anything on the Vert.x router takes a literal path and needs
 its own entry.
 
-## KNOWN: the client's baseHref still says `/cd/`
+## The client's segment, and the one probe still missing
 
-`service/src/main/webui` is the **qits-spa-cd** submodule, unchanged. Its `angular.json` sets
-`baseHref: /cd/` and its calls go to `/cd/api`, because its cutover onto this component's segment is
-a commit **in that repository** (wave 2). Until it lands:
-
-- the packaged image serves a client whose base href points at a segment nothing here serves — the
-  page loads and then fetches its own JavaScript from the wrong place;
-- **no server-side test can see it**, which is why `PdPackagedSurfaceIT` asserts what the server owes
-  (the client is served at the segment, deep links reach it, machine paths never do) and deliberately
-  does **not** assert the base href. Asserting the right value would fail a build for something no
-  change here can fix; asserting `/cd/` would pin the wrong value into a test.
-- **do not "fix" it here.** There is nothing here to fix. The probe joins `PdPackagedSurfaceIT` in
-  the commit that fixes the client.
+`service/src/main/webui` is the **qits-platform-spa-deployments** submodule. Its `angular.json` sets
+`baseHref: /platform-deployments/` and its calls go to `/platform-deployments/api`, so it agrees with
+this component today.
 
 The segment is spelled in four places that move together: `quarkus.quinoa.ui-root-path`,
 `quarkus.rest.path`, `quarkus.http.non-application-root-path`, and that fourth one in another repo.
+**No build here checks the fourth**, so it can drift without turning anything red.
+
+`PdPackagedSurfaceIT` still does not probe the base href. That was correct while the client
+disagreed — the right assertion would have failed a build for something no change here could fix —
+and it is an ordinary open debt now that it agrees.
 
 ## The event side: the direct intake now, the bus later
 
@@ -325,7 +321,7 @@ second row still claims to be ACTIVE.
 
 ## Dependencies
 
-**The client is the only submodule.** `service/src/main/webui` is qits-spa-cd; `git submodule update
+**The client is the only submodule.** `service/src/main/webui` is qits-platform-spa-deployments; `git submodule update
 --init` is half of a clone here, and `.config/qits/ci-post-receive.yml` runs it for that reason.
 Shared auth comes from the platform Maven repository as `qits-auth-core`.
 
