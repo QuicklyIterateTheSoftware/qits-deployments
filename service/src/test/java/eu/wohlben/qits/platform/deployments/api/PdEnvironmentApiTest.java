@@ -488,6 +488,19 @@ public class PdEnvironmentApiTest {
         .statusCode(404);
   }
 
+  @Test
+  public void thePlatformPlaneIsAValidFilterValueAndNotAMissingEnvironment() {
+    // `platform` goes where an environment id goes and names the plane instead — so it must answer
+    // 200 rather than the 404 every other non-id gets. Dropping the filter is still a 400: the
+    // plane is a named scope, not an escape from having one.
+    given()
+        .when()
+        .get("/platform-deployments/api/deployments?environmentId=platform")
+        .then()
+        .statusCode(200)
+        .body("deployments", notNullValue());
+  }
+
   // --- helpers ----------------------------------------------------------------------------------
 
   private String create(String name) {

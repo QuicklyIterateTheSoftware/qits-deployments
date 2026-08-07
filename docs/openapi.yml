@@ -251,7 +251,8 @@ paths:
       - Pd Application Controller
   /platform-deployments/api/deployments:
     get:
-      summary: "An environment's recorded deployments, newest-first"
+      summary: "One plane's recorded deployments, newest-first — an environment id,\
+        \ or 'platform'"
       parameters:
       - name: environmentId
         in: query

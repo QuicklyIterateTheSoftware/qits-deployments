@@ -1009,6 +1009,14 @@ public class DeployService implements BuildAnnouncements {
     return deployments.listByEnvironmentNewestFirst(environmentId);
   }
 
+  /**
+   * The platform plane's deployments across all its applications, newest-first — the same question
+   * as {@link #deploymentsFor}, asked of the plane that has no environment id to ask with.
+   */
+  public List<PdDeployment> platformDeployments() {
+    return deployments.listPlatformNewestFirst();
+  }
+
   /** Drop this environment's recorded deployments — the first step of a teardown. */
   public void forgetEnvironment(String environmentId) {
     QuarkusTransaction.requiringNew()

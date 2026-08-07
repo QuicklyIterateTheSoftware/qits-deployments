@@ -160,6 +160,51 @@ public class PdRegistrationTest {
   }
 
   @Test
+  public void aPlatformDeploymentIsReadBackByAskingForThePlaneByName() {
+    // The gap this closes: the deployment listing's filter is required, so the plane that has no
+    // environment id could not be asked for at all — every platform row was recorded and then
+    // unreadable, and a client drawing "what is deployed" showed the tiers and nothing else.
+    // `platform` is the stand-in the application id already carries, reused as the filter value.
+    specs.script(
+        "repo-reg-plane",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
+    postBuildSucceeded("repo-reg-plane", "platform/main", SHA_A);
+    awaitStarted(1);
+    awaitWorkerIdle();
+
+    Map<String, Object> deployment =
+        platformDeployments().stream()
+            .filter(d -> "repo-reg-plane".equals(d.get("applicationName")))
+            .findFirst()
+            .orElseGet(() -> fail("the platform listing did not carry the deployment"));
+    assertEquals("ACTIVE", deployment.get("status"));
+    assertEquals(
+        "platform:repo-reg-plane",
+        deployment.get("applicationId"),
+        "the id a client joins against the applications listing");
+  }
+
+  @Test
+  public void thePlatformPlaneCarriesNoTieredDeployment() {
+    // The filter is a filter, not a widening: asking for the plane must not answer with the rows of
+    // every tier as well. An environment deployment and a platform one, and only the latter comes
+    // back.
+    createEnvironment("reg-planes", "environment/reg-planes");
+    postBuildSucceeded("repo-reg-tiered", "environment/reg-planes", SHA_A);
+    awaitStarted(1);
+    specs.script(
+        "repo-reg-crossplane",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
+    postBuildSucceeded("repo-reg-crossplane", "platform/main", SHA_A);
+    awaitStarted(2);
+    awaitWorkerIdle();
+
+    List<String> names = platformDeployments().stream().map(d -> (String) d.get("applicationName")).toList();
+    assertTrue(names.contains("repo-reg-crossplane"), names.toString());
+    assertTrue(!names.contains("repo-reg-tiered"), "a tier's rows stayed out of the plane: " + names);
+  }
+
+  @Test
   public void aRepositoryThatNamesNoHealthPathGetsTheConventionOne() {
     // The debt this closes: registration once had no source for the path, so every row was written
     // null and every service mounted under its own prefix failed a gate against a URL that 404s.
@@ -352,6 +397,18 @@ public class PdRegistrationTest {
       sleep();
     }
     return fail("deployments of " + environmentId + " did not settle to " + count);
+  }
+
+  /** The plane's own rows, asked for the way a client asks — by the word, not by a tier's id. */
+  private List<Map<String, Object>> platformDeployments() {
+    return given()
+        .when()
+        .get("/platform-deployments/api/deployments?environmentId=platform")
+        .then()
+        .statusCode(200)
+        .extract()
+        .jsonPath()
+        .getList("deployments");
   }
 
   private void awaitWorkerIdle() {

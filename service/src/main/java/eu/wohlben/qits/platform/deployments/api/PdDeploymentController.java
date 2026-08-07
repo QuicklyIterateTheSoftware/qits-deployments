@@ -3,7 +3,9 @@ package eu.wohlben.qits.platform.deployments.api;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
 import eu.wohlben.qits.platform.deployments.deployments.control.EnvironmentOperations;
 import eu.wohlben.qits.platform.deployments.deployments.dto.PdDeploymentDto;
+import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.mapper.DeploymentMapper;
+import eu.wohlben.qits.platform.deployments.environments.control.ApplicationKeys;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
@@ -21,11 +23,13 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * every deployment on the instance, and a missing environment must say so (404) rather than answer
  * with an empty list.
  *
- * <p><b>Platform deployments are not reachable here</b>, and that is the known cost of the filter:
- * they belong to no tier, so there is no environmentId to ask with. A reader after them takes
- * {@code GET /applications} for the row and the container naming for the rest. It is a real gap —
- * the bootstrap watched platform-plane liveness through docker for exactly this reason — and
- * closing it is a follow-up, not a silent widening of this route.
+ * <p><b>The platform plane is asked for by name:</b> {@code ?environmentId=platform} returns the
+ * deployments that belong to no tier. That is the {@code platform:} stand-in from {@link
+ * ApplicationKeys}, reused rather than respelled, so the word a client already reads at the front of
+ * a platform application's id is the word it filters with. It cannot be mistaken for a tier — an
+ * environment id is a random UUID — and it is a named plane rather than a widening: dropping the
+ * filter altogether still answers 400, because an unscoped listing would return every deployment on
+ * the instance.
  */
 @Path("/deployments")
 @Produces(MediaType.APPLICATION_JSON)
@@ -38,7 +42,8 @@ public class PdDeploymentController {
   public record ListDeploymentsResponse(List<PdDeploymentDto> deployments) {}
 
   @GET
-  @Operation(summary = "An environment's recorded deployments, newest-first")
+  @Operation(
+      summary = "One plane's recorded deployments, newest-first — an environment id, or 'platform'")
   @APIResponse(responseCode = "200", description = "The deployments")
   @APIResponse(responseCode = "400", description = "environmentId was not given")
   @APIResponse(responseCode = "404", description = "No such environment")
@@ -46,8 +51,15 @@ public class PdDeploymentController {
     if (environmentId == null || environmentId.isBlank()) {
       throw new BadRequestException("environmentId is required");
     }
-    environments.require(environmentId);
-    return new ListDeploymentsResponse(
-        deployService.deploymentsFor(environmentId).stream().map(mapper::toDto).toList());
+    List<PdDeployment> rows;
+    if (ApplicationKeys.isPlatform(environmentId)) {
+      rows = deployService.platformDeployments();
+    } else {
+      // Ordered: a tier that does not exist is a 404 rather than an empty list. The platform plane
+      // takes no such check — it is not a row, so there is nothing that could be missing.
+      environments.require(environmentId);
+      rows = deployService.deploymentsFor(environmentId);
+    }
+    return new ListDeploymentsResponse(rows.stream().map(mapper::toDto).toList());
   }
 }

@@ -17,12 +17,21 @@ package eu.wohlben.qits.platform.deployments.environments.control;
  */
 public final class ApplicationKeys {
 
-  /** Where a platform service's key stands in for an environment id — no environment can take the place. */
-  private static final String PLATFORM = "platform";
+  /**
+   * Where a platform service's key stands in for an environment id — no environment can take the
+   * place. An environment id is a random UUID, so this word is unambiguous wherever one is
+   * expected, which is what lets the deployment listing take it as a filter value.
+   */
+  public static final String PLATFORM = "platform";
 
   private ApplicationKeys() {}
 
   public static String of(String environmentId, String applicationName) {
     return (environmentId == null ? PLATFORM : environmentId) + ":" + applicationName;
+  }
+
+  /** Whether a value written where an environment id goes names the platform plane instead. */
+  public static boolean isPlatform(String environmentId) {
+    return PLATFORM.equals(environmentId);
   }
 }

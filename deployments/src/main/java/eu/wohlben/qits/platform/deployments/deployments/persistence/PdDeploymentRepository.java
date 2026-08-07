@@ -27,6 +27,14 @@ public class PdDeploymentRepository implements PanacheRepositoryBase<PdDeploymen
   }
 
   /**
+   * The platform plane's deployments across all its applications, newest-first — the rows no
+   * environment filter can reach, because they belong to no tier.
+   */
+  public List<PdDeployment> listPlatformNewestFirst() {
+    return list("environmentId is null order by seq desc");
+  }
+
+  /**
    * Every deployment on this instance, newest-first — the whole history the pin rule reads
    * ({@code RollbackPins}). Unscoped on purpose: a pin is per application name across all tiers.
    */
