@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Four scalar keys, no nesting, no YAML
+ * The strict reader of {@code .config/qits/deployments.yml}. Five scalar keys, no nesting, no YAML
  * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
@@ -19,7 +19,14 @@ import java.util.Set;
  * available_on_env: false              # default; true = public node (bundle + hub joins)
  * deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
  * health_path: /q/health/ready         # default: /&lt;name without the qits- prefix&gt;/q/health/ready
+ * health_cmd: pg_isready -U postgres   # instead of health_path: the probe runs in the container
  * </pre>
+ *
+ * <p><b>{@code health_cmd} and {@code health_path} are alternatives, and setting both is an
+ * error.</b> They are not two settings on one gate: the path names a URL a {@code curl} inside the
+ * container fetches, and the command replaces that whole mechanism. A deployable image with no
+ * HTTP surface — postgres, the first of them — can pass no path-shaped gate, having neither curl
+ * nor anything on 8080, so it says how it is ready in its own words instead.
  *
  * <p><b>{@code deploy_branches} is parsed and not acted on.</b> Where a build deploys is decided by
  * the environment rows — a green build deploys wherever an environment listens to its branch — so
@@ -49,6 +56,7 @@ public final class DeploymentSpecParser {
   private static final String AVAILABLE_ON_ENV = "available_on_env";
   private static final String DEPLOY_BRANCHES = "deploy_branches";
   private static final String HEALTH_PATH = "health_path";
+  private static final String HEALTH_CMD = "health_cmd";
 
   /** The retired vocabulary, still understood. See the class javadoc. */
   private static final String PLATFORM_ALIAS = "singleton";
@@ -64,6 +72,7 @@ public final class DeploymentSpecParser {
     boolean availableOnEnv = false;
     List<String> deployBranches = List.of();
     String healthPath = null;
+    String healthCmd = null;
     Set<String> seen = new HashSet<>();
 
     String[] lines = (yaml == null ? "" : yaml).split("\\R", -1);
@@ -91,6 +100,7 @@ public final class DeploymentSpecParser {
         case AVAILABLE_ON_ENV -> availableOnEnv = bool(key, value, source, lineNumber);
         case DEPLOY_BRANCHES -> deployBranches = deployBranches(value, source, lineNumber);
         case HEALTH_PATH -> healthPath = healthPath(value, source, lineNumber);
+        case HEALTH_CMD -> healthCmd = healthCmd(value, source, lineNumber);
         default ->
             throw error(
                 source,
@@ -103,11 +113,24 @@ public final class DeploymentSpecParser {
                     + AVAILABLE_ON_ENV
                     + ", "
                     + DEPLOY_BRANCHES
+                    + ", "
+                    + HEALTH_PATH
                     + " and "
-                    + HEALTH_PATH);
+                    + HEALTH_CMD);
       }
     }
 
+    if (healthCmd != null && healthPath != null) {
+      throw new SpecException(
+          source
+              + ": `"
+              + HEALTH_CMD
+              + "` and `"
+              + HEALTH_PATH
+              + "` are alternatives — the command replaces the HTTP probe rather than adjusting"
+              + " it, so a file setting both says two things about one gate. Keep the one that"
+              + " describes this image.");
+    }
     if (availableOnEnv && target == PdDeploymentTarget.PLATFORM) {
       throw new SpecException(
           source
@@ -116,7 +139,7 @@ public final class DeploymentSpecParser {
               + ": true` is not something a platform service can be — it already runs on every"
               + " environment's networks, and the bundle is environment-scoped");
     }
-    return new DeploymentSpec(target, availableOnEnv, deployBranches, healthPath);
+    return new DeploymentSpec(target, availableOnEnv, deployBranches, healthPath, healthCmd);
   }
 
   private static PdDeploymentTarget target(String value, String source, int line) {
@@ -177,6 +200,30 @@ public final class DeploymentSpecParser {
       return PdIdentifiers.requireHealthPath(value);
     } catch (RuntimeException e) {
       throw error(source, line, "`" + HEALTH_PATH + "` is not an absolute URL path: " + value);
+    }
+  }
+
+  /**
+   * The readiness probe an image declares for itself, passed to docker verbatim and run by a shell
+   * inside the container. Unlike {@link #healthPath} it gets no charset — a probe worth writing is
+   * a command ({@code pg_isready -U postgres || exit 1}), and an allowlist would refuse it. What
+   * makes that safe is that the command grants the repository nothing it does not already have: it
+   * runs in that repository's own container, and it is one argv element rather than a string this
+   * component splits. See {@link DeploymentIdentifiers#requireHealthCmd}.
+   */
+  private static String healthCmd(String value, String source, int line) {
+    try {
+      return DeploymentIdentifiers.requireHealthCmd(value);
+    } catch (RuntimeException e) {
+      throw error(
+          source,
+          line,
+          "`"
+              + HEALTH_CMD
+              + "` must be one non-blank line of at most "
+              + DeploymentIdentifiers.HEALTH_CMD_MAX_CHARS
+              + " characters, got: "
+              + value);
     }
   }
 

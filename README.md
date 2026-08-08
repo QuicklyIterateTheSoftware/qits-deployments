@@ -74,11 +74,20 @@ deployment_target: environment       # default when the key or the file is absen
 available_on_env: false              # default; true = public node (bundle + hub joins)
 deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
 health_path: /q/health/ready         # default: /<name without the qits- prefix>/q/health/ready
+health_cmd: pg_isready -U postgres   # instead of health_path; runs inside the container
 ```
 
 `deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
 environment rows' answer, not the file's. It is accepted because qits-workspaces' release flow reads
 the same file for its promotion targets, and this parser fails a deployment on an unknown key.
+
+`health_cmd` and `health_path` are **alternatives, and a file setting both fails**. The path names a
+URL a `curl` inside the container fetches; the command replaces that mechanism whole. It is for the
+deployable images — a plain postgres, the first of them — which have neither curl nor anything on
+8080 and so can pass no path-shaped gate. The value reaches `--health-cmd` verbatim, one argv
+element, run by the container's own `/bin/sh -c`: spaces and `||` need no quoting. It gets no
+charset allowlist, because it grants the repository nothing it does not already have over its own
+container — only a length cap and one line.
 
 A repository with **no file** gets every default and behaves exactly as it did before the file
 existed. A file that cannot be read or parsed **fails the deployment** with the cause on the row —
@@ -184,7 +193,9 @@ serving, and the sha a rollback would put back.
 - **Untrusted strings are validated at the boundary.** Names become network names, aliases and image
   path segments (dns-label charset); shas become image tags (hex only); the health path is
   interpolated into a string the *container's* shell runs, so it gets the strictest allowlist and is
-  re-checked at the last line before the argv.
+  re-checked at the last line before the argv. A `health_cmd` is the one deliberate exception — it
+  *is* the shell string, chosen by the repository for its own container — and is bounded to one
+  non-blank line rather than a charset.
 - **Machine writes carry a guard, reads do not.** The build-succeeded intake and the topology writes
   call `MachineAuth.require()` (audience `qits-platform-deployments`); every read stays open,
   because a person drives it through qits-gateway's session and the collector polls it. The gate

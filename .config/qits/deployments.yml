@@ -16,4 +16,7 @@ deploy_branches: environment/prod
 # The convention would derive the health path from the repository name, but the route path
 # deliberately did not move with the rename — the service still serves /platform-deployments. Without this line
 # the deployer probes a 404 and rolls every deployment back as unhealthy.
+#
+# `health_cmd` is the alternative and the two are mutually exclusive: it names a command the
+# container runs instead of the HTTP probe, for images with no HTTP surface. This one has one.
 health_path: /platform-deployments/q/health/ready

@@ -213,6 +213,10 @@ public interface DeploymentDriver {
    * <p>{@code environmentId} and {@code environmentName} are null on a platform service, which is
    * what leaves it without an environment label — an environment teardown reaps by that label, and
    * it must never take a platform-plane container with it.
+   *
+   * <p>{@code healthCmd} is the repository's own readiness probe and, when present, <b>replaces</b>
+   * the health gate rather than adding to it: {@code healthPath} is then unused, because an image
+   * with no HTTP surface has no path to fetch. Null is every service that has one.
    */
   record StartSpec(
       String environmentId,
@@ -225,6 +229,7 @@ public interface DeploymentDriver {
       String imageRef,
       String containerName,
       String healthPath,
+      String healthCmd,
       PdDeploymentTarget target,
       boolean availableOnEnv) {}
 

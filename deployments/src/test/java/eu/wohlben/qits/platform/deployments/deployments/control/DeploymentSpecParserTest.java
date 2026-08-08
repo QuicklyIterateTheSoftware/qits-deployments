@@ -40,7 +40,7 @@ class DeploymentSpecParserTest {
   }
 
   @Test
-  void theFourKeysAreReadAndCommentsAndQuotesAreNot() {
+  void theFiveKeysAreReadAndCommentsAndQuotesAreNot() {
     DeploymentSpec spec =
         parse(
             """
@@ -54,6 +54,49 @@ class DeploymentSpecParserTest {
     assertEquals(List.of("environment/prod"), spec.deployBranches());
     assertFalse(spec.availableOnEnv());
     assertEquals("/idp/q/health/ready", spec.healthPath());
+    assertNull(spec.healthCmd());
+  }
+
+  @Test
+  void aNonHttpImageDeclaresItsOwnProbeSpacesAndAll() {
+    // The deployable-image case, and the reason the value gets no charset: postgres has neither
+    // curl nor anything on 8080, so a path-shaped gate can never pass. The command is one argv
+    // element that docker runs with /bin/sh -c, so its spaces, flags and || are the shell's.
+    assertEquals(
+        "pg_isready -U postgres || exit 1",
+        parse("health_cmd: pg_isready -U postgres || exit 1\n").healthCmd());
+    assertEquals(
+        "test -f /var/lib/ready", parse("health_cmd: \"test -f /var/lib/ready\"\n").healthCmd());
+  }
+
+  @Test
+  void aFileThatNamesNoHealthCmdGetsTheHttpProbe() {
+    // Null is the statement "this image has an HTTP surface", which is every service the platform
+    // had before deployable images existed.
+    assertNull(parse("health_path: /idp/q/health/ready\n").healthCmd());
+    assertNull(DeploymentSpec.DEFAULTS.healthCmd());
+  }
+
+  @Test
+  void aHealthCmdAndAHealthPathTogetherAreAnError() {
+    // Not two settings on one gate: the command replaces the whole HTTP mechanism, so a file with
+    // both says two things about one thing and the writer has to pick.
+    String message = messageOf("health_path: /q/health/ready\nhealth_cmd: pg_isready\n");
+    assertTrue(message.contains("health_cmd"), message);
+    assertTrue(message.contains("health_path"), message);
+    // Either order, since neither is the one that "came second".
+    assertTrue(
+        messageOf("health_cmd: pg_isready\nhealth_path: /q/health/ready\n").contains("health_cmd"));
+  }
+
+  @Test
+  void aBlankOrOversizedHealthCmdIsAnError() {
+    // What is left to check once the charset is deliberately open: a probe that says nothing, and
+    // one long enough to be a mistake.
+    assertTrue(messageOf("health_cmd:\n").contains("health_cmd"));
+    assertTrue(messageOf("health_cmd: \"   \"\n").contains("health_cmd"));
+    assertTrue(messageOf("health_cmd: " + "x".repeat(513) + "\n").contains("health_cmd"));
+    assertEquals("x".repeat(512), parse("health_cmd: " + "x".repeat(512) + "\n").healthCmd());
   }
 
   @Test

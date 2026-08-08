@@ -243,6 +243,11 @@ public class DeployService implements BuildAnnouncements {
    * One place this build deploys to: one application in one tier, or the platform plane. Resolved
    * before anything is queued and carried by value from there on — the docker work must not need a
    * second query to know where it is going.
+   *
+   * <p>{@code healthCmd} is the spec's {@code health_cmd} and is <b>the only field here no row
+   * holds</b>. It needs none: it is read fresh from the repository before every deployment, and
+   * the one path that resolves targets from the catalogue instead ({@link #alreadyRegistered})
+   * records a failure and deploys nothing. Null is the HTTP probe over {@code healthPath}.
    */
   record Target(
       String applicationName,
@@ -251,7 +256,8 @@ public class DeployService implements BuildAnnouncements {
       String bundleNetwork,
       PdDeploymentTarget target,
       boolean availableOnEnv,
-      String healthPath) {}
+      String healthPath,
+      String healthCmd) {}
 
   /**
    * One build-succeeded event, start to finish, on the worker thread: read what the repository
@@ -406,7 +412,8 @@ public class DeployService implements BuildAnnouncements {
               environment.network,
               PdDeploymentTarget.ENVIRONMENT,
               spec.availableOnEnv(),
-              healthPath));
+              healthPath,
+              spec.healthCmd()));
     }
     return List.copyOf(targets);
   }
@@ -474,7 +481,15 @@ public class DeployService implements BuildAnnouncements {
             });
 
     return List.of(
-        new Target(repoId, null, null, null, PdDeploymentTarget.PLATFORM, false, healthPath));
+        new Target(
+            repoId,
+            null,
+            null,
+            null,
+            PdDeploymentTarget.PLATFORM,
+            false,
+            healthPath,
+            spec.healthCmd()));
   }
 
   /**
@@ -547,6 +562,9 @@ public class DeployService implements BuildAnnouncements {
   /**
    * What a failed spec read falls back to: where this (repository, branch) is already registered,
    * read off the catalogue. It answers where to record the failure — never where to deploy.
+   *
+   * <p>Which is why every target here carries a null {@code healthCmd} and needs nothing better:
+   * no container starts off one of them.
    */
   private List<Target> alreadyRegistered(String repoId, String branch) {
     Optional<LinkedService> known = catalog.find(repoId);
@@ -567,7 +585,8 @@ public class DeployService implements BuildAnnouncements {
                   null,
                   PdDeploymentTarget.PLATFORM,
                   false,
-                  linked.service().healthPath));
+                  linked.service().healthPath,
+                  null));
     }
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : environments.onBranch(branch)) {
@@ -580,7 +599,8 @@ public class DeployService implements BuildAnnouncements {
                 environment.network,
                 PdDeploymentTarget.ENVIRONMENT,
                 linked.service().availableOnEnv,
-                linked.service().healthPath));
+                linked.service().healthPath,
+                null));
       }
     }
     return List.copyOf(targets);
@@ -611,7 +631,8 @@ public class DeployService implements BuildAnnouncements {
   }
 
   /** Everything a deployment needs off the worker thread — plain values, never entities. */
-  private record Plan(String deploymentId, Target target, String sha, String healthPath) {
+  private record Plan(
+      String deploymentId, Target target, String sha, String healthPath, String healthCmd) {
 
     String applicationName() {
       return target.applicationName();
@@ -687,7 +708,10 @@ public class DeployService implements BuildAnnouncements {
                       deploymentId,
                       target,
                       commitSha,
-                      target.healthPath() != null ? target.healthPath() : defaultHealthPath);
+                      target.healthPath() != null ? target.healthPath() : defaultHealthPath,
+                      // No default to fall back on, and none to want: an image that named no
+                      // command is one the HTTP probe describes.
+                      target.healthCmd());
                 });
     if (plan == null) {
       return;
@@ -902,6 +926,7 @@ public class DeployService implements BuildAnnouncements {
         imageRef,
         containerName,
         plan.healthPath(),
+        plan.healthCmd(),
         plan.target().target(),
         plan.availableOnEnv());
   }
