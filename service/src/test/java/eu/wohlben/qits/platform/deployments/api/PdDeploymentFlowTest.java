@@ -165,7 +165,8 @@ public class PdDeploymentFlowTest {
         "container is named after environment, application and deployment: " + containerName);
 
     // The image reference is DERIVED — the convention is the contract under test.
-    assertEquals(List.of("qits-artifacts:8080/qits/repo-green:" + SHA_A), driver.pulledRefs());
+    assertEquals(
+        List.of("qits-platform-artifacts:8080/qits/repo-green:" + SHA_A), driver.pulledRefs());
     DeploymentDriver.StartSpec spec = driver.started().get(0);
     // The primary network is the application's OWN, not the environment's bundle: an ordinary
     // application is a spoke, and only its own containers are on it.
@@ -222,7 +223,7 @@ public class PdDeploymentFlowTest {
     assertEquals("IMAGE_MISSING", deployments.get(0).get("status"));
     String detail = (String) deployments.get(0).get("detail");
     assertTrue(
-        detail.contains("qits-artifacts:8080/qits/repo-noimage:" + SHA_A),
+        detail.contains("qits-platform-artifacts:8080/qits/repo-noimage:" + SHA_A),
         "the detail names the reference nothing published: " + detail);
     // Nothing was started and nothing removed — the previous state is untouched.
     assertEquals(List.of(), driver.started());
