@@ -42,6 +42,10 @@ class DockerDeploymentDriverTest {
   }
 
   private DeploymentDriver.StartSpec spec(String healthPath) {
+    return spec(healthPath, null);
+  }
+
+  private DeploymentDriver.StartSpec spec(String healthPath, String healthCmd) {
     return new DeploymentDriver.StartSpec(
         "env-id",
         "dev",
@@ -53,6 +57,7 @@ class DockerDeploymentDriverTest {
         "qits-artifacts:8080/qits/qits-gateway:abc1234",
         "qits-pd-dev-qits-gateway-dep",
         healthPath,
+        healthCmd,
         PdDeploymentTarget.ENVIRONMENT,
         true);
   }
@@ -70,6 +75,7 @@ class DockerDeploymentDriverTest {
         "qits-artifacts:8080/qits/qits-platform-deployments:abc1234",
         "qits-pd-qits-platform-deployments-dep",
         "/cd/q/health/ready",
+        null,
         PdDeploymentTarget.PLATFORM,
         false);
   }
@@ -164,6 +170,7 @@ class DockerDeploymentDriverTest {
             "qits-artifacts:8080/qits/qits-gateway:abc1234",
             "qits-pd-dev-qits-gateway-dep",
             "/q/health/ready",
+            null,
             PdDeploymentTarget.ENVIRONMENT,
             false);
 
@@ -431,6 +438,42 @@ class DockerDeploymentDriverTest {
             new DeploymentDriver.Endpoint("aaa111", "qits-gateway"),
             new DeploymentDriver.Endpoint("ccc333", "qits-idp")),
         endpoints);
+  }
+
+  @Test
+  void aDeclaredHealthCmdReplacesTheCurlTemplateAndKeepsItsSpaces() {
+    // The deployable-image case: postgres has no curl and nothing on 8080, so the repository names
+    // the probe. It is ONE argv element — docker gives it to /bin/sh -c — which is why a command
+    // with spaces, a flag and an || needs no quoting from this side.
+    List<String> argv = driver().buildArgv(spec("/q/health/ready", "pg_isready -U postgres || exit 1"));
+
+    int flag = argv.indexOf("--health-cmd");
+    assertEquals("pg_isready -U postgres || exit 1", argv.get(flag + 1));
+    // The template is gone rather than added to: two gates would be one gate too many.
+    assertTrue(argv.stream().noneMatch(a -> a.startsWith("curl -fsS")), argv.toString());
+    // Everything else about the gate is untouched.
+    assertTrue(argv.containsAll(List.of("--health-interval", "3s")));
+    assertTrue(argv.containsAll(List.of("--health-retries", "3")));
+  }
+
+  @Test
+  void aHealthCmdThatIsNotOnePlainLineCannotReachTheArgv() {
+    // The belt beside the health path's. The command is deliberately charset-free — it is a shell
+    // command and an allowlist would refuse the useful ones — so what is left to check is that it
+    // is one line and not empty.
+    assertThrows(
+        BadRequestException.class, () -> driver().buildArgv(spec("/q/health/ready", "ok\nsecond")));
+    assertThrows(BadRequestException.class, () -> driver().buildArgv(spec("/q/health/ready", "  ")));
+  }
+
+  @Test
+  void aHostileHealthPathIsNotCheckedWhenAHealthCmdReplacedIt() {
+    // The path is unused once a command is declared, so it is also unchecked: an image with no HTTP
+    // surface has no path worth spelling, and failing it would be failing an unread field.
+    List<String> argv = driver().buildArgv(spec(null, "test -f /ready"));
+
+    int flag = argv.indexOf("--health-cmd");
+    assertEquals("test -f /ready", argv.get(flag + 1));
   }
 
   @Test

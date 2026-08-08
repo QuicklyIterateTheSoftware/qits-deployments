@@ -241,6 +241,16 @@ string a *shell inside the container* runs (`--health-cmd`), so it gets an allow
 and is re-checked at the last line before the argv (`DockerDeploymentDriver.buildArgv`). Three
 callers use the same check: the API, the spec parser (repository-authored input) and the argv.
 
+**`health_cmd` is the one value with no charset, and the exception proves the rule.** It is not
+interpolated into a shell string — it *is* the string, chosen by a repository for its own
+container, so an allowlist would refuse the probes worth writing (`pg_isready -U postgres || exit
+1`) while granting nothing: the image's entrypoint is already that repository's, and the command is
+one argv element to `ProcessBuilder`, never re-split. `DeploymentIdentifiers.requireHealthCmd`
+bounds it to one non-blank line of 512 characters, at the parser and again at the argv. It
+**replaces** `health_path` (the parser fails a file setting both), so the path is neither used nor
+checked when a command is present. It is not stored: the spec is read before every deployment, and
+the one path that resolves targets from the catalogue instead records failures and deploys nothing.
+
 Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not lean on that:
 validation stays at the boundary and the belt stays at the argv.
 

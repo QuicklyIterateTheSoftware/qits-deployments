@@ -29,12 +29,17 @@ public interface SpecSource {
   DeploymentSpec read(String repoId, String sha);
 
   /**
-   * What a repository declares about how it is deployed. Four keys, all optional, and the shape a
+   * What a repository declares about how it is deployed. Five keys, all optional, and the shape a
    * repository with no file at all gets is {@link #DEFAULTS}.
    *
    * <p>{@code healthPath} is the exception rather than the rule: a service that says nothing gets
    * the convention path derived from its name, and only a service whose path does not follow the
    * convention (the gateway owns the root path space) has to name one.
+   *
+   * <p>{@code healthCmd} <b>replaces</b> that HTTP probe rather than adjusting it: a plain image
+   * with no HTTP surface — postgres is the first — declares the command that says it is ready, and
+   * the parser refuses a file that sets both. Null means the HTTP probe, which is every service
+   * this platform had before deployable images existed.
    *
    * <p><b>{@code deployBranches} is read and not used here</b>, and that is deliberate — see {@link
    * #deployBranches()}.
@@ -43,7 +48,8 @@ public interface SpecSource {
       PdDeploymentTarget target,
       boolean availableOnEnv,
       List<String> deployBranches,
-      String healthPath) {
+      String healthPath,
+      String healthCmd) {
 
     /** A null list and an empty one are the same statement: the file named no refs. */
     public DeploymentSpec {
@@ -52,7 +58,7 @@ public interface SpecSource {
 
     /** No file, or a file that sets nothing: an ordinary environment application. */
     public static final DeploymentSpec DEFAULTS =
-        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, List.of(), null);
+        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, List.of(), null, null);
 
     /**
      * The refs the repository declares itself deployable from — {@code deploy_branches:} in the

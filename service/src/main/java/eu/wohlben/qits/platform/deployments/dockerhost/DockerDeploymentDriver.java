@@ -36,6 +36,10 @@ import org.jboss.logging.Logger;
  * application listens on 8080 (both platform conventions). An image without curl fails the gate —
  * visibly, with the health log in the deployment's detail.
  *
+ * <p>An image that meets neither convention — a plain postgres, say — names its own probe with
+ * {@code health_cmd} in its spec, and that string becomes the {@code --health-cmd} verbatim. The
+ * gate itself is unchanged: it is still docker's verdict, still taken inside the container.
+ *
  * <p><b>Containers run detached with {@code --restart unless-stopped} and are removed
  * explicitly.</b> A deployed application must survive a docker daemon restart and a restart of
  * this component both; every removal is a decision recorded on a deployment row (a decommission,
@@ -659,10 +663,15 @@ public class DockerDeploymentDriver implements DeploymentDriver {
 
   /** Package-private for argv assembly tests. */
   List<String> buildArgv(StartSpec spec) {
-    // Everything reaching this argv was validated at the boundary; the health path is re-checked
-    // here because it is the one value that lands inside a shell string the CONTAINER runs — the
-    // allowlist is the guard, and this is the last line before it.
-    PdIdentifiers.requireHealthPath(spec.healthPath());
+    // Everything reaching this argv was validated at the boundary; the health gate's value is
+    // re-checked here because it is what lands inside a shell string the CONTAINER runs, and this
+    // is the last line before it. Which value that is depends on the gate: a repository that named
+    // a health_cmd replaced the path-shaped probe, so the path is neither used nor checked.
+    if (spec.healthCmd() != null) {
+      DeploymentIdentifiers.requireHealthCmd(spec.healthCmd());
+    } else {
+      PdIdentifiers.requireHealthPath(spec.healthPath());
+    }
     List<String> argv = new ArrayList<>();
     argv.add(runtime);
     argv.add("run");
@@ -706,10 +715,15 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     argv.add(AVAILABLE_ON_ENV_LABEL + "=" + spec.availableOnEnv());
     argv.add("--label");
     argv.add(APP_NAME_LABEL + "=" + spec.applicationName());
-    // The health gate, enforced by docker inside the container (see the class javadoc). The path
-    // is allowlist-validated; nothing else in this string varies.
+    // The health gate, enforced by docker inside the container (see the class javadoc). Either the
+    // repository's own command, passed through as ONE argv element — docker runs it with
+    // `/bin/sh -c`, so its spaces are the shell's and not this component's to split — or the curl
+    // template over an allowlist-validated path, which is every service with an HTTP surface.
     argv.add("--health-cmd");
-    argv.add("curl -fsS http://localhost:8080" + spec.healthPath() + " || exit 1");
+    argv.add(
+        spec.healthCmd() != null
+            ? spec.healthCmd()
+            : "curl -fsS http://localhost:8080" + spec.healthPath() + " || exit 1");
     argv.add("--health-interval");
     argv.add(healthIntervalSeconds + "s");
     argv.add("--health-retries");

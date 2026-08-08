@@ -4,11 +4,12 @@ import eu.wohlben.qits.platform.deployments.environments.error.BadRequestExcepti
 
 /**
  * Validates the untrusted strings that reach an argv but are never stored in the topology: the
- * commit sha, the repository id, the ci run id, and one value of an OpenTelemetry attribute list.
+ * commit sha, the repository id, the ci run id, one value of an OpenTelemetry attribute list, and
+ * the health command a repository may declare for itself.
  *
  * <p>The split from {@code PdIdentifiers} is the module partition, not a taxonomy: names, branches
  * and health paths are values the topology <b>keeps</b>, so they are checked where they are kept;
- * these four exist only for the length of one deployment, so they are checked beside the argv they
+ * these exist only for the length of one deployment, so they are checked beside the argv they
  * guard.
  *
  * <p>Defence in depth, not the only guard: argvs are assembled for {@link ProcessBuilder}, which
@@ -33,6 +34,9 @@ public final class DeploymentIdentifiers {
    * boundary between key and value, so neither is in the charset.
    */
   private static final String ATTRIBUTE_VALUE = "[A-Za-z0-9._/:-]{1,255}";
+
+  /** How long a {@code health_cmd} may be. Long enough for a real probe, short enough to read. */
+  public static final int HEALTH_CMD_MAX_CHARS = 512;
 
   private DeploymentIdentifiers() {}
 
@@ -94,5 +98,33 @@ public final class DeploymentIdentifiers {
           "Invalid " + what + " — no commas or equals signs in a resource attribute value");
     }
     return value;
+  }
+
+  /**
+   * The readiness probe a repository declares for itself ({@code health_cmd}), on its way to a
+   * {@code --health-cmd}. <b>This is the one value here with no charset</b>, and that is the
+   * point: it is a shell command, docker hands it to {@code /bin/sh -c} inside the container, and
+   * an allowlist would refuse the ones worth writing ({@code pg_isready -U postgres || exit 1}).
+   *
+   * <p>Refusing the charset costs nothing, because the command grants nothing. It runs in the
+   * repository's own container, under the image's own entrypoint, which that repository already
+   * chooses; and it is one argv element to {@link ProcessBuilder}, which never re-splits, so it
+   * reaches no docker flag of its own. What is checked is what a probe cannot be: blank, longer
+   * than {@link #HEALTH_CMD_MAX_CHARS}, or carrying a control character — a newline would make one
+   * spec line into two, and the rest of them belong in no command.
+   *
+   * @throws BadRequestException if the command is blank, oversized, or not one plain line
+   */
+  public static String requireHealthCmd(String healthCmd) {
+    if (healthCmd == null
+        || healthCmd.isBlank()
+        || healthCmd.length() > HEALTH_CMD_MAX_CHARS
+        || healthCmd.chars().anyMatch(Character::isISOControl)) {
+      throw new BadRequestException(
+          "Invalid health command — one non-blank line of at most "
+              + HEALTH_CMD_MAX_CHARS
+              + " characters");
+    }
+    return healthCmd;
   }
 }
