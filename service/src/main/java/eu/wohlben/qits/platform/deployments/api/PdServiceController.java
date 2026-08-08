@@ -118,8 +118,8 @@ public class PdServiceController {
    * Every service, oldest first, each flattened with the environments it is linked into.
    *
    * <p>Flat because a platform service belongs to no environment: reading the catalogue through the
-   * environments would leave qits-idp and this component out of it, which are the two a reader most
-   * wants to find.
+   * environments would leave qits-platform-idp and this component out of it, which are the two a
+   * reader most wants to find.
    */
   @GET
   @Operation(summary = "Every service, with the environments each is linked into")

@@ -1,10 +1,10 @@
-# Follow a qits-auth-core release, the same way qits-ci and qits-artifacts do.
+# Follow a qits-auth-core release, the same way qits-ci and qits-platform-artifacts do.
 #
 # Three services depend on that package — those two and this one — and this repo went without the
 # pipeline for a release cycle. The gap is worth naming: a release moved the other two and left the
 # DEPLOYER pinned to the version before it. That is the wrong one of the three to leave behind — it
 # is the service whose health gate decides whether anything else can be deployed at all, and the
-# service that would have to redeploy qits-idp.
+# service that would have to redeploy qits-platform-idp.
 #
 # The bump lands on a maintenance branch, not on main: a release of a shared library is not a
 # decision to deploy every dependent, and merging is where that decision is made.

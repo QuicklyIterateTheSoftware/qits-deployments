@@ -17,9 +17,9 @@ import jakarta.inject.Singleton;
  * <p>GET and HEAD only — the bare segment has no meaning for a write, and a machine client POSTing
  * here gets a 405 rather than a bounce at HTML. 301, because the answer will never be anything
  * else, and the query string travels. The same route, for the same reason, exists in qits-events,
- * qits-projects, qits-ci, qits-artifacts, qits-observability and qits-workspaces; the platform's
- * Quinoa reference calls a gateway-level redirect the alternative, and until there is one this is
- * the per-service answer.
+ * qits-projects, qits-ci, qits-platform-artifacts, qits-observability and qits-workspaces; the
+ * platform's Quinoa reference calls a gateway-level redirect the alternative, and until there is
+ * one this is the per-service answer.
  *
  * <p>This is the one route in this service that is not JAX-RS, and it deliberately needs no entry
  * in {@code quarkus.quinoa.ignored-path-prefixes}: those are matched under {@code

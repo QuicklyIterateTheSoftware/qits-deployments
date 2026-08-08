@@ -5,7 +5,7 @@ import java.util.Map;
 
 /**
  * The deployment posture after the gate flips: {@code qits.auth.machine.required=true}. Everything
- * else here exists to make that posture testable without a qits-idp.
+ * else here exists to make that posture testable without a qits-platform-idp.
  *
  * <p><b>The verification key is inlined instead of fetched.</b> {@code quarkus.oidc.public-key} puts
  * the extension into local verification, and {@code auth-server-url} is cleared beside it — the key

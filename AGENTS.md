@@ -1,4 +1,4 @@
-# qits-platform-deployments — working notes
+# qits-deployments — working notes
 
 Read `README.md` first: it defines the model (tiers, two planes, derived rows) and the flow (green
 build → registration → health-gated cutover). This file is the working conventions on top of it.
@@ -291,7 +291,7 @@ its own entry.
 
 ## The client's segment, and the one probe still missing
 
-`service/src/main/webui` is the **qits-platform-spa-deployments** submodule. Its `angular.json` sets
+`service/src/main/webui` is the **qits-spa-deployments** submodule. Its `angular.json` sets
 `baseHref: /platform-deployments/` and its calls go to `/platform-deployments/api`, so it agrees with
 this component today.
 
@@ -350,7 +350,7 @@ second row still claims to be ACTIVE.
 
 ## Dependencies
 
-**The client is the only submodule.** `service/src/main/webui` is qits-platform-spa-deployments; `git submodule update
+**The client is the only submodule.** `service/src/main/webui` is qits-spa-deployments; `git submodule update
 --init` is half of a clone here, and `.config/qits/ci-post-receive.yml` runs it for that reason.
 Shared auth comes from the platform Maven repository as `qits-auth-core`.
 
@@ -375,8 +375,8 @@ against.
   a profile leaves `quarkus.oidc.auth-server-url` unset — measured on the ancestors, not feared.
 - **Machine-token tests mint their own tokens.** `MachineTokens` signs RS256 with the key pair in
   `service/src/test/resources/machine-token-*.pem`, and `MachineGuardEnforcedProfile` hands
-  quarkus-oidc the public half, so the enforced path is exercised end to end with no qits-idp to
-  reach. Those PEMs are **test fixtures, not credentials**.
+  quarkus-oidc the public half, so the enforced path is exercised end to end with no
+  qits-platform-idp to reach. Those PEMs are **test fixtures, not credentials**.
 - `FakeDeploymentDriver` and `FakeSpecSource` are `@Mock` and application-scoped, so they are shared
   across tests: reset both in `@BeforeEach`, use distinct **environment names, repository ids and
   service names** per test, and read their state through their **methods** — the injected reference

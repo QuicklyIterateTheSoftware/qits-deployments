@@ -11,8 +11,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Every guarded write with the gate on — the posture a deployment reaches by setting {@code
- * QITS_AUTH_MACHINE_REQUIRED=true} once qits-idp grants the {@code qits-platform-deployments}
- * audience.
+ * QITS_AUTH_MACHINE_REQUIRED=true} once qits-platform-idp grants the {@code
+ * qits-platform-deployments} audience.
  *
  * <p>Tokens are real: signed RS256, verified by quarkus-oidc against the public key in {@link
  * MachineGuardEnforcedProfile}. So these tests fail if the OIDC configuration in
@@ -108,7 +108,8 @@ class MachineGuardEnforcedTest {
   void aTokenMintedForAnotherServiceIsRefusedOnEveryWrite() {
     given()
         .contentType(ContentType.JSON)
-        .header("Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-artifacts"))
+        .header(
+            "Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-platform-artifacts"))
         .body(EVENT)
         .when()
         .post(INTAKE)
@@ -116,7 +117,8 @@ class MachineGuardEnforcedTest {
         .statusCode(401);
     given()
         .contentType(ContentType.JSON)
-        .header("Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-artifacts"))
+        .header(
+            "Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-platform-artifacts"))
         .body(ENVIRONMENT_BODY)
         .when()
         .post(ENVIRONMENTS)
@@ -124,7 +126,8 @@ class MachineGuardEnforcedTest {
         .statusCode(401);
     given()
         .contentType(ContentType.JSON)
-        .header("Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-artifacts"))
+        .header(
+            "Authorization", "Bearer " + MachineTokens.token("qits-ci", "qits-platform-artifacts"))
         .body(SERVICE_BODY)
         .when()
         .put(SERVICES + "/guarded-wrong-aud")
@@ -217,9 +220,9 @@ class MachineGuardEnforcedTest {
 
   @Test
   void thePinListingStaysOpenToTheGarbageCollectorThatReadsIt() {
-    // Same rule from the machine side: the pins are a read, so they carry no guard. qits-artifacts
-    // plans its OCI sweep fail-closed on this answer — a 401 here would abort every sweep, and the
-    // gate flipping on must not be the thing that does it.
+    // Same rule from the machine side: the pins are a read, so they carry no guard.
+    // qits-platform-artifacts plans its OCI sweep fail-closed on this answer — a 401 here would
+    // abort every sweep, and the gate flipping on must not be the thing that does it.
     given().when().get("/platform-deployments/api/pins").then().statusCode(200);
   }
 

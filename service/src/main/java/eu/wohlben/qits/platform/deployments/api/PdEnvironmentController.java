@@ -42,7 +42,8 @@ import org.jboss.logging.Logger;
  * machine — the bootstrap and the deploy path — so a bearer is a credential its caller can hold,
  * and the reads are the opposite: a person drives them through qits-gateway's session and the web
  * client polls them, so a guard there would close the surface for both the day the gate flips on.
- * The guard is gated off by {@code qits.auth.machine.required} until qits-idp grants this audience.
+ * The guard is gated off by {@code qits.auth.machine.required} until qits-platform-idp grants this
+ * audience.
  */
 @Path("/environments")
 @Produces(MediaType.APPLICATION_JSON)
@@ -167,7 +168,7 @@ public class PdEnvironmentController {
    * <p>It is what a reconciliation compares against the docker labels on the host — the shared
    * runtime truth — before connecting what is missing. It differs from the environment aggregate
    * above deliberately: that one is the tier's own services, this one composes the platform plane
-   * in, and a reader that took the aggregate for the answer would silently miss qits-idp.
+   * in, and a reader that took the aggregate for the answer would silently miss qits-platform-idp.
    */
   @GET
   @Path("/{environmentId}/links")

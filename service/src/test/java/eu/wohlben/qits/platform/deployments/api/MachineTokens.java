@@ -8,10 +8,10 @@ import java.time.Duration;
 import java.util.Set;
 
 /**
- * The test issuer: mints the RS256 tokens qits-idp will mint in production, signed with the key
- * pair in {@code src/test/resources}. {@link MachineGuardEnforcedProfile} hands the public half to
- * quarkus-oidc, so a token made here is validated by the real extension — signature, issuer and
- * audience — rather than by a fake identity slipped past it.
+ * The test issuer: mints the RS256 tokens qits-platform-idp will mint in production, signed with
+ * the key pair in {@code src/test/resources}. {@link MachineGuardEnforcedProfile} hands the public
+ * half to quarkus-oidc, so a token made here is validated by the real extension — signature, issuer
+ * and audience — rather than by a fake identity slipped past it.
  *
  * <p>The shape is the contract's: {@code iss} is the configured issuer, {@code sub} is the client
  * id, and {@code aud} is a JSON <b>array</b> of target service ids, which is what the idp always
@@ -23,7 +23,7 @@ final class MachineTokens {
   static final String VERIFICATION_KEY = "/machine-token-verification-key.pem";
 
   /** The issuer this service is configured against — see quarkus.oidc.auth-server-url. */
-  static final String ISSUER = "http://qits-idp:8080/idp";
+  static final String ISSUER = "http://qits-platform-idp:8080/idp";
 
   /** A token from {@code clientId}, addressed to {@code audiences}, valid for five minutes. */
   static String token(String clientId, String... audiences) {

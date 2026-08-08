@@ -43,7 +43,7 @@ import org.junit.jupiter.api.Test;
  * <p><b>The base-href probe is still absent, and the reason it was absent has gone.</b> It was left
  * out while the client said {@code /cd/}: asserting the right value would have failed the build for
  * something no change in this repo could fix, and asserting {@code /cd/} would have pinned the wrong
- * value into a test. The client is qits-platform-spa-deployments now and its {@code angular.json}
+ * value into a test. The client is qits-spa-deployments now and its {@code angular.json}
  * says {@code /platform-deployments/}, so what remains is an ordinary open debt rather than a
  * blocked one. This suite asserts what the SERVER owes — the client is served at the segment, deep
  * links reach it, machine paths never do. See AGENTS.md.
@@ -87,7 +87,7 @@ public class PdPackagedSurfaceIT {
 
   /**
    * The fourth spelling of the segment, and the only one no build here can check any other way: the
-   * client's own baseHref, set in qits-platform-spa-deployments' angular.json. A page served with
+   * client's own baseHref, set in qits-spa-deployments' angular.json. A page served with
    * the wrong one loads and then fetches its own JavaScript from a segment nothing serves — green
    * build, blank screen. The other three are {@code quarkus.quinoa.ui-root-path}, {@code
    * quarkus.rest.path} and {@code quarkus.http.non-application-root-path}.

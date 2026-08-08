@@ -1,4 +1,4 @@
-# qits-platform-deployments as a GraalVM-native container IMAGE — the same shape as its siblings'
+# qits-deployments as a GraalVM-native container IMAGE — the same shape as its siblings'
 # docker/Dockerfile: a Mandrel builder stage compiles the binary, a minimal runtime stage carries
 # only it.
 #
@@ -10,15 +10,15 @@
 #
 #     git submodule update --init
 #     (cd service/src/main/webui && npm ci && npm run build)
-#     docker build -t qits/platform-deployments:latest -f docker/Dockerfile .
+#     docker build -t qits/deployments:latest -f docker/Dockerfile .
 #
 # The first two lines are not optional and are not a convenience: this image carries the web client
-# (service/src/main/webui = the qits-platform-spa-deployments submodule), and the builder stage below packages a
+# (service/src/main/webui = the qits-spa-deployments submodule), and the builder stage below packages a
 # bundle that was ALREADY BUILT rather than building one. See the Quinoa flags on the mvnw line for
 # why the build cannot happen inside that stage.
 #
 # --- this image does NOT run with an empty environment, and that is not a packaging bug ------------
-# `docker run --rm qits/platform-deployments:latest` dies before the HTTP listener: uid 1001 has no
+# `docker run --rm qits/deployments:latest` dies before the HTTP listener: uid 1001 has no
 # /etc/passwd entry in ubi-minimal, a native image resolves user.home through getpwuid(2) rather
 # than $HOME, and the ${user.home}-rooted H2 default the environments jar ships has nowhere to land.
 # IT IS DELIBERATELY LEFT THAT WAY (the qits-ci stance): an image that comes up healthy on an empty
@@ -40,28 +40,29 @@
 #
 #   QITS_ARTIFACTS_REGISTRY_HOST
 #                           where the DOCKER DAEMON pulls images from. The platform-network default
-#                           (qits-artifacts:8080) only resolves for a daemon whose containers sit on
-#                           that network, and the daemon must additionally trust it
-#                           (insecure-registries) while the platform speaks plain HTTP. Wrong, every
-#                           deployment records FAILED with a pull error.
+#                           (qits-platform-artifacts:8080) only resolves for a daemon whose
+#                           containers sit on that network, and the daemon must additionally trust
+#                           it (insecure-registries) while the platform speaks plain HTTP. Wrong,
+#                           every deployment records FAILED with a pull error.
 #   QITS_OBSERVABILITY_URL  where OTLP export goes; absent qits-observability, the exporter logs a
 #                           warning per export loudly enough to bury real lines
 #                           (OTEL_SDK_DISABLED=true is the escape hatch).
 #
-# There is no token of any kind: machine callers present a qits-idp bearer instead, and one env var
-# decides whether that is demanded:
+# There is no token of any kind: machine callers present a qits-platform-idp bearer instead, and one
+# env var decides whether that is demanded:
 #
 #   QITS_AUTH_MACHINE_REQUIRED
 #                           unset (the shipped state) the build-succeeded intake and the topology
 #                           writes accept the credential-free calls their senders make today. `true`
 #                           demands a token minted for qits-platform-deployments on those paths —
-#                           set it only once qits-idp is up AND the senders are sending, because
-#                           qits-ci swallows delivery failures at debug and a premature flip stops
-#                           deployments silently.
+#                           set it only once qits-platform-idp is up AND the senders are sending,
+#                           because qits-ci swallows delivery failures at debug and a premature flip
+#                           stops deployments silently.
 #   QUARKUS_OIDC_AUTH_SERVER_URL
-#                           the idp, default http://qits-idp:8080/idp. Unreachable is a WARN at
-#                           boot, never a failed start — which matters more here than anywhere,
-#                           since this is the service that would have to redeploy qits-idp.
+#                           the idp, default http://qits-platform-idp:8080/idp. Unreachable is a
+#                           WARN at boot, never a failed start — which matters more here than
+#                           anywhere, since this is the service that would have to redeploy
+#                           qits-platform-idp.
 #
 # --- READ THIS BEFORE DEPLOYING: this component does its work by shelling out ---------------------
 # The docker CLI is installed below, but it is only half of what a deployment has to supply, and the
@@ -89,9 +90,10 @@
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `localhost:8081/quay/…` is qits-artifacts' pull-through mirror of quay.io: the first build fetches
-# the image from upstream and caches it, every later build is served from local disk. The tag is
-# upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves it.
+# `localhost:8081/quay/…` is qits-platform-artifacts' pull-through mirror of quay.io: the first
+# build fetches the image from upstream and caches it, every later build is served from local disk.
+# The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay
+# moves it.
 FROM localhost:8081/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
@@ -122,12 +124,12 @@ COPY . .
 # The three command overrides are the load-bearing part, and the reason this file deviates from that
 # recipe (which has the builder run the client's real install and build):
 #
-#   service/src/main/webui is qits-platform-spa-deployments, and it depends on @qits/ui-components. That package
-#   exists ONLY on the platform's own npm registry (qits-artifacts). A RUN step in a docker build
-#   reaches the public internet — Maven Central, npmjs.org, nodejs.org — and can reach the platform
-#   registry by NO address: not a network alias, not localhost:8081, not host.docker.internal. So
-#   the install cannot happen here, and an install that "worked" here would have resolved the @qits
-#   scope against npmjs.org, where that name does not exist and never will.
+#   service/src/main/webui is qits-spa-deployments, and it depends on @qits/ui-components. That
+#   package exists ONLY on the platform's own npm registry (qits-platform-artifacts). A RUN step in
+#   a docker build reaches the public internet — Maven Central, npmjs.org, nodejs.org — and can
+#   reach the platform registry by NO address: not a network alias, not localhost:8081, not
+#   host.docker.internal. So the install cannot happen here, and an install that "worked" here would
+#   have resolved the @qits scope against npmjs.org, where that name does not exist and never will.
 #
 # The bundle is therefore built BEFORE this image, by the pipeline step in
 # .config/qits/ci-post-receive.yml, which runs where the registry is reachable, and arrives in the
@@ -145,14 +147,14 @@ COPY . .
 # Quinoa does not copy build-dir into target/quinoa/build, it MOVES it, and overlayfs cannot rename a
 # directory that still lives in a LOWER image layer. It answers EXDEV, the JDK falls back to its
 # cross-file-store path, and that path refuses a non-empty directory — the build dies seconds in with
-# `DirectoryNotEmptyException: …/dist/qits-platform-spa-deployments/browser`, which names the source and explains
+# `DirectoryNotEmptyException: …/dist/qits-spa-deployments/browser`, which names the source and explains
 # nothing. A builder stage that *creates* dist itself is immune by accident; ours arrives by COPY.
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
 ARG QITS_MAVEN_REPOSITORY_URL=http://localhost:8081/artifacts/maven/maven
 ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
-RUN d=service/src/main/webui/dist/qits-platform-spa-deployments/browser; \
+RUN d=service/src/main/webui/dist/qits-spa-deployments/browser; \
     test -f "$d/index.html" || { \
       echo "No built client at $d." >&2; \
       echo "The build context must carry one: run 'npm ci && npm run build'" >&2; \

@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- Standalone parent for the qits-platform-deployments repo: the platform component that owns
+    <!-- Standalone parent for the qits-deployments repo: the platform component that owns
          BOTH halves of "what runs where" — the topology (which environments exist, which services
          are linked into each, what shape each service has) and the execution (pull an image, start
          a container, health-gate it, cut over, record it).

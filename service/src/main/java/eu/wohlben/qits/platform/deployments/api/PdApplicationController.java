@@ -17,9 +17,9 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * together.
  *
  * <p>It is flat because a platform service belongs to no environment: reading through the
- * environments would leave qits-idp and this component out of it, which are the two a reader most
- * wants to find. Each row says which plane it is on ({@code target}) and, for an environment
- * application, which tier ({@code environmentId}/{@code environmentName}).
+ * environments would leave qits-platform-idp and this component out of it, which are the two a
+ * reader most wants to find. Each row says which plane it is on ({@code target}) and, for an
+ * environment application, which tier ({@code environmentId}/{@code environmentName}).
  *
  * <p>Read-only, and that is the model rather than a phase: rows here are derived from each
  * repository's own {@code .config/qits/deployments.yml} on every green build.

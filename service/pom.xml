@@ -21,7 +21,7 @@
          A DEPLOYABLE APP, not a library JAR — <packaging>quarkus</packaging> binds augmentation
          into the lifecycle so it cannot be silently misplaced (the migration-deployables-plan.md
          reasoning, verbatim from the siblings). It serves its own client: src/main/webui is the
-         qits-platform-spa-deployments submodule, which Quinoa builds into this artifact during augmentation, so one
+         qits-spa-deployments submodule, which Quinoa builds into this artifact during augmentation, so one
          process answers /platform-deployments/ and /platform-deployments/api and the gateway needs
          no second upstream.
 
@@ -79,11 +79,11 @@
             <artifactId>qits-auth-core</artifactId>
         </dependency>
         <dependency>
-            <!-- Bearer validation against qits-idp. qits-auth-core deliberately does NOT bring it:
-                 validating a token is each service's own choice of extension and config, and the
-                 jar only reads the identity that validation leaves behind. Configured in
-                 application.properties; with the rollout gate off nothing here demands a token,
-                 and a request with no Authorization header still falls through to forward-auth. -->
+            <!-- Bearer validation against qits-platform-idp. qits-auth-core deliberately does NOT
+                 bring it: validating a token is each service's own choice of extension and config,
+                 and the jar only reads the identity that validation leaves behind. Configured in
+                 application.properties; with the rollout gate off nothing here demands a token, and
+                 a request with no Authorization header still falls through to forward-auth. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
@@ -97,7 +97,7 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
-            <!-- The Angular SPA in src/main/webui (a submodule on qits-platform-spa-deployments's main): Quinoa runs
+            <!-- The Angular SPA in src/main/webui (a submodule on qits-spa-deployments's main): Quinoa runs
                  its npm build during augmentation and registers the output as static resources.
                  Quinoa is in NO BOM, so the version is pinned — in the ROOT pom's
                  dependencyManagement, with the reasoning for 2.8.2 beside the property. Its build
@@ -125,7 +125,7 @@
             <!-- Test-only token issuer. The gate-on suite signs its own RS256 tokens with the key
                  pair in src/test/resources and has quarkus-oidc verify them locally, so the
                  enforcement path is exercised end to end — signature, issuer, audience, guard —
-                 with no qits-idp to reach. Nothing in src/main mints a token. -->
+                 with no qits-platform-idp to reach. Nothing in src/main mints a token. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-jwt-build</artifactId>
             <scope>test</scope>

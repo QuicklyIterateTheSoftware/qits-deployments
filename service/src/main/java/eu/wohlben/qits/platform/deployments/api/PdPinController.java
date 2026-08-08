@@ -15,9 +15,10 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * The image shas that must survive a garbage collection, across every environment:
  * {@code {"pins":[{"applicationName","shas"}]}}.
  *
- * <p><b>Who asks.</b> qits-artifacts' OCI image GC reads this when it plans a sweep — a tag no pin
- * names is eligible, and an unreachable answer aborts the plan with nothing deleted. It is the same
- * fail-closed shape qits-ci's {@code GET /ci/api/daemon} carries for the daemon binaries.
+ * <p><b>Who asks.</b> qits-platform-artifacts' OCI image GC reads this when it plans a sweep — a
+ * tag no pin names is eligible, and an unreachable answer aborts the plan with nothing deleted. It
+ * is the same fail-closed shape qits-ci's {@code GET /ci/api/daemon} carries for the daemon
+ * binaries.
  *
  * <p><b>Why this component answers it rather than the collector computing it.</b> The keep-set is
  * "which shas would a restart or a rollback pull", and this is the only service that knows. The

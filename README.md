@@ -157,17 +157,17 @@ records the outcome. A successor that misses its gate leaves the predecessor ser
 | `PUT/GET/DELETE /services/{name}` | derived registration (in-process); an operator, for the deliberate acts |
 | `GET /applications` | the client — one entry per (service, tier), both planes flat |
 | `GET /deployments?environmentId=` | the client — one tier's history, newest first |
-| `GET /pins` | qits-artifacts' OCI garbage collector, fail-closed |
+| `GET /pins` | qits-platform-artifacts' OCI garbage collector, fail-closed |
 | `POST /events/build-succeeded` | qits-ci, fire-and-forget |
 
 All under `/platform-deployments/api`. The client is served at `/platform-deployments`, health at
 `/platform-deployments/q/health/ready` — which is also what this component's own health-path
 convention derives for its own name.
 
-**The pins are read off deployment rows alone.** qits-artifacts deletes an image tag only when no
-pin names it, and deletes nothing when it cannot get an answer, so the keep-set must not depend on
-anything the topology says today. Per application name, across every tier: the sha it is serving,
-and the sha a rollback would put back.
+**The pins are read off deployment rows alone.** qits-platform-artifacts deletes an image tag only
+when no pin names it, and deletes nothing when it cannot get an answer, so the keep-set must not
+depend on anything the topology says today. Per application name, across every tier: the sha it is
+serving, and the sha a rollback would put back.
 
 ## Trust boundaries
 

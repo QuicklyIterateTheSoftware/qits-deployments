@@ -13,8 +13,8 @@ import org.junit.jupiter.api.Test;
  * gets.
  *
  * <p>It matters here for the reason it did in both ancestors: this component is deployed before
- * qits-idp knows the {@code qits-platform-deployments} audience exists, so "the guard is present
- * and inert" is the state it ships in and lives in until that grant lands.
+ * qits-platform-idp knows the {@code qits-platform-deployments} audience exists, so "the guard is
+ * present and inert" is the state it ships in and lives in until that grant lands.
  */
 @QuarkusTest
 class MachineGuardOffTest {

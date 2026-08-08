@@ -23,9 +23,10 @@ import org.junit.jupiter.api.Test;
  * than asserting the whole document: the suite shares one database and other classes deploy too.
  *
  * <p>It reads nothing but deployment rows, and that independence is the claim this suite carries
- * over from the retired outage suite: qits-artifacts' image GC is fail-closed on this answer, so a
- * pin that needed the service catalogue would tie garbage collection platform-wide to a second
- * query. Everything the rule reads — the name, the tier, the sha, the status — is on the row.
+ * over from the retired outage suite: qits-platform-artifacts' image GC is fail-closed on this
+ * answer, so a pin that needed the service catalogue would tie garbage collection platform-wide to
+ * a second query. Everything the rule reads — the name, the tier, the sha, the status — is on the
+ * row.
  */
 @QuarkusTest
 public class PdPinApiTest {
