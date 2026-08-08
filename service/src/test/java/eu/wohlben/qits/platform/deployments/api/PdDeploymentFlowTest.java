@@ -173,10 +173,18 @@ public class PdDeploymentFlowTest {
     assertEquals("repo-green", spec.applicationName());
     assertEquals(PdDeploymentTarget.ENVIRONMENT, spec.target());
     // ...and it joins the legacy network after the start, which is the transition membership that
-    // keeps today's direct cross-application URLs resolving.
+    // keeps today's direct cross-application URLs resolving. The alias it joins UNDER is the
+    // tier-qualified one — the same address the run gave it on its own network, because an alias
+    // that resolved on one network and not the next would be an address that works by luck.
     assertTrue(
-        driver.connections().contains("qits-net:" + containerName + ":repo-green"),
-        "the fresh container joins the legacy network: " + driver.connections());
+        driver.connections().contains("qits-net:" + containerName + ":flow-green-repo-green"),
+        "the fresh container joins the legacy network under its wire alias: " + driver.connections());
+    // The predecessor search asks about that alias AND the bare name, which is what absorbs every
+    // container started before the qualifier existed instead of running a second copy beside it.
+    assertEquals(
+        List.of(List.of("flow-green-repo-green", "repo-green")),
+        driver.searchedAliases(),
+        "the qualified alias and the bare one: " + driver.searchedAliases());
     // Nothing named a health path, so registration derived the convention one from the name — and
     // that is what the gate curls.
     assertEquals("/repo-green/q/health/ready", spec.healthPath());
@@ -336,16 +344,17 @@ public class PdDeploymentFlowTest {
 
   @Test
   public void aPlatformSelfUpdateStillHandsArbitrationToTheReferee() {
-    // This component itself becomes a platform service, so the handoff path has to work with the
-    // platform naming and networks — a predecessor found on the legacy network, a successor named
-    // after the plane, and still no container stopped by this process.
+    // A platform service updating itself, so the handoff path has to work with the platform naming
+    // and networks — a predecessor found on the legacy network, a successor named without any tier
+    // segment, and still no container stopped by this process.
+    createEnvironment("flow-selfplane");
     specs.script(
         "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
     String selfId = "abcdef123456";
     String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
     driver.scriptAliasHolders(List.of(new DeploymentDriver.Holder(selfFullId, "qits-platform-deployments", null)));
-    postBuildSucceeded("qits-platform-deployments", "platform/main", SHA_A);
+    postBuildSucceeded("qits-platform-deployments", "environment/flow-selfplane", SHA_A);
 
     long deadline = System.currentTimeMillis() + 15_000;
     while (driver.handoffs().isEmpty() && System.currentTimeMillis() < deadline) {
@@ -360,8 +369,7 @@ public class PdDeploymentFlowTest {
     assertEquals(selfFullId, handoff.oldContainerId());
     String successor = driver.started().get(0).containerName();
     assertEquals(successor, handoff.newContainerName());
-    assertTrue(
-        successor.startsWith("qits-pd-platform-qits-platform-deployments-"), successor);
+    assertTrue(successor.startsWith("qits-pd-qits-platform-deployments-"), successor);
     assertEquals("qits-platform", driver.started().get(0).network());
     // The successor is on its networks BEFORE the referee stops the predecessor — it has to be
     // reachable the moment it passes its gate.
@@ -436,13 +444,14 @@ public class PdDeploymentFlowTest {
     assertEquals("qits-env-flow-hub-repo-gw", driver.started().get(0).network());
     assertTrue(driver.started().get(0).availableOnEnv());
     assertTrue(
-        driver.connections().contains("qits-env-flow-hub:" + container + ":repo-gw"),
+        driver.connections().contains("qits-env-flow-hub:" + container + ":flow-hub-repo-gw"),
         "the public node joins its environment's bundle: " + driver.connections());
     assertTrue(
         driver
             .connections()
-            .contains("qits-env-flow-hub-app-hub-seed:" + container + ":repo-gw"),
-        "and every application network of that environment: " + driver.connections());
+            .contains("qits-env-flow-hub-app-hub-seed:" + container + ":flow-hub-repo-gw"),
+        "and every application network of that environment, under one alias throughout: "
+            + driver.connections());
   }
 
   @Test
@@ -456,8 +465,9 @@ public class PdDeploymentFlowTest {
             "app-single-seed"));
     specs.script(
         "repo-idp", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    // platform/main, not the environment's branch: a platform service deploys from its own plane's.
-    postBuildSucceeded("repo-idp", "platform/main", SHA_A);
+    // An environment's own branch, because that is the only kind of deploy ref there is — and what
+    // comes out of it is still platform-shaped.
+    postBuildSucceeded("repo-idp", "environment/flow-single", SHA_A);
 
     awaitStarted(1);
     DeploymentDriver.StartSpec spec = driver.started().get(0);
@@ -466,8 +476,10 @@ public class PdDeploymentFlowTest {
     assertNull(spec.environmentId(), "a platform service belongs to no tier");
     assertNull(spec.environmentName());
     assertTrue(
-        spec.containerName().startsWith("qits-pd-platform-repo-idp-"),
-        "platform services are named after the plane, not an environment: " + spec.containerName());
+        spec.containerName().startsWith("qits-pd-repo-idp-"),
+        "no tier segment, because there is no tier: " + spec.containerName());
+    // Its wire alias stays the bare application name — one instance for the whole platform has
+    // nothing to be qualified against — and it is the same on every network it joins.
     assertTrue(
         driver
             .connections()
@@ -477,6 +489,10 @@ public class PdDeploymentFlowTest {
     assertTrue(
         driver.connections().contains("qits-net:" + spec.containerName() + ":repo-idp"),
         "and the legacy network while the transition lasts");
+    assertEquals(
+        List.of(List.of("repo-idp")),
+        driver.searchedAliases(),
+        "one alias to search: the platform spelling IS the bare name");
 
     // The environment it is not part of deploys nothing on this event.
     assertEquals(
@@ -493,16 +509,19 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void aPlatformServiceOnAnotherBranchDeploysNothing() {
-    // The spec's own branch beats the convention: the event on platform/main — where a platform
-    // service that named none would deploy — is not this service's, and nothing runs on it.
+  public void aPlatformServiceOnABranchNoEnvironmentTracksDeploysNothing() {
+    // A platform service asks the same branch question a tiered one does — does an environment
+    // listen to this ref. `release` is nobody's deploy ref, so the first event ships nothing and
+    // only the second one does.
+    createEnvironment("flow-pinned");
     specs.script(
-        "repo-pinned",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, "release", null));
-    postBuildSucceeded("repo-pinned", "platform/main", SHA_A);
-    postBuildSucceeded("repo-pinned", "release", SHA_B);
+        "repo-pinned", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
+    postBuildSucceeded("repo-pinned", "release", SHA_A);
+    postBuildSucceeded("repo-pinned", "environment/flow-pinned", SHA_B);
 
     awaitStarted(1);
+    awaitWorkerIdle();
+    assertEquals(1, driver.started().size(), "only the environment's branch shipped");
     assertEquals(SHA_B, driver.started().get(0).commitSha());
   }
 
@@ -519,8 +538,13 @@ public class PdDeploymentFlowTest {
     postBuildSucceeded("repo-rec", "environment/flow-reconcile", SHA_A);
 
     awaitDeployments(environmentId, 1);
+    // Each of them joins under ITS OWN wire alias: the hub is one of this environment's containers,
+    // so the tier qualifies it; the platform service is on no tier and keeps its bare name. The
+    // label carries the application name alone, so the qualifier is put back here.
     assertTrue(
-        driver.connections().contains("qits-env-flow-reconcile-repo-rec:hub-id:qits-gateway"),
+        driver
+            .connections()
+            .contains("qits-env-flow-reconcile-repo-rec:hub-id:flow-reconcile-qits-gateway"),
         driver.connections().toString());
     assertTrue(
         driver.connections().contains("qits-env-flow-reconcile-repo-rec:idp-id:qits-idp"),
@@ -547,7 +571,9 @@ public class PdDeploymentFlowTest {
 
     awaitDeployments(environmentId, 1);
     assertTrue(
-        driver.connections().contains("qits-env-flow-reheal-repo-reheal:hub-id:qits-gateway"),
+        driver
+            .connections()
+            .contains("qits-env-flow-reheal-repo-reheal:hub-id:flow-reheal-qits-gateway"),
         "the hub is put back on a network it should already be on: " + driver.connections());
     assertTrue(
         driver
@@ -598,13 +624,14 @@ public class PdDeploymentFlowTest {
     // A platform service belongs to no tier, so a container carrying a tier's id is never its
     // predecessor — while an unlabelled one still is, because that is what its own live migration
     // off the legacy network depends on.
+    createEnvironment("flow-plane");
     specs.script(
         "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
     driver.scriptAliasHolders(
         List.of(
             new DeploymentDriver.Holder("dd".repeat(32), "an-env-copy", "some-env-id"),
             new DeploymentDriver.Holder("ee".repeat(32), "the-old-unlabelled-one", null)));
-    postBuildSucceeded("repo-plane", "platform/main", SHA_A);
+    postBuildSucceeded("repo-plane", "environment/flow-plane", SHA_A);
 
     awaitStarted(1);
     awaitWorkerIdle();
@@ -663,7 +690,7 @@ public class PdDeploymentFlowTest {
 
     specs.script(
         "repo-convert", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("repo-convert", "platform/main", SHA_B);
+    postBuildSucceeded("repo-convert", "environment/flow-convert", SHA_B);
     awaitStarted(2);
 
     List<Map<String, Object>> registered =
@@ -681,7 +708,7 @@ public class PdDeploymentFlowTest {
     assertEquals(1, registered.size(), "one row, not two: " + registered);
     assertEquals("PLATFORM", registered.get(0).get("target"));
     assertNull(registered.get(0).get("environmentId"));
-    assertEquals("platform/main", registered.get(0).get("branch"));
+    assertNull(registered.get(0).get("branch"), "the plane has no deploy ref of its own");
 
     // The history moved with it: the environment it left has no deployments of it any more, and
     // the row that was serving is decommissioned rather than deleted.
@@ -707,7 +734,7 @@ public class PdDeploymentFlowTest {
     createEnvironment("flow-unflip");
     specs.script(
         "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("repo-unflip", "platform/main", SHA_A);
+    postBuildSucceeded("repo-unflip", "environment/flow-unflip", SHA_A);
     awaitStarted(1);
 
     // The file goes back to saying `environment`, on the tier's own branch this time.
@@ -750,6 +777,7 @@ public class PdDeploymentFlowTest {
     // and ServiceCatalog.upsert's own lock is another, but the contract under test is the worker:
     // handling the WHOLE event on one thread is what makes read-then-write atomic against every
     // other event — which is what the ancestor's null-environment_id row had no constraint for.
+    createEnvironment("flow-once");
     specs.script(
         "repo-once", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
     int senders = 8;
@@ -763,7 +791,7 @@ public class PdDeploymentFlowTest {
             pool.submit(
                 () -> {
                   go.await();
-                  postBuildSucceeded("repo-once", "platform/main", SHA_A);
+                  postBuildSucceeded("repo-once", "environment/flow-once", SHA_A);
                   return null;
                 }));
       }

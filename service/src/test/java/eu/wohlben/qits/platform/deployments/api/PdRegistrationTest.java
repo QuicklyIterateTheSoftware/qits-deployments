@@ -94,44 +94,48 @@ public class PdRegistrationTest {
   }
 
   @Test
-  public void aPlatformServiceIsRegisteredWithItsOwnBranchAndNoLinks() {
+  public void aPlatformServiceIsRegisteredWithNoBranchAndNoLinks() {
     // A platform service has NO links, and that absence is the model: it is implicitly present
-    // everywhere, which is what makes a new environment pick it up without anyone editing it.
+    // everywhere, which is what makes a new environment pick it up without anyone editing it. It
+    // carries no branch either, and that is the newer half: the plane has no deploy ref of its own,
+    // so there is nothing to write down.
     createEnvironment("reg-platform", "environment/reg-platform");
     specs.script(
         "repo-reg-idp",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, "release", null));
-    postBuildSucceeded("repo-reg-idp", "release", SHA_A);
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
+    postBuildSucceeded("repo-reg-idp", "environment/reg-platform", SHA_A);
     awaitStarted(1);
 
     Map<String, Object> service = service("repo-reg-idp");
     assertEquals("PLATFORM", service.get("target"));
-    assertEquals("release", service.get("branch"));
+    assertNull(service.get("branch"), "the plane has no deploy ref of its own any more");
     assertEquals(List.of(), service.get("environmentIds"));
   }
 
   @Test
-  public void aPlatformServiceThatNamesNoBranchListensOnThePlatformTrunk() {
-    // The plane's convention, and it is `platform/main` rather than `main` — the mirror of a tier's
-    // `environment/<name>`. The branch is written to the row, so what the service listens on is
-    // readable rather than implied by a default nobody can see.
+  public void aPlatformServiceDeploysFromAnEnvironmentsBranch() {
+    // The deploy refs are `environment/<name>` and nothing else — one set for the whole platform,
+    // asked the same way on both planes. What it deploys is still platform-shaped: one instance,
+    // no environment, no links.
+    createEnvironment("reg-trunk", "environment/reg-trunk");
     specs.script(
         "repo-reg-trunk",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("repo-reg-trunk", "platform/main", SHA_A);
+    postBuildSucceeded("repo-reg-trunk", "environment/reg-trunk", SHA_A);
     awaitStarted(1);
 
     Map<String, Object> service = service("repo-reg-trunk");
     assertEquals("PLATFORM", service.get("target"));
-    assertEquals("platform/main", service.get("branch"));
     assertEquals(List.of(), service.get("environmentIds"));
+    assertNull(driver.started().get(0).environmentId(), "one instance, on no tier");
   }
 
   @Test
   public void aPlatformServiceBuiltOnMainDeploysNothingAtAll() {
-    // `main` is the integration trunk on both planes: it builds and ships nothing. A release
-    // reaches the platform by fast-forwarding `platform/main` onto it, and until that push the
-    // event on the trunk must leave no row and start no container.
+    // `main` is the integration trunk and no environment listens to it: it builds and ships
+    // nothing. A release reaches an environment by fast-forwarding `environment/<name>` onto it,
+    // and until that push the event on the trunk must leave no row and start no container.
+    createEnvironment("reg-mainonly", "environment/reg-mainonly");
     specs.script(
         "repo-reg-mainonly",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
@@ -150,12 +154,14 @@ public class PdRegistrationTest {
     createEnvironment("reg-alias", "environment/reg-alias");
     specs.script(
         "repo-alias", DeploymentSpecParserAlias.parse("deployment_target: singleton\n"));
-    postBuildSucceeded("repo-alias", "platform/main", SHA_A);
+    postBuildSucceeded("repo-alias", "environment/reg-alias", SHA_A);
     awaitStarted(1);
 
     assertEquals("PLATFORM", service("repo-alias").get("target"));
+    // No environment segment in the name: a platform container belongs to no tier, and the word
+    // that used to fill the gap is in the repository names now.
     assertTrue(
-        driver.started().get(0).containerName().startsWith("qits-pd-platform-repo-alias-"),
+        driver.started().get(0).containerName().startsWith("qits-pd-repo-alias-"),
         driver.started().get(0).containerName());
   }
 
@@ -165,10 +171,11 @@ public class PdRegistrationTest {
     // environment id could not be asked for at all — every platform row was recorded and then
     // unreadable, and a client drawing "what is deployed" showed the tiers and nothing else.
     // `platform` is the stand-in the application id already carries, reused as the filter value.
+    createEnvironment("reg-plane", "environment/reg-plane");
     specs.script(
         "repo-reg-plane",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("repo-reg-plane", "platform/main", SHA_A);
+    postBuildSucceeded("repo-reg-plane", "environment/reg-plane", SHA_A);
     awaitStarted(1);
     awaitWorkerIdle();
 
@@ -195,7 +202,7 @@ public class PdRegistrationTest {
     specs.script(
         "repo-reg-crossplane",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("repo-reg-crossplane", "platform/main", SHA_A);
+    postBuildSucceeded("repo-reg-crossplane", "environment/reg-planes", SHA_A);
     awaitStarted(2);
     awaitWorkerIdle();
 
@@ -260,9 +267,10 @@ public class PdRegistrationTest {
   public void aPlatformServiceGetsTheSameHealthPathResolution() {
     // The platform plane is not a different rule: the convention, the spec and an existing value
     // rank the same way there.
+    createEnvironment("reg-health-plane", "environment/reg-health-plane");
     specs.script(
         "qits-idp", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null));
-    postBuildSucceeded("qits-idp", "platform/main", SHA_A);
+    postBuildSucceeded("qits-idp", "environment/reg-health-plane", SHA_A);
     awaitStarted(1);
 
     assertEquals("/idp/q/health/ready", service("qits-idp").get("healthPath"));

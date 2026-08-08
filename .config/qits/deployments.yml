@@ -1,9 +1,14 @@
 # How this repository is deployed. It is read from the git host at the built sha.
-# qits-platform-deployments is a platform service: one instance owns the topology and executes every
-# environment's deployments, so a per-tier copy would be a per-tier answer to a platform-wide
-# question — and a second one would be a second docker socket.
 #
-# No `branch:`, so it deploys from the platform plane's convention, `platform/main` — the mirror of a
-# tier's `environment/<name>`. `main` stays the integration trunk and ships nothing; a release
-# reaches the platform by fast-forwarding `platform/main` onto it.
-deployment_target: platform
+# This component is an ENVIRONMENT service: one instance per environment, deploying that
+# environment. It owns the topology and the docker socket, and one environment's copy answers for
+# one environment — which is what a per-tier deployer is for. It used to be a platform service,
+# back when one instance served every tier.
+#
+# `deployment_target` is omitted because `environment` is the default, and a default written out is
+# a second place to keep it right.
+#
+# `deploy_branches` is what the release flow promotes onto; the deployer itself takes no notice of
+# it — a green build deploys wherever an environment listens to the built branch, and that is the
+# environment row's answer, not this file's.
+deploy_branches: environment/prod

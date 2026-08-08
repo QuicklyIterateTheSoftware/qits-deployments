@@ -59,6 +59,9 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private final List<Endpoint> platformServices = Collections.synchronizedList(new ArrayList<>());
   private final List<String> aliasSearches = Collections.synchronizedList(new ArrayList<>());
 
+  /** The alias set each predecessor search asked about — the wire alias, and the bare name. */
+  private final List<List<String>> searchedAliases = Collections.synchronizedList(new ArrayList<>());
+
   /** Networks docker refuses to join, by name — what a real join failure looks like. */
   private final java.util.Map<String, String> refusedJoins = new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -96,6 +99,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     hubs.clear();
     platformServices.clear();
     aliasSearches.clear();
+    searchedAliases.clear();
     refusedJoins.clear();
     duringContainerReap = () -> {};
   }
@@ -128,6 +132,11 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   /** The network sets aliasHolders was asked about, one joined string per call. */
   public List<String> aliasSearches() {
     return List.copyOf(aliasSearches);
+  }
+
+  /** The alias sets aliasHolders was asked about, one list per call. */
+  public List<List<String>> searchedAliases() {
+    return List.copyOf(searchedAliases);
   }
 
   public List<Network> ensuredNetworkSpecs() {
@@ -265,9 +274,10 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public List<Holder> aliasHolders(List<String> networks, String alias) {
-    calls.add("aliasHolders:" + alias);
+  public List<Holder> aliasHolders(List<String> networks, List<String> aliases) {
+    calls.add("aliasHolders:" + String.join(",", aliases));
     aliasSearches.add(String.join(",", networks));
+    searchedAliases.add(List.copyOf(aliases));
     return nextHolders;
   }
 

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -46,12 +47,11 @@ class DeploymentSpecParserTest {
             ---
             deployment_target: platform   # cross-environment
 
-            branch: "release"
+            deploy_branches: "environment/prod"
             health_path: /idp/q/health/ready
             """);
     assertEquals(PdDeploymentTarget.PLATFORM, spec.target());
-    assertEquals("release", spec.branch());
-    assertEquals("release", spec.platformBranch());
+    assertEquals(List.of("environment/prod"), spec.deployBranches());
     assertFalse(spec.availableOnEnv());
     assertEquals("/idp/q/health/ready", spec.healthPath());
   }
@@ -90,20 +90,32 @@ class DeploymentSpecParserTest {
   }
 
   @Test
-  void aPlatformServiceThatNamesNoBranchDeploysFromThePlatformTrunk() {
-    // platform/main, never main: the plane's deploy branch mirrors a tier's environment/<name>, and
-    // main is the integration trunk that ships nothing.
-    DeploymentSpec spec = parse("deployment_target: platform\n");
-    assertNull(spec.branch(), "the file said nothing, and the record says so");
-    assertEquals("platform/main", spec.platformBranch());
+  void aFileThatNamesNoDeployBranchesSaysSoWithAnEmptyList() {
+    // The deployer decides nothing on this key — a build deploys wherever an environment listens to
+    // its branch, on either plane — so "said nothing" has to stay distinguishable from "said none"
+    // for the reader that does use it, the release flow.
+    assertEquals(List.of(), parse("deployment_target: platform\n").deployBranches());
+    assertEquals(List.of(), DeploymentSpec.DEFAULTS.deployBranches());
   }
 
   @Test
-  void aPlatformServiceThatNamesABranchKeepsIt() {
-    // The convention is a default, not a rule: a service released off another ref says so and wins.
-    DeploymentSpec spec = parse("deployment_target: platform\nbranch: release\n");
-    assertEquals("release", spec.branch());
-    assertEquals("release", spec.platformBranch());
+  void deployBranchesIsACommaSeparatedRefListAndEveryRefIsChecked() {
+    // One line, because this file has no YAML sequences; a comma cannot occur in a ref name, which
+    // is what makes the separator safe.
+    assertEquals(
+        List.of("environment/prod", "environment/dev"),
+        parse("deploy_branches: environment/prod, environment/dev\n").deployBranches());
+    assertTrue(messageOf("deploy_branches: ../../etc\n").contains("deploy_branches"));
+    // A trailing comma, or the key with nothing after it, is a writer who meant to say something.
+    assertTrue(messageOf("deploy_branches: environment/prod,\n").contains("deploy_branches"));
+    assertTrue(messageOf("deploy_branches:\n").contains("deploy_branches"));
+  }
+
+  @Test
+  void theRetiredBranchKeyIsNoLongerKnown() {
+    // It named the platform plane's own deploy ref, and the plane has none: `environment/<name>` is
+    // the whole set. A repository still carrying the key is corrected rather than half-obeyed.
+    assertTrue(messageOf("deployment_target: platform\nbranch: release\n").contains("unknown key"));
   }
 
   @Test
@@ -150,17 +162,17 @@ class DeploymentSpecParserTest {
   }
 
   @Test
-  void aBranchThatIsNotAPlainRefNameIsAnError() {
-    assertTrue(messageOf("branch: ../../etc\n").contains("branch"));
-  }
-
-  @Test
-  void aBranchBesideAnEnvironmentTargetIsAcceptedAndIgnoredLater() {
-    // The parser keeps it; the catalogue drops it, because an environment service takes each
-    // environment's branch. Accepted-and-ignored rather than a fifth parse error: a harmless extra
-    // key must not be a failed build.
-    DeploymentSpec spec = parse("deployment_target: environment\nbranch: main\n");
-    assertEquals(PdDeploymentTarget.ENVIRONMENT, spec.target());
-    assertEquals("main", spec.branch());
+  void deployBranchesIsReadForSomebodyElseAndAcceptedOnEitherPlane() {
+    // The key belongs to the release flow, which reads the same file for its promotion targets.
+    // This parser is strict, so a key another reader needs is a key this reader has to know —
+    // accepted-and-unused rather than a second file, and on both planes, since a strict parser that
+    // refused it on one would fail those deployments outright.
+    assertEquals(
+        List.of("environment/prod"),
+        parse("deployment_target: environment\ndeploy_branches: environment/prod\n")
+            .deployBranches());
+    assertEquals(
+        List.of("environment/prod"),
+        parse("deployment_target: platform\ndeploy_branches: environment/prod\n").deployBranches());
   }
 }

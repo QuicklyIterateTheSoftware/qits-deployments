@@ -68,7 +68,7 @@ class DockerDeploymentDriverTest {
         "abc1234",
         "qits-platform",
         "qits-artifacts:8080/qits/qits-platform-deployments:abc1234",
-        "qits-pd-platform-qits-platform-deployments-dep",
+        "qits-pd-qits-platform-deployments-dep",
         "/cd/q/health/ready",
         PdDeploymentTarget.PLATFORM,
         false);
@@ -80,7 +80,10 @@ class DockerDeploymentDriverTest {
 
     assertEquals(List.of("docker", "run", "-d"), argv.subList(0, 3));
     assertTrue(argv.containsAll(List.of("--network", "qits-env-dev-qits-gateway")));
-    assertTrue(argv.containsAll(List.of("--network-alias", "qits-gateway")));
+    // The wire alias carries the tier: two environments hold this application's address on the
+    // shared legacy network, and only the qualifier keeps them apart.
+    assertTrue(argv.containsAll(List.of("--network-alias", "dev-qits-gateway")));
+    assertFalse(argv.contains("qits-gateway"), "the bare name is not an alias any more: " + argv);
     assertTrue(argv.containsAll(List.of("--restart", "unless-stopped")));
     assertTrue(argv.contains("qits.platform.deployments.environment=env-id"));
     assertTrue(argv.contains("qits.platform.deployments.application=app-id"));
@@ -230,15 +233,31 @@ class DockerDeploymentDriverTest {
     // fourth field is the environment label, and it decides whose predecessor the holder is.
     String output =
         "aaa111|/qits-gateway|qits-gateway abc|\n"
-            + "bbb222|/qits-pd-dev-qits-gateway-12345678|qits-gateway|env-1\n"
+            + "bbb222|/qits-pd-dev-qits-gateway-12345678|dev-qits-gateway|env-1\n"
             + "ccc333|/unrelated|other-alias|env-1\n";
     List<DeploymentDriver.Holder> holders =
-        DockerDeploymentDriver.parseHolders(output, "qits-gateway");
+        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway"));
     assertEquals(
         List.of(
             new DeploymentDriver.Holder("aaa111", "qits-gateway", null),
             new DeploymentDriver.Holder("bbb222", "qits-pd-dev-qits-gateway-12345678", "env-1")),
         holders);
+  }
+
+  @Test
+  void theBareApplicationNameIsSearchedBesideTheQualifiedAliasDuringTheMigration() {
+    // Every container started before the tier qualifier existed holds the bare name and nothing
+    // else, so a search for the new spelling alone would run a second copy beside the one serving —
+    // once per application, on the deployment that introduces the qualifier.
+    String output = "aaa111|/qits-pd-dev-qits-gateway-old|qits-gateway|env-1\n";
+
+    assertEquals(
+        List.of(),
+        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway")),
+        "the qualified alias alone does not see it");
+    assertEquals(
+        List.of(new DeploymentDriver.Holder("aaa111", "qits-pd-dev-qits-gateway-old", "env-1")),
+        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway")));
   }
 
   @Test
@@ -271,7 +290,7 @@ class DockerDeploymentDriverTest {
             "aaa111|/qits-gateway|qits-gateway|<no value>\n"
                 + "bbb222|/seeded|qits-gateway|\n"
                 + "ccc333|/older-format|qits-gateway\n",
-            "qits-gateway");
+            List.of("qits-gateway"));
 
     assertEquals(
         List.of(
@@ -289,7 +308,7 @@ class DockerDeploymentDriverTest {
         new DeploymentDriver.HandoffSpec(
             "qits-artifacts:8080/qits/qits-platform-deployments:abc",
             "old-full-id",
-            "qits-pd-qits-qits-platform-deployments-12345678",
+            "qits-pd-prod-qits-platform-deployments-12345678",
             120);
     String script = "docker stop old-full-id\n...";
 
@@ -332,12 +351,14 @@ class DockerDeploymentDriverTest {
     assertTrue(argv.contains("qits.platform.deployments.target=platform"));
     assertTrue(argv.contains("qits.platform.deployments.available-on-env=false"));
     assertTrue(argv.containsAll(List.of("--network", "qits-platform")));
+    // The alias is the bare name and stays that way: one instance for the whole platform has
+    // nothing to be qualified against, and the repository name already carries the plane.
     assertTrue(argv.containsAll(List.of("--network-alias", "qits-platform-deployments")));
     assertTrue(
         argv.contains(
             "OTEL_RESOURCE_ATTRIBUTES=service.version=abc1234"
                 + ",deployment.environment.name=platform"
-                + ",service.instance.id=qits-pd-platform-qits-platform-deployments-dep"));
+                + ",service.instance.id=qits-pd-qits-platform-deployments-dep"));
   }
 
   @Test

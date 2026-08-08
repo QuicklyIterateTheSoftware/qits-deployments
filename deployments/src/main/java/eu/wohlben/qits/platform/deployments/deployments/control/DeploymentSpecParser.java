@@ -3,21 +3,30 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Four scalar keys, no nesting, no lists
- * — so this is a line reader rather than a YAML library, and being one is what makes every
+ * The strict reader of {@code .config/qits/deployments.yml}. Four scalar keys, no nesting, no YAML
+ * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
  * <pre>
- * deployment_target: environment   # default when the key or the file is absent | platform
- * available_on_env: false          # default; true = public node (bundle + hub joins)
- * branch: platform/main            # platform only: deploy branch (default platform/main)
- * health_path: /q/health/ready     # default: /&lt;name without the qits- prefix&gt;/q/health/ready
+ * deployment_target: environment       # default when the key or the file is absent | platform
+ * available_on_env: false              # default; true = public node (bundle + hub joins)
+ * deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
+ * health_path: /q/health/ready         # default: /&lt;name without the qits- prefix&gt;/q/health/ready
  * </pre>
+ *
+ * <p><b>{@code deploy_branches} is parsed and not acted on.</b> Where a build deploys is decided by
+ * the environment rows — a green build deploys wherever an environment listens to its branch — so
+ * this component never reads the key back. It is accepted because qits-workspaces' release flow
+ * reads the same file for its promotion targets, and this parser fails a deployment on an unknown
+ * key: a key another reader needs is a key this reader has to know. It is still validated, because
+ * a ref this file cannot spell is a mistake wherever it is read.
  *
  * <p><b>Strict on purpose.</b> A typo in this file decides where a container runs and what can
  * reach it, and a lenient parser answers a typo with a default — silently deploying the wrong
@@ -38,7 +47,7 @@ public final class DeploymentSpecParser {
 
   private static final String TARGET = "deployment_target";
   private static final String AVAILABLE_ON_ENV = "available_on_env";
-  private static final String BRANCH = "branch";
+  private static final String DEPLOY_BRANCHES = "deploy_branches";
   private static final String HEALTH_PATH = "health_path";
 
   /** The retired vocabulary, still understood. See the class javadoc. */
@@ -53,7 +62,7 @@ public final class DeploymentSpecParser {
   public static DeploymentSpec parse(String yaml, String source) {
     PdDeploymentTarget target = PdDeploymentTarget.ENVIRONMENT;
     boolean availableOnEnv = false;
-    String branch = null;
+    List<String> deployBranches = List.of();
     String healthPath = null;
     Set<String> seen = new HashSet<>();
 
@@ -80,7 +89,7 @@ public final class DeploymentSpecParser {
       switch (key) {
         case TARGET -> target = target(value, source, lineNumber);
         case AVAILABLE_ON_ENV -> availableOnEnv = bool(key, value, source, lineNumber);
-        case BRANCH -> branch = branch(value, source, lineNumber);
+        case DEPLOY_BRANCHES -> deployBranches = deployBranches(value, source, lineNumber);
         case HEALTH_PATH -> healthPath = healthPath(value, source, lineNumber);
         default ->
             throw error(
@@ -93,7 +102,7 @@ public final class DeploymentSpecParser {
                     + ", "
                     + AVAILABLE_ON_ENV
                     + ", "
-                    + BRANCH
+                    + DEPLOY_BRANCHES
                     + " and "
                     + HEALTH_PATH);
       }
@@ -107,7 +116,7 @@ public final class DeploymentSpecParser {
               + ": true` is not something a platform service can be — it already runs on every"
               + " environment's networks, and the bundle is environment-scoped");
     }
-    return new DeploymentSpec(target, availableOnEnv, branch, healthPath);
+    return new DeploymentSpec(target, availableOnEnv, deployBranches, healthPath);
   }
 
   private static PdDeploymentTarget target(String value, String source, int line) {
@@ -136,12 +145,26 @@ public final class DeploymentSpecParser {
     throw error(source, line, "`" + key + "` must be `true` or `false`, got: " + value);
   }
 
-  private static String branch(String value, String source, int line) {
-    try {
-      return PdIdentifiers.requireBranch(value);
-    } catch (RuntimeException e) {
-      throw error(source, line, "`" + BRANCH + "` is not a plain ref name: " + value);
+  /**
+   * The comma-separated ref list. A YAML sequence would need a parser this file deliberately does
+   * not have, so the refs share one line — and a ref cannot contain a comma, which is what makes
+   * the separator safe.
+   *
+   * <p>Every element is validated, and a blank one fails: {@code deploy_branches:} with nothing
+   * after it, or a trailing comma, is a writer who meant to say something. A silent empty answer is
+   * exactly the shape this parser exists to refuse.
+   */
+  private static List<String> deployBranches(String value, String source, int line) {
+    List<String> refs = new ArrayList<>();
+    for (String candidate : value.split(",", -1)) {
+      String ref = candidate.strip();
+      try {
+        refs.add(PdIdentifiers.requireBranch(ref));
+      } catch (RuntimeException e) {
+        throw error(source, line, "`" + DEPLOY_BRANCHES + "` is not a plain ref name: " + ref);
+      }
     }
+    return List.copyOf(refs);
   }
 
   /**
@@ -159,7 +182,8 @@ public final class DeploymentSpecParser {
 
   /**
    * Drops a {@code #} comment. A {@code #} only starts one at the beginning of the line or after
-   * whitespace, which is YAML's own rule and the reason {@code branch: fix#123} keeps its hash.
+   * whitespace, which is YAML's own rule and the reason {@code deploy_branches: fix#123} keeps its
+   * hash.
    */
   private static String stripComment(String line) {
     for (int i = 0; i < line.length(); i++) {

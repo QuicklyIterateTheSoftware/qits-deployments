@@ -25,9 +25,8 @@ import java.time.Instant;
  * up to date from what it found. Nothing registers a service by hand, and nothing needs to — a
  * repository that has never been built simply has no row.
  *
- * <p>{@link #branch} belongs to platform services only, because they have no environment to take
- * one from; an environment service takes its branch from each environment it is linked into.
- * Storing one here as well would be a second, drifting answer.
+ * <p>{@link #branch} is <b>vestigial</b>: nothing decides a deployment on it any more. See the
+ * field.
  */
 @Entity
 @Table(name = "pd_service")
@@ -45,10 +44,15 @@ public class PdService extends PanacheEntityBase {
   public PdDeploymentTarget deploymentTarget = PdDeploymentTarget.ENVIRONMENT;
 
   /**
-   * The branch whose green builds deploy this service — <b>platform services only</b> ({@code
-   * platform/main} by convention). Null on every environment service, and left null even when an
-   * upsert states one, the same way the spec parser accepts and ignores a {@code branch:} beside
-   * {@code deployment_target: environment}.
+   * <b>Vestigial.</b> It held a platform service's own deploy branch, back when the platform plane
+   * had a deploy ref of its own ({@code platform/main}). Both planes deploy off {@code
+   * environment/<name>} now — a green build deploys wherever an <i>environment</i> listens to its
+   * branch — so nothing reads this to decide anything, and derived registration writes null.
+   *
+   * <p>The column stays, and so does the field: the value is on the read surface ({@code
+   * PdServiceDto}, {@code PdApplicationDto}) and the client renders it, so dropping it here would
+   * change a contract with another repository for no gain. It is nullable, so no migration is owed
+   * — this is a value that stops being written, not a column that has to go.
    */
   @Column(length = 255)
   public String branch;

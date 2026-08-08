@@ -56,9 +56,10 @@ public class PdServiceController {
    * so naming some would say the opposite of what it means, and the answer is a 400 rather than a
    * silent drop.
    *
-   * <p>{@code branch} is a platform service's own deploy branch. Beside {@code ENVIRONMENT} it is
-   * accepted and ignored — an environment service takes each environment's branch — which is the
-   * same tolerance the spec parser gives the equivalent key.
+   * <p>{@code branch} is <b>vestigial</b>: nothing decides a deployment on it any more, since both
+   * planes deploy off {@code environment/<name>}. It is still accepted and still stored beside
+   * {@code PLATFORM}, so an operator's write round-trips; derived registration writes null. See
+   * {@code PdService.branch}.
    */
   public record UpsertServiceRequest(
       PdDeploymentTarget deploymentTarget,

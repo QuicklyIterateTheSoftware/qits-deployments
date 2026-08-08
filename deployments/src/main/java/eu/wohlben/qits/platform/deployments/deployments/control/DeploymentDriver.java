@@ -103,32 +103,43 @@ public interface DeploymentDriver {
   List<Endpoint> platformContainers();
 
   /**
-   * A container a reconciliation joins to a new network, and the alias it must keep there. The
-   * alias is the application name, and joining without it would put the container on the network
-   * under nothing but its own deployment-suffixed container name — reachable by an address no peer
-   * has ever been told.
+   * A container a reconciliation joins to a new network, and the application it is. Joining without
+   * an alias would put the container on the network under nothing but its own deployment-suffixed
+   * container name — reachable by an address no peer has ever been told.
+   *
+   * <p>{@code applicationName} is the {@value #APP_NAME_LABEL} label, which is the bare name; the
+   * wire alias is derived from it and the container's plane by the caller, which is the half of the
+   * pair that knows the environment.
    */
-  record Endpoint(String id, String alias) {}
+  record Endpoint(String id, String applicationName) {}
 
   /** {@code docker pull} the reference so a missing image is its own recorded outcome. */
   PullResult pull(String imageRef);
 
   /**
-   * The containers currently answering to the application's alias anywhere in the given networks —
-   * the predecessors a replace cutover stops, whoever started them: a prior deployment, an original
-   * this platform's bootstrap seeded outside any deployer, or one the retired qits-cd started.
+   * The containers currently answering to <b>any</b> of these aliases anywhere in the given
+   * networks — the predecessors a replace cutover stops, whoever started them: a prior deployment,
+   * an original this platform's bootstrap seeded outside any deployer, or one the retired qits-cd
+   * started.
    *
-   * <p>The list is the <b>union</b> of everything the fresh container is about to be on, legacy
-   * network included. That breadth is what finds a predecessor still living on the old topology: a
-   * container started before per-application networks existed holds its alias on {@code qits-net}
-   * and nowhere else, and a search of the new networks alone would start a second copy beside it.
+   * <p>The networks are the <b>union</b> of everything the fresh container is about to be on,
+   * legacy network included. That breadth is what finds a predecessor still living on the old
+   * topology: a container started before per-application networks existed holds its alias on {@code
+   * qits-net} and nowhere else, and a search of the new networks alone would start a second copy
+   * beside it.
+   *
+   * <p><b>The aliases are a set for the same kind of reason.</b> An environment container's wire
+   * alias carries its tier now ({@code prod-qits-gateway}), and every container started before that
+   * holds the bare application name instead — so a search for the new spelling alone would run a
+   * second copy beside the one that is serving, on the very first deployment of every application.
+   * The caller sends both while that is true.
    *
    * <p>The breadth is also why each holder reports the environment it belongs to: the legacy
    * network is shared by every tier, so the union sees another environment's copy of the same
-   * application under the same alias. Deciding which of them is a predecessor is the caller's, and
+   * application under the bare alias. Deciding which of them is a predecessor is the caller's, and
    * {@link Holder#environmentId()} is what it decides on.
    */
-  List<Holder> aliasHolders(List<String> networks, String alias);
+  List<Holder> aliasHolders(List<String> networks, List<String> aliases);
 
   /** Stop the container, leaving it restartable — the first half of the replace cutover. */
   void stop(String containerName);

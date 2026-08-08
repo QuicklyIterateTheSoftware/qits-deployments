@@ -43,9 +43,10 @@ import org.jboss.logging.Logger;
  * the API. A green build carries this component to {@code .config/qits/deployments.yml} in the
  * repository at that sha, and the service row is created or brought up to date from it: an {@code
  * environment} target is linked into every environment whose branch matches, a {@code platform}
- * target keeps no links at all and deploys once for the whole platform if the build is on its own
- * branch ({@code platform/main} unless the spec names one). A repository with no such file gets the
- * defaults and behaves exactly as it did before the file existed.
+ * target keeps no links at all and deploys once for the whole platform. Both planes answer the same
+ * branch question — does an environment listen to this ref — so {@code environment/<name>} is the
+ * only deploy ref the platform has. A repository with no such file gets the defaults and behaves
+ * exactly as it did before the file existed.
  *
  * <p><b>This is what the merge bought.</b> Registration and resolution used to be HTTP calls onto
  * qits-serviceregistry: a port, a {@code java.net.http} implementation, a stub server in the suite,
@@ -425,14 +426,21 @@ public class DeployService implements BuildAnnouncements {
    * check: the catalogue holds one identity for a service and derived registration has always named
    * an application after its repository, so the name IS the repository.
    *
-   * <p><b>The branch decides whether this event is for this plane at all.</b> A build on anything
-   * but the service's deploy branch — {@link DeploymentSpec#DEFAULT_PLATFORM_BRANCH} unless the
-   * spec names one — registers nothing and deploys nothing, which is what keeps a push to the
-   * integration trunk from shipping the platform.
+   * <p><b>The branch decides whether this event is for this plane at all, and it is the same
+   * question the environment arm asks.</b> A platform service deploys when an environment listens
+   * to the built branch — there is one set of deploy refs on the platform, {@code
+   * environment/<name>}, and a plane of its own with a second convention was one ref more than the
+   * model needed. A build on a branch no environment tracks registers nothing and deploys nothing,
+   * which is what keeps a push to the integration trunk from shipping the platform.
+   *
+   * <p>What it deploys is still platform-shaped — one instance, no environment id, no links — so
+   * with several environments any one of their branches would roll the single platform instance.
+   * That is acceptable while one environment exists and has to be revisited before the second one
+   * is created; the plan gates environment #2 on it anyway.
    */
   private List<Target> registerPlatform(
       String repoId, String branch, DeploymentSpec spec, Optional<LinkedService> known) {
-    if (!branch.equals(spec.platformBranch())) {
+    if (environments.onBranch(branch).isEmpty()) {
       return List.of();
     }
     if (known.isEmpty()) {
@@ -443,7 +451,7 @@ public class DeployService implements BuildAnnouncements {
         new ServiceCatalog.Upsert(
             repoId,
             PdDeploymentTarget.PLATFORM,
-            spec.platformBranch(),
+            null, // the deploy refs are the environments' now — see PdService.branch
             false,
             healthPath,
             List.of()));
@@ -547,8 +555,11 @@ public class DeployService implements BuildAnnouncements {
     }
     LinkedService linked = known.get();
     if (linked.service().deploymentTarget == PdDeploymentTarget.PLATFORM) {
-      return branch.equals(linked.service().branch)
-          ? List.of(
+      // The same branch question the deploying path asks, so a spec read that failed records the
+      // failure exactly where a successful one would have deployed.
+      return environments.onBranch(branch).isEmpty()
+          ? List.of()
+          : List.of(
               new Target(
                   repoId,
                   null,
@@ -556,8 +567,7 @@ public class DeployService implements BuildAnnouncements {
                   null,
                   PdDeploymentTarget.PLATFORM,
                   false,
-                  linked.service().healthPath))
-          : List.of();
+                  linked.service().healthPath));
     }
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : environments.onBranch(branch)) {
@@ -632,6 +642,33 @@ public class DeployService implements BuildAnnouncements {
       return platform()
           ? PdNetworks.PLATFORM
           : PdNetworks.application(environmentName(), applicationName());
+    }
+
+    /**
+     * The address peers dial this container by, on every network it is on: {@code
+     * <environment>-<application>} for a tier's copy, the bare application name for a platform
+     * service. The run's {@code --network-alias}, every later join's {@code --alias} and the
+     * predecessor search all take this one value.
+     */
+    String wireAlias() {
+      return PdNetworks.alias(environmentName(), applicationName());
+    }
+
+    /**
+     * What the predecessor search asks about — the wire alias, plus the bare application name while
+     * anything started before the tier qualifier existed is still running.
+     *
+     * <p>Without the second the first deployment of every application would run a second copy
+     * beside the one serving: today's containers hold the bare name and nothing else, and the
+     * cutover finds a predecessor by the alias alone. It costs nothing to keep asking — a holder of
+     * the bare name that belongs to another tier is filtered out by its environment label like any
+     * other, and an unlabelled one is adoptable, which is the whole of how this platform migrates.
+     */
+    List<String> searchAliases() {
+      String qualified = wireAlias();
+      return qualified.equals(applicationName())
+          ? List.of(qualified)
+          : List.of(qualified, applicationName());
     }
   }
 
@@ -719,7 +756,7 @@ public class DeployService implements BuildAnnouncements {
     searchNetworks.addAll(joins);
     List<DeploymentDriver.Holder> predecessors =
         predecessorsOf(
-            driver.aliasHolders(List.copyOf(searchNetworks), plan.applicationName()), plan);
+            driver.aliasHolders(List.copyOf(searchNetworks), plan.searchAliases()), plan);
     String self = driver.selfContainerId();
     DeploymentDriver.Holder selfHolder =
         self.isBlank()
@@ -744,7 +781,7 @@ public class DeployService implements BuildAnnouncements {
         finish(deploymentId, PdDeploymentStatus.FAILED, safe(successor.detail()));
         return;
       }
-      String unjoined = join(containerName, plan.applicationName(), joins);
+      String unjoined = join(containerName, plan.wireAlias(), joins);
       if (unjoined != null) {
         // No handoff: the referee would promote a successor no caller can address, and it would do
         // it by removing the instance that still works. Nothing was stopped yet, so dropping the
@@ -783,7 +820,7 @@ public class DeployService implements BuildAnnouncements {
     // The health gate cannot catch it — it curls localhost inside the container, which answers
     // perfectly well from a network nobody else is on — so an unreachable container would go ACTIVE
     // and the predecessor would be removed under it. This is the same rollback a failed gate takes.
-    String unjoined = join(containerName, plan.applicationName(), joins);
+    String unjoined = join(containerName, plan.wireAlias(), joins);
     if (unjoined != null) {
       driver.remove(containerName);
       rollback(predecessors);
@@ -967,16 +1004,24 @@ public class DeployService implements BuildAnnouncements {
    * nobody on it, and the application would stay unreachable from the gateway and from every
    * platform service until some hub happened to redeploy. Joining is idempotent — docker refuses an
    * already-joined container and changes nothing — so recomputing it is the self-heal.
+   *
+   * <p>Each of them is joined under <b>its own</b> wire alias, not this application's. A hub is one
+   * of this environment's containers, so it takes this environment's qualifier; a platform service
+   * is on no tier and keeps its bare name. The label carries the application name alone, which is
+   * why the qualifier is put back here rather than read.
    */
   private void reconcile(Plan plan, String primaryNetwork) {
     if (plan.platform()) {
       return;
     }
     for (DeploymentDriver.Endpoint hub : driver.hubContainers(plan.environmentId())) {
-      driver.connect(primaryNetwork, hub.id(), hub.alias());
+      driver.connect(
+          primaryNetwork,
+          hub.id(),
+          PdNetworks.alias(plan.environmentName(), hub.applicationName()));
     }
     for (DeploymentDriver.Endpoint platform : driver.platformContainers()) {
-      driver.connect(primaryNetwork, platform.id(), platform.alias());
+      driver.connect(primaryNetwork, platform.id(), PdNetworks.alias(null, platform.applicationName()));
     }
   }
 

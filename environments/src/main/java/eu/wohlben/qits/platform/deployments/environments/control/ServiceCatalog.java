@@ -55,10 +55,10 @@ public class ServiceCatalog {
   @Inject PdEnvironmentRepository environments;
 
   /**
-   * What an upsert states. {@code branch} is a platform service's own deploy branch and is accepted
-   * and ignored on an environment service — the same tolerance the spec parser gives a {@code
-   * branch:} key beside {@code deployment_target: environment}, so that a repository stating a
-   * harmless extra key is not a failed build.
+   * What an upsert states. {@code branch} is <b>vestigial</b> — nothing decides a deployment on it
+   * any more, both planes deploying off {@code environment/<name>} — and derived registration sends
+   * null. It is still stored beside {@code PLATFORM} and still dropped beside {@code ENVIRONMENT},
+   * so an operator's write over the API round-trips as it always did. See {@code PdService.branch}.
    */
   public record Upsert(
       String name,
@@ -129,8 +129,8 @@ public class ServiceCatalog {
           "A platform service carries no environment links — it is present in every environment by"
               + " having none. Send environmentIds only with deploymentTarget ENVIRONMENT.");
     }
-    // A platform service's branch is its own; an environment service takes each environment's, so a
-    // branch stated beside ENVIRONMENT is accepted and dropped rather than refused.
+    // Vestigial, and kept only so an operator's write round-trips: a branch stated beside
+    // ENVIRONMENT is accepted and dropped rather than refused.
     String branch =
         target == PdDeploymentTarget.PLATFORM && !isBlank(request.branch())
             ? PdIdentifiers.requireBranch(request.branch())

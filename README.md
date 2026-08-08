@@ -39,21 +39,25 @@ client or a process shell-out.
 
 ## The model: tiers, planes, and derived rows
 
-An **environment is a tier** — dev, preprod, prod. It is created deliberately, over REST, with the
+An **environment is a tier** — today just prod. It is created deliberately, over REST, with the
 conventions filled in: branch `environment/<name>`, bundle network `qits-env-<name>`. `main` stays
-the integration trunk, and a release reaches dev by fast-forwarding `environment/dev` onto it — so a
-push to `main` alone builds and deploys nothing, on either plane.
+the integration trunk, and a release reaches an environment by fast-forwarding `environment/<name>`
+onto it — so a push to `main` alone builds and deploys nothing.
+
+**`environment/<name>` is the only deploy ref there is.** Both planes ask the same question of a
+green build — does an environment listen to this branch — and the answer decides whether anything
+ships. The platform plane had a second convention (`platform/main`) and no longer does: what a
+platform service gets from an environment's branch is still one platform-shaped instance.
 
 A **service** has one row for the whole platform, not one per tier, and says where it runs by
 carrying a **link** to each environment. Two planes:
 
-- **environment** — one instance per tier, on that tier's networks, from that tier's branch.
-- **platform** — one instance for the whole platform, on every environment's networks, from its own
-  branch — `platform/main` by convention, the plane's answer to `environment/<name>`, reached by
-  fast-forwarding it onto the trunk. It carries **no links at all**, and that absence is the
-  mechanism:
-  "present everywhere" is spelled as "linked nowhere in particular", which is what makes an
-  environment created tomorrow pick up qits-idp and this component without anyone editing a row.
+- **environment** — one instance per tier, on that tier's networks.
+- **platform** — one instance for the whole platform, on every environment's networks. It carries
+  **no links at all**, and that absence is the mechanism: "present everywhere" is spelled as
+  "linked nowhere in particular", which is what makes an environment created tomorrow pick up
+  qits-platform-idp without anyone editing a row. It is also what makes it immune to an environment
+  teardown — no environment label, so nothing reaps it with a tier it merely serves.
 
 The word used to be `singleton`. It named a cardinality where the thing being said is which plane a
 service lives on — and it made this very component, cross-environment from its first commit, look
@@ -66,11 +70,15 @@ repository's `.config/qits/deployments.yml` at that sha, and the service row is 
 up to date from what it found there.
 
 ```yaml
-deployment_target: environment   # default when the key or the file is absent | platform
-available_on_env: false          # default; true = public node (bundle + hub joins)
-branch: platform/main            # platform only: deploy branch (default platform/main)
-health_path: /q/health/ready     # default: /<name without the qits- prefix>/q/health/ready
+deployment_target: environment       # default when the key or the file is absent | platform
+available_on_env: false              # default; true = public node (bundle + hub joins)
+deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
+health_path: /q/health/ready         # default: /<name without the qits- prefix>/q/health/ready
 ```
+
+`deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
+environment rows' answer, not the file's. It is accepted because qits-workspaces' release flow reads
+the same file for its promotion targets, and this parser fails a deployment on an unknown key.
 
 A repository with **no file** gets every default and behaves exactly as it did before the file
 existed. A file that cannot be read or parsed **fails the deployment** with the cause on the row —
@@ -99,8 +107,9 @@ registry's own application does not depend on it being up mid-cutover.
 
 The predecessor is whatever **holds the alias** on any network the fresh container is about to be
 on, including the legacy one — so a container the bootstrap seeded outside any deployer, or one the
-retired qits-cd started, is adopted rather than run beside. Every removal is a decision recorded on
-a deployment row.
+retired qits-cd started, is adopted rather than run beside. The search asks about the wire alias
+*and* the bare application name, because every container started before the tier qualifier existed
+holds only the latter. Every removal is a decision recorded on a deployment row.
 
 ## Networks are hub and spoke, and docker is the bookkeeping
 
@@ -114,9 +123,17 @@ a deployment row.
   every container also joins, while the platform still holds direct cross-application URLs. **Emptying it is the
   enforcement flip** — a later phase, after the last direct URL has moved to a gateway route.
 
-`docker run` takes one network, so everything else is a `network connect --alias <app>` after the
-start — and the set is recomputed from docker on every deployment rather than remembered, which
-makes it the self-heal too. **No membership is ever stored in the database.** It is written as
+**The wire alias — the address peers dial — is `<env>-<app>` for an environment application and the
+bare `<app>` for a platform service.** The qualifier is what lets two tiers hold one application's
+address on the legacy network, which they all share, without either resolving as the other; a
+platform service is one instance for the whole platform, so there is nothing to qualify it against
+and its repository name carries the plane already (`qits-platform-idp`). Container names follow the
+same shape: `qits-pd-<env>-<app>-<id8>`, and `qits-pd-<app>-<id8>` on the platform plane.
+
+`docker run` takes one network, so everything else is a `network connect --alias <wire alias>` after
+the start — the same alias, so the address resolves on every network the container is on and not
+just the first — and the set is recomputed from docker on every deployment rather than remembered,
+which makes it the self-heal too. **No membership is ever stored in the database.** It is written as
 labels under one namespace — `qits.platform.deployments.` + `environment`, `application`,
 `deployment`, `target`, `available-on-env`, `app-name`; networks carry
 `qits.platform.deployments.network=bundle|application|platform` — and read back with

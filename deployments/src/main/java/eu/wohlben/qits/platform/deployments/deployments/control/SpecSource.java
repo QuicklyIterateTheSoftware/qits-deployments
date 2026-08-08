@@ -1,6 +1,7 @@
 package eu.wohlben.qits.platform.deployments.deployments.control;
 
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
+import java.util.List;
 
 /**
  * The seam that fetches a repository's deployment spec at a commit — the {@link DeploymentDriver}
@@ -34,29 +35,38 @@ public interface SpecSource {
    * <p>{@code healthPath} is the exception rather than the rule: a service that says nothing gets
    * the convention path derived from its name, and only a service whose path does not follow the
    * convention (the gateway owns the root path space) has to name one.
+   *
+   * <p><b>{@code deployBranches} is read and not used here</b>, and that is deliberate — see {@link
+   * #deployBranches()}.
    */
   record DeploymentSpec(
-      PdDeploymentTarget target, boolean availableOnEnv, String branch, String healthPath) {
+      PdDeploymentTarget target,
+      boolean availableOnEnv,
+      List<String> deployBranches,
+      String healthPath) {
 
-    /**
-     * The branch a platform service deploys from when it names none — the platform plane's
-     * conventional deploy ref, the mirror of a tier's {@code environment/<name>} (see {@code
-     * EnvironmentService.BRANCH_PREFIX}).
-     *
-     * <p><b>{@code main} is not a deploy branch on either plane.</b> It is the integration trunk: a
-     * push to it builds and deploys nothing, and a release reaches the platform by fast-forwarding
-     * {@code platform/main} onto it, exactly as it reaches dev by fast-forwarding {@code
-     * environment/dev}. That is what makes a green build on the trunk a safe thing to have.
-     */
-    public static final String DEFAULT_PLATFORM_BRANCH = "platform/main";
+    /** A null list and an empty one are the same statement: the file named no refs. */
+    public DeploymentSpec {
+      deployBranches = deployBranches == null ? List.of() : List.copyOf(deployBranches);
+    }
 
     /** No file, or a file that sets nothing: an ordinary environment application. */
     public static final DeploymentSpec DEFAULTS =
-        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, null, null);
+        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, List.of(), null);
 
-    /** The branch this platform service deploys from — its own, or the convention. */
-    public String platformBranch() {
-      return branch == null ? DEFAULT_PLATFORM_BRANCH : branch;
+    /**
+     * The refs the repository declares itself deployable from — {@code deploy_branches:} in the
+     * file.
+     *
+     * <p><b>Nothing in this component matches on it.</b> Where a build deploys is decided by the
+     * environment rows: a green build deploys wherever an environment listens to its branch, on
+     * either plane. The key is parsed and validated because the <b>release flow</b> reads the same
+     * file for its promotion targets, and this parser is strict — an unknown key fails a
+     * deployment, so a key another reader needs has to be one this reader knows. Reading it and
+     * ignoring it is cheaper than two files, and far cheaper than a lenient parser.
+     */
+    public List<String> deployBranches() {
+      return deployBranches;
     }
   }
 }

@@ -7,9 +7,10 @@ import java.time.Instant;
  * One deployable application, flattened into one tier — the shape the web client reads.
  *
  * <p>{@code environmentId} and {@code environmentName} are null exactly when {@code target} is
- * {@code PLATFORM} — a cross-environment application belongs to no tier — and {@code branch} is the
- * mirror image: only a platform service carries its own, because an environment service takes its
- * environment's.
+ * {@code PLATFORM} — a cross-environment application belongs to no tier.
+ *
+ * <p>{@code branch} is <b>vestigial</b> and reads null on everything derived registration writes:
+ * both planes deploy off {@code environment/<name>} now. See {@code PdService.branch}.
  *
  * <p>{@code id} is DERIVED from {@code (environmentId, name)} ({@code ApplicationKeys}) rather than
  * being the service row's id, because a service has one row across every tier while this listing

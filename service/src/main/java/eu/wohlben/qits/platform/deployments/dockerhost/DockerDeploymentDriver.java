@@ -4,6 +4,7 @@ import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
+import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -358,7 +359,7 @@ public class DockerDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public List<Holder> aliasHolders(List<String> networks, String alias) {
+  public List<Holder> aliasHolders(List<String> networks, List<String> aliases) {
     // The UNION over every network the fresh container is about to be on, legacy one included.
     // A `docker ps --filter network=a --filter network=b` is an OR over networks, so one call
     // answers the whole question — and a container on two of them appears once.
@@ -404,7 +405,7 @@ public class DockerDeploymentDriver implements DeploymentDriver {
       LOG.debugf("Could not inspect containers on %s: %s", networks, inspected.output());
       return List.of();
     }
-    return parseHolders(inspected.output(), alias);
+    return parseHolders(inspected.output(), aliases);
   }
 
   private static List<String> idLines(String output) {
@@ -414,8 +415,19 @@ public class DockerDeploymentDriver implements DeploymentDriver {
         .toList();
   }
 
-  /** Package-private for the parsing test: one `id|/name|alias alias ...|env` line per container. */
-  static List<Holder> parseHolders(String inspectOutput, String alias) {
+  /**
+   * Package-private for the parsing test: one `id|/name|alias alias ...|env` line per container,
+   * kept when it answers to any of the aliases asked about.
+   *
+   * <p><b>A container's own name counts as an alias</b>, because it resolves on a user-defined
+   * network exactly as an alias does — that is what lets a cutover absorb a bootstrap-seeded
+   * original called {@code qits-gateway}. It is matched against the same alias set, so an original
+   * named after the bare application is still found now that this component's own containers hold
+   * the tier-qualified spelling. The names this component assigns
+   * ({@code qits-pd-<env>-<app>-<id8>}) match no alias by construction, which is deliberate: a
+   * predecessor is found by what peers dial, never by what a person reads.
+   */
+  static List<Holder> parseHolders(String inspectOutput, List<String> aliases) {
     List<Holder> holders = new ArrayList<>();
     for (String line : (inspectOutput == null ? "" : inspectOutput).split("\\R")) {
       String[] parts = line.trim().split("\\|", 4);
@@ -423,9 +435,9 @@ public class DockerDeploymentDriver implements DeploymentDriver {
         continue;
       }
       String name = parts[1].startsWith("/") ? parts[1].substring(1) : parts[1];
-      boolean aliased =
-          parts.length >= 3 && Arrays.asList(parts[2].trim().split("\\s+")).contains(alias);
-      if (name.equals(alias) || aliased) {
+      List<String> held =
+          parts.length >= 3 ? Arrays.asList(parts[2].trim().split("\\s+")) : List.of();
+      if (aliases.stream().anyMatch(alias -> name.equals(alias) || held.contains(alias))) {
         holders.add(new Holder(parts[0], name, environmentOf(parts)));
       }
     }
@@ -658,13 +670,18 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     argv.add("--name");
     argv.add(spec.containerName());
     // Docker takes ONE network at run time — the application's own for an environment application,
-    // qits-platform for a platform service. Every further membership is a `network connect` after the
-    // start (DeployService.desiredJoins). The alias is what peers resolve, and it stays stable
-    // across deployments while container names do not.
+    // qits-platform for a platform service. Every further membership is a `network connect --alias`
+    // after the start (DeployService.desiredJoins), carrying this same alias, so the address
+    // resolves on every network the container is on and not just the first.
+    //
+    // The alias is what peers resolve, and it stays stable across deployments while container names
+    // do not. It is derived in PdNetworks so the run, the joins and the predecessor search cannot
+    // disagree: <environment>-<application> for a tier's copy, the bare name for a platform
+    // service.
     argv.add("--network");
     argv.add(spec.network());
     argv.add("--network-alias");
-    argv.add(spec.applicationName());
+    argv.add(PdNetworks.alias(spec.environmentName(), spec.applicationName()));
     // A deployed application outlives its deployer and a daemon restart both. `unless-stopped`
     // rather than `always`: a decommissioned container is stopped before removal and must not race
     // its own restart.

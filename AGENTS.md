@@ -138,9 +138,9 @@ was ACTIVE before the restart is still serving. Do not "complete" the sweep with
 
 ## The vocabulary rename, and the alias
 
-`singleton` → `platform`, everywhere: `PdDeploymentTarget.PLATFORM`, container
-`qits-pd-platform-<app>-<id8>`, label `qits.platform.deployments.target=platform`, network
-`qits-platform` (unchanged name), key stand-in `platform:<name>` in `ApplicationKeys`.
+`singleton` → `platform`, everywhere: `PdDeploymentTarget.PLATFORM`, label
+`qits.platform.deployments.target=platform`, network `qits-platform` (unchanged name), key stand-in
+`platform:<name>` in `ApplicationKeys`.
 
 **`deployment_target: singleton` remains an accepted alias in the spec parser and nowhere else.** It
 parses to `PLATFORM` and nothing downstream can tell the two apart; the error message for an
@@ -172,6 +172,35 @@ through the namespace rename**: docker's name charset has no dot, and
 actually reads. So it is the namespace's abbreviation, spelled once in `ContainerNames`. It is how a
 person reads the host and what a bootstrap greps; it is never how a predecessor is found (that is
 the alias). Wrapper and component changes land together.
+
+## Names, and the one that is an address
+
+Two derived shapes, and only one of them resolves:
+
+| | environment | platform |
+| --- | --- | --- |
+| container name (`ContainerNames`) | `qits-pd-<env>-<app>-<id8>` | `qits-pd-<app>-<id8>` |
+| wire alias (`PdNetworks.alias`) | `<env>-<app>` | `<app>` |
+
+**The wire alias is the address, and it is derived in one place because three callers have to
+agree**: the `docker run --network-alias`, every `docker network connect --alias` after it
+(`DeployService.join`, and `reconcile` for the hubs and platform containers it pulls onto a fresh
+network), and the predecessor search. An alias that resolved on the primary network and not on the
+joins would be an address that works by luck — `connect()` takes it for that reason, and always has.
+
+The environment qualifier exists because the legacy network is shared by every tier: without it two
+tiers' copies of one application hold the same address there. A platform service keeps the bare
+name — one instance for the whole platform has nothing to be qualified against, and the platform
+repositories carry the plane in their own names now (`qits-platform-idp`), which is also why the
+platform container name **drops** the segment rather than filling it with the word.
+
+**The predecessor search asks about the wire alias AND the bare application name.** Every container
+started before the qualifier existed holds only the latter, and a search for the new spelling alone
+would run a second copy beside the one serving — once per application, on the deployment that
+introduces the qualifier. Same posture as `legacy-network`, and it comes out the same way: the
+environment label still keeps another tier's container out, and an unlabelled one stays adoptable.
+`parseHolders` matches a container's own **name** against that set too, which is what absorbs a
+bootstrap-seeded original called `qits-gateway`.
 
 ## Networks are docker's bookkeeping, never a row
 
@@ -410,14 +439,25 @@ tarballs by the absolute URL in the lockfile and ignores the configured registry
 `--replace-registry-host` is broken for a registry mounted under a path prefix. The committed
 lockfile keeps the developer-host origin, which is correct locally.
 
-**This repo is its own deployer**, and its `.config/qits/deployments.yml` says
-`deployment_target: platform` — so a push to **`platform/main`** is a deployment. A green run
-announces this component to itself and it takes the self-update handoff; the `/platform-deployments`
-surface blips mid-cutover, and a successor that misses its health gate leaves the predecessor
-serving.
+**This repo is its own deployer**, and it is an **environment service** — one instance per
+environment, deploying that environment. Its `.config/qits/deployments.yml` takes the default
+target and names `deploy_branches: environment/prod`, so a push to `environment/prod` is a
+deployment. A green run announces this component to itself and it takes the self-update handoff; the
+`/platform-deployments` surface blips mid-cutover, and a successor that misses its health gate
+leaves the predecessor serving.
 
-**The platform plane's deploy branch is `platform/main`, not `main`** — `SpecSource.DeploymentSpec.
-DEFAULT_PLATFORM_BRANCH`, the mirror of a tier's `environment/<name>`. `main` is the integration
-trunk on both planes: a push to it builds and ships nothing, and a release reaches the platform by
-fast-forwarding `platform/main` onto it. A spec's own `branch:` still overrides. Changing the
-constant changes where every platform service listens, this repo included.
+**`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
+*environment* listens to its branch — `DeployService.registerPlatform` asks
+`environments.onBranch(branch)`, the same question the environment arm asks, and what comes out is
+still platform-shaped (no environment id, one instance, no links). `platform/main` and
+`SpecSource.DEFAULT_PLATFORM_BRANCH` are gone, and so is the spec's `branch:` key. `main` stays the
+integration trunk: a push to it builds and ships nothing.
+
+The consequence to revisit: with several environments, **any** environment's branch rolls the one
+platform instance. That is acceptable while one environment exists and has to be answered before
+the second one is created — the plan gates environment #2 on it anyway.
+
+**`deploy_branches:` is parsed here and used by nobody here.** The release flow reads the same file
+for its promotion targets, and this parser fails a deployment on an unknown key — so a key another
+reader needs is a key this reader has to know. It is validated all the same: a ref this file cannot
+spell is a mistake wherever it is read.

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 import org.junit.jupiter.api.Test;
 
@@ -70,12 +71,24 @@ class DeploymentIdentifiersTest {
     assertEquals(
         "qits-pd-some-epic-qits-gateway-0123abcd",
         ContainerNames.of("some-epic", "qits-gateway", "0123abcd-ffff-4000-8000-0000"));
-    // A platform deployment has no environment to be named after, so the plane takes that place.
-    // The prefix is the ancestor's `qits-cd-` renamed with everything else, and a bootstrap that
-    // greps for containers greps for this.
+    // A platform deployment has no environment to be named after, and the segment is DROPPED rather
+    // than filled with the word: the platform repositories carry the plane in their own names, so
+    // `qits-pd-platform-qits-platform-idp-…` would say it twice. The prefix is the ancestor's
+    // `qits-cd-` renamed with everything else, and a bootstrap that greps for containers greps for
+    // this.
     assertEquals(
-        "qits-pd-platform-qits-idp-0123abcd",
-        ContainerNames.of(null, "qits-idp", "0123abcd-ffff-4000-8000-0000"));
+        "qits-pd-qits-platform-idp-0123abcd",
+        ContainerNames.of(null, "qits-platform-idp", "0123abcd-ffff-4000-8000-0000"));
+  }
+
+  @Test
+  void theWireAliasCarriesTheTierAndAPlatformServicesDoesNot() {
+    // What peers dial, and what a cutover finds a predecessor by. The qualifier is what lets two
+    // tiers hold one application's address on the shared legacy network without colliding; a
+    // platform service is one instance for the whole platform and has nothing to be qualified
+    // against.
+    assertEquals("prod-qits-gateway", PdNetworks.alias("prod", "qits-gateway"));
+    assertEquals("qits-platform-idp", PdNetworks.alias(null, "qits-platform-idp"));
   }
 
   @Test

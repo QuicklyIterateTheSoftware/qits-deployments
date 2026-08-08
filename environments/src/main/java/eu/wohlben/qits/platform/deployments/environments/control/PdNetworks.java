@@ -45,4 +45,26 @@ public final class PdNetworks {
   public static String application(String environmentName, String applicationName) {
     return BUNDLE_PREFIX + environmentName + "-" + applicationName;
   }
+
+  /**
+   * The <b>wire alias</b> a container answers to on every network it is on — the address peers dial,
+   * and the thing a cutover finds a predecessor by. It is derived here rather than at the argv,
+   * because three callers have to agree on it: the {@code docker run --network-alias}, every {@code
+   * docker network connect --alias} after it, and the predecessor search.
+   *
+   * <ul>
+   *   <li><b>An environment service</b> is {@code <environment>-<application>} — {@code
+   *       prod-qits-gateway}. The qualifier is what lets two tiers hold the same application's
+   *       address on one shared network (the legacy one is shared by all of them) without one
+   *       resolving as the other.
+   *   <li><b>A platform service</b> keeps the bare {@code <application>}: it is one instance for the
+   *       whole platform, so there is nothing to qualify it against, and the repository names now
+   *       carry the plane themselves ({@code qits-platform-idp}).
+   * </ul>
+   *
+   * @param environmentName null for a platform service — the same null that leaves it unlabelled
+   */
+  public static String alias(String environmentName, String applicationName) {
+    return environmentName == null ? applicationName : environmentName + "-" + applicationName;
+  }
 }
