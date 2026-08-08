@@ -12,3 +12,8 @@
 # it — a green build deploys wherever an environment listens to the built branch, and that is the
 # environment row's answer, not this file's.
 deploy_branches: environment/prod
+
+# The convention would derive the health path from the repository name, but the route path
+# deliberately did not move with the rename — the service still serves /platform-deployments. Without this line
+# the deployer probes a 404 and rolls every deployment back as unhealthy.
+health_path: /platform-deployments/q/health/ready
