@@ -93,7 +93,7 @@ public class ServiceCatalog {
    * 500 — and the writer fans a green build out over every environment tracking a branch, so it can
    * arrive twice at once. The deploy worker is single-threaded for exactly this reason and this
    * lock is the belt for every other caller; it costs nothing, since an upsert is three short
-   * statements against one H2 file.
+   * statements against one local database.
    *
    * <p>The flip between planes is asymmetric on purpose:
    *

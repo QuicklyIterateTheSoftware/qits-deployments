@@ -29,9 +29,11 @@ partition of the **code**, which is where the partition was always useful.
                     Owns the datasource and the single Flyway lineage. Knows nothing about
                     containers.
     deployments/    the execution domain — deployment rows, the deploy orchestration, the rollback
-                    pins, the strict spec parser, and the two SEAMS it cannot implement itself.
+                    pins, the resource registry, the strict spec parser, and the three SEAMS it
+                    cannot implement itself.
     service/        the adapters — JAX-RS for both domains, the docker driver, the git-host spec
-                    reader, the build-succeeded intake, and the web client.
+                    reader, the postgres provisioner, the build-succeeded intake, and the web
+                    client.
 
 `deployments` depends on `environments` and never the reverse: execution reads and writes the
 topology, the topology knows nothing about execution. Neither domain module carries JAX-RS, an HTTP
@@ -75,6 +77,7 @@ available_on_env: false              # default; true = public node (bundle + hub
 deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
 health_path: /q/health/ready         # default: /<name without the qits- prefix>/q/health/ready
 health_cmd: pg_isready -U postgres   # instead of health_path; runs inside the container
+resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
 ```
 
 `deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
@@ -88,6 +91,24 @@ deployable images — a plain postgres, the first of them — which have neither
 element, run by the container's own `/bin/sh -c`: spaces and `||` need no quoting. It gets no
 charset allowlist, because it grants the repository nothing it does not already have over its own
 container — only a length cap and one line.
+
+`resources:` is what a repository asks to have **provisioned before its container starts**. The
+grammar is flat, because this file has no YAML sequences: `postgresql:<name>[:<database>]`,
+comma-separated. Omit the database and it defaults to `qits_` plus the application name without its
+`qits-` prefix. Before the cutover, this component idempotently creates the login role and the
+database on its tier's postgres and then starts the container with
+
+```
+QITS_RESOURCE_<NAME>_URL       jdbc:postgresql://<tier>-qits-oci-postgresql:5432/<database>
+QITS_RESOURCE_<NAME>_USERNAME  <database>        # the role IS the database, one login per database
+QITS_RESOURCE_<NAME>_PASSWORD  generated here, stored in pd_resource, never in a file
+```
+
+The contract is **generic on purpose**: an application maps those three in its own shipped config
+defaults, so this component names no framework and no datasource key. It is idempotent because it
+runs on every deployment — a redeployment changes nothing, a reset postgres volume brings the role
+back with the recorded password, and a reset registry rotates a password nothing knew any more.
+**Never a `DROP`.** This component is adopter #1: its own store is a database provisioned this way.
 
 A repository with **no file** gets every default and behaves exactly as it did before the file
 existed. A file that cannot be read or parsed **fails the deployment** with the cause on the row —
@@ -110,8 +131,8 @@ never a guess, because a guessed topology is a container on the wrong networks u
 before the fresh container starts, and *removed* only after the new one passed its health gate. A
 failed deployment (image missing, docker refused, gate expired, a network join refused) removes the
 fresh container and **restarts** what was stopped, so the previous deployment stays `ACTIVE` and
-serving. Stop-before-start is what makes stateful applications deployable at all: one process per H2
-file, one binder per published port. The pull happens before the stop, so replacing the OCI
+serving. Stop-before-start is what makes stateful applications deployable at all: one binder per
+published port, one process per single-writer store. The pull happens before the stop, so replacing the OCI
 registry's own application does not depend on it being up mid-cutover.
 
 The predecessor is whatever **holds the alias** on any network the fresh container is about to be
@@ -153,8 +174,8 @@ spelling (`qits.cd.*`, `qits.pd.*`) count as unlabelled: adoptable, never protec
 
 This component deploys itself, and it cannot stop its own container and then finish the cutover. So
 the roles split three ways: this instance starts the successor and launches a **detached referee**;
-the referee stops this container — freeing the H2 lock the successor is retrying on — awaits the
-successor's health gate, and removes whichever side lost; the surviving instance's startup sweep
+the referee stops this container — freeing the published port and the socket the successor is
+retrying on — awaits the successor's health gate, and removes whichever side lost; the surviving instance's startup sweep
 records the outcome. A successor that misses its gate leaves the predecessor serving.
 
 ## What it answers
@@ -186,16 +207,34 @@ serving, and the sha a rollback would put back.
 - **It executes nothing.** The docker vocabulary is container lifecycle — `pull`, `run`, `inspect`,
   `logs`, `rm`, `ps`, `network` create/inspect/rm. `exec` is not in it and must not enter it. What a
   deployed container runs is its image's own entrypoint, untouched.
-- **Argv contributions come from deployment config and nowhere else.**
-  `qits.platform.deployments.run-args.<app>` is how a stateful application gets its volume and
-  datasource env; nothing arriving over HTTP may
-  contribute a token to a `docker run`.
+- **Provisioning speaks SQL, not shell.** A `resources:` line is answered with `CREATE ROLE`,
+  `CREATE DATABASE`, `REVOKE` and `ALTER … OWNER` over plain JDBC — no `psql`, no `docker exec`, no
+  process at all. The postgres superuser credential comes from **deployment config**, the same trust
+  domain that already holds the docker socket, and is never written into a row and never put in an
+  argv. There is no `DROP` in the vocabulary and none is coming.
+- **Argv contributions come from deployment config and from this component itself.**
+  `qits.platform.deployments.run-args.<app>` is how a stateful application gets its volume and its
+  extra env; the `QITS_RESOURCE_<NAME>_*` triple is generated here and injected here. **Nothing
+  arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as
+  before, now that a credential is a thing this component holds: what a repository can NAME is a
+  database of its own, and the VALUES injected for it are ones this component generated.
 - **Untrusted strings are validated at the boundary.** Names become network names, aliases and image
   path segments (dns-label charset); shas become image tags (hex only); the health path is
   interpolated into a string the *container's* shell runs, so it gets the strictest allowlist and is
   re-checked at the last line before the argv. A `health_cmd` is the one deliberate exception — it
   *is* the shell string, chosen by the repository for its own container — and is bounded to one
   non-blank line rather than a charset.
+- **`resources:` gets the health-path treatment, and one checkpoint more.** Both halves are
+  repository-authored: the resource name becomes an environment-variable key in a `docker run`, and
+  the database name lands in **DDL against a postgres instance the whole platform shares** — where
+  there is no bind variable to fall back on. So both are allowlists (`[a-z][a-z0-9-]{0,31}` and a
+  mandatory `qits_` prefix, which structurally excludes `postgres`, `template0/1` and every `pg_*`),
+  checked at the parser, again immediately before the SQL is assembled, and again at the argv.
+- **The `platformdeployments` database is credential-bearing now.** `pd_resource.password` is the
+  single authority for every provisioned application's credential — no file carries it, the
+  bootstrap does not record it. Treat that database with the sensitivity of the
+  `qits-deployments-config` volume, which already holds the push token and the idp secrets. No
+  statement containing a password is ever logged, and no failure message names one.
 - **Machine writes carry a guard, reads do not.** The build-succeeded intake and the topology writes
   call `MachineAuth.require()` (audience `qits-platform-deployments`); every read stays open,
   because a person drives it through qits-gateway's session and the collector polls it. The gate

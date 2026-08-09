@@ -8,9 +8,14 @@ build → registration → health-gated cutover). This file is the working conve
 **A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
 `mvn install` elsewhere, no credentials, **no network**. That is why the poms duplicate versions
 instead of inheriting them, and why every seam that reaches outside the process is faked rather than
-skipped: `FakeDeploymentDriver` behind `DeploymentDriver` (docker) and `FakeSpecSource` behind
-`SpecSource` (the git host). **Two fakes, down from three** — the ancestor also needed a stub HTTP
-server for the topology, and the topology is a repository query now.
+skipped: `FakeDeploymentDriver` behind `DeploymentDriver` (docker), `FakeSpecSource` behind
+`SpecSource` (the git host) and `FakeResourceProvisioner` behind `ResourceProvisioner` (the
+platform's postgres). **Three fakes** — the ancestor's fourth, a stub HTTP server for the topology,
+dissolved when the topology became a repository query.
+
+The one thing the suite does start is a **postgres of its own**: the component's store is one now,
+and `testdb/EmbeddedPg` spawns zonky's real binaries as a child process. A maven dependency, not a
+container — the rule is no docker, and it still holds.
 
 **Which command is the gate depends on whether you have the client** (`git clone … && git submodule
 update --init`):
@@ -50,9 +55,10 @@ Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
   one database, declared once, in the module both others depend on.
 - **`deployments/`** (`…deployments.*`) — the execution: `DeployService`, `EnvironmentOperations`,
   `RollbackPins`, `DeploymentSpecParser`, `DeploymentIdentifiers` (what only reaches an argv),
-  `ImageRefs`, `ContainerNames`, `PdProcess`, and the two seams `DeploymentDriver` / `SpecSource`
-  plus the announcement port `BuildAnnouncements`.
-- **`service/`** (`…api`, `…dockerhost`, `…githost`) — the adapters. Identity is not a package here:
+  `ImageRefs`, `ContainerNames`, `PdProcess`, `ResourceProvisioning` and `BootResourceRegistration`,
+  and the three seams `DeploymentDriver` / `SpecSource` / `ResourceProvisioner` plus the
+  announcement port `BuildAnnouncements`.
+- **`service/`** (`…api`, `…dockerhost`, `…githost`, `…pghost`) — the adapters. Identity is not a package here:
   the forward-auth pair lives in the published `qits-auth-core`.
 
 `eu.wohlben.qits.webui` sits outside that tree, holding `WebUiRedirect` and only that. It keeps the
@@ -72,10 +78,11 @@ containers. The concrete consequence is `EnvironmentOperations`: creating a tier
 (`environments`) *and* a network (`deployments`), so the composition lives on the execution side and
 `EnvironmentService` stays socketless. Do not put a driver call in `environments/`.
 
-**The seam rule is one rule, applied twice.** Everything the domain modules cannot do — shell out to
-docker, fetch a file over HTTP — is an interface there and an implementation in `service/`, with a
-scripted fake in the suite. Anything that grows a third follows the same shape; do not put a client
-in a domain module.
+**The seam rule is one rule, applied three times.** Everything the domain modules cannot do — shell
+out to docker, fetch a file over HTTP, speak DDL to somebody else's server — is an interface there
+and an implementation in `service/`, with a scripted fake in the suite. `ResourceProvisioner` was
+the third and took the shape unchanged; a fourth follows it. Do not put a client in a domain
+module.
 
 ## What the merge dissolved (do not bring it back)
 
@@ -231,9 +238,9 @@ Hub and spoke, as README describes. Two things to leave alone unless you mean it
 
 Two validators, split by the module boundary rather than by taxonomy:
 
-- **`PdIdentifiers`** (`environments`) — names, branches, health paths: what the topology **stores**,
-  checked where it is stored. Names become docker network names, aliases and image path segments, so
-  the charset is the dns-label one.
+- **`PdIdentifiers`** (`environments`) — names, branches, health paths, resource names, database
+  names: what the topology **stores**, checked where it is stored. Names become docker network
+  names, aliases and image path segments, so the charset is the dns-label one.
 - **`DeploymentIdentifiers`** (`deployments`) — shas, repository ids, run ids, resource-attribute
   values: what only ever reaches an argv, checked beside the argv.
 
@@ -252,6 +259,36 @@ bounds it to one non-blank line of 512 characters, at the parser and again at th
 checked when a command is present. It is not stored: the spec is read before every deployment, and
 the one path that resolves targets from the catalogue instead records failures and deploys nothing.
 
+**`resources:` takes the health-path treatment, and it needs one checkpoint more than the health
+path does.** Both halves of an entry are repository-authored. The **resource name** becomes an
+environment-variable key on a `docker run` (`QITS_RESOURCE_<NAME>_URL`), which is the health path's
+situation exactly. The **database name** additionally lands in DDL run against a postgres instance
+**the whole platform shares** — and DDL has no bind variables, so the allowlist is not a belt there,
+it is the only guard. Hence `requireResourceName` (`[a-z][a-z0-9-]{0,31}`) and
+`requireDatabaseName` (`qits_[a-z0-9_]{1,58}`), and three checkpoints rather than two: the parser,
+the line before the SQL string is assembled, and the argv. The mandatory `qits_` prefix is the
+structural half of the guard — it excludes `postgres`, `template0/1` and every `pg_*` name by
+construction, so the namespace a repository can reach is disjoint from the instance's own.
+
+**What a repository can NAME versus what this component INJECTS.** A repository names a database of
+its own; every VALUE that reaches the container for it — the url, the role, the password — is
+derived or generated here. So the rule that nothing arriving over HTTP contributes a credential to a
+`docker run` is unchanged by provisioning: the credential is this component's, and the registry row
+is its only copy.
+
+**Provisioning speaks SQL, not shell.** `CREATE ROLE` / `CREATE DATABASE` / `REVOKE` / `ALTER …
+OWNER` over plain JDBC — no `psql`, no `docker exec`, no process. `exec` is still not in the docker
+vocabulary and must not enter it. The postgres superuser password comes from
+`qits.platform.deployments.postgres.admin-password` (deployment config, the domain that already
+holds the socket), has no default, is never stored in a row and never reaches an argv. **There is no
+`DROP` and none is coming**: marking a resource obsolete is future work, and it will be a mark.
+
+**The `platformdeployments` database is credential-bearing.** `pd_resource.password` is the single
+authority for every provisioned application's credential. Treat it with the sensitivity of the
+`qits-deployments-config` volume. No statement containing a password is logged, no failure detail
+names one, and `PgResourceProvisioner.literal` refuses a password it could not quote safely rather
+than escaping it cleverly.
+
 Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not lean on that:
 validation stays at the boundary and the belt stays at the argv.
 
@@ -266,6 +303,35 @@ This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RE
 and its `QUARKUS_`-spelled twin) are written **before** the run args, and docker keeps the **last**
 assignment of a repeated key — measured, not assumed. So they are defaults an operator overrides,
 and the ordering is the precedence rule: never reorder them past the run args.
+
+## Resources: what the deployer provisions, and where the truth is
+
+A repository's `resources: postgresql:<name>[:<database>]` is answered before the pull, by
+`ResourceProvisioning` over the `ResourceProvisioner` seam. Four things decide how it behaves and
+each is easy to undo by accident:
+
+- **The registry row is the single authority for the credential.** `pd_resource.password` is not a
+  cache of something postgres knows — postgres stores a hash — and no file carries it. That is what
+  makes the drift arms decidable: a row without a role is a reset postgres volume and the role comes
+  back with the **stored** password (running containers keep working); a role without a row is a
+  reset deployer database and the role is rotated to a **fresh** one (nothing knew the old one).
+  Never a `DROP`, in either direction.
+- **This component is adopter #1 and cannot provision itself from cold**, which is what
+  `BootResourceRegistration` exists for: the bootstrap creates its role and database over plain JDBC
+  before the process exists, and the row is written from the environment at every boot. Without it
+  the first self-deploy takes the reconcile arm and rotates the password its own connection pool is
+  holding open.
+- **No transaction spans the seam call.** The registry read and the row upsert are two
+  `requiringNew()` brackets with the DDL between them — a socket to another server must never sit
+  inside this component's own transaction.
+- **The host is derived, never configured.** An environment application uses
+  `PdNetworks.alias(<tier>, "qits-oci-postgresql")`; a platform-plane one uses the platform
+  environment's tier, and fails with a sentence when no environment is designated. There is no
+  postgres-host config key and there should not be one.
+
+The admin credential and the untrusted-input rules for the two names are in **Untrusted input**
+above. `PgResourceProvisionerTest` runs the matrix against a real postgres because the arms differ
+only in which statement runs — a fake there would be asserting the test's own model of the server.
 
 ## Addressing and auth
 

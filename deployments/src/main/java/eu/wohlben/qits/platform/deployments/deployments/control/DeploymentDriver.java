@@ -158,8 +158,8 @@ public interface DeploymentDriver {
   String containerId(String containerName);
 
   /**
-   * Launch the detached self-update referee: stop the old container (freeing the H2 lock the
-   * successor is retrying on), await the successor's health gate, then remove the old container —
+   * Launch the detached self-update referee: stop the old container (freeing the published port
+   * and the socket the successor is retrying on), await the successor's health gate, then remove the old container —
    * or, on a missed gate, remove the successor and restart the old. Detached because neither
    * instance can referee its own succession: the old is about to be stopped and the new cannot boot
    * until it is.

@@ -64,8 +64,8 @@ import org.jboss.logging.Logger;
  * is removed only after the new one passed it; a failed deployment — image missing, docker refused,
  * health gate expired — removes the fresh container and restarts what was stopped, so the previous
  * deployment stays {@code ACTIVE} and serving. Stop-before-start (rather than an overlapping
- * cutover) is what makes stateful applications deployable at all: one process per H2 file, one
- * binder per published host port. The pull still happens before the stop, so replacing the OCI
+ * cutover) is what makes stateful applications deployable at all: one binder per published host
+ * port, one process per single-writer store. The pull still happens before the stop, so replacing the OCI
  * registry's own application does not depend on it being up mid-cutover. The predecessor is
  * whatever holds the application's alias on any of the networks the fresh container is about to be
  * on — including containers this component did not start (a bootstrap's seeded originals, or the
@@ -813,8 +813,8 @@ public class DeployService implements BuildAnnouncements {
 
     // The replace cutover: whatever currently answers to the application's alias is STOPPED — not
     // removed — before the fresh container starts. Stopping first is what makes stateful
-    // applications deployable at all (one process per H2 file, one binder per published host
-    // port); keeping the stopped containers around is what preserves the rollback: a failed gate
+    // applications deployable at all (one binder per published host port, one process per
+    // single-writer store); keeping the stopped containers around is what preserves the rollback: a failed gate
     // restarts them. The search covers every network the fresh container will be on, so it also
     // absorbs predecessors this component did not start (the bootstrap's seeded originals, the
     // retired qits-cd's) and predecessors still living on the legacy network alone — holding the
