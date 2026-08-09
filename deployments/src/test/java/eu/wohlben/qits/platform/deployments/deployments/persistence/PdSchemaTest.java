@@ -2,11 +2,13 @@ package eu.wohlben.qits.platform.deployments.deployments.persistence;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,12 +17,16 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 
 /**
- * What the schema itself promises, against a real H2 with the real migration — plain JUnit, no
- * Quarkus, because the subject is the SQL.
+ * What the schema itself promises, against a real PostgreSQL with the real migration — plain JUnit,
+ * no Quarkus, because the subject is the SQL.
  *
- * <p>The ancestor's equivalent tested a backfill (qits-cd's V5 rewriting rows qits-cd v1 had
- * written), which a clean-start V1 has nothing to do. What survives is the set of claims that
- * backfill existed to protect, restated as properties of the shape:
+ * <p><b>Real postgres, not an in-memory stand-in.</b> The store moved off H2 with the resource
+ * mechanism, and two of the claims below exist only on the database that ships: identity columns
+ * and {@code unique nulls not distinct}. {@link EmbeddedPg} spawns the binaries as a child process,
+ * so this still needs no docker.
+ *
+ * <p>Each test migrates its OWN database, so one test's rows are never another's starting state.
+ * The claims:
  *
  * <ul>
  *   <li>the ordering column is the <b>database's</b> and is monotonic, because the deployment
@@ -32,7 +38,10 @@ import org.junit.jupiter.api.Test;
  *       has to match across a <b>null</b> tier. This is the query that decides whether a
  *       self-updating deployer comes back ACTIVE or comes back having failed its own deployment,
  *       and nulls are distinct to {@code =} — so it is written with an explicit null test and
- *       pinned here.
+ *       pinned here;
+ *   <li>and the same fact from the other side on {@code pd_resource}: its uniqueness is declared
+ *       {@code nulls not distinct}, so the platform plane — whose {@code environment_name} is null
+ *       — gets one row per resource rather than one per deployment.
  * </ul>
  */
 public class PdSchemaTest {
@@ -43,8 +52,7 @@ public class PdSchemaTest {
 
   @Test
   public void theOrderingColumnIsTheDatabasesAndItIsMonotonic() throws Exception {
-    String url = migrated();
-    try (Connection connection = DriverManager.getConnection(url, "sa", "");
+    try (Connection connection = migrated();
         Statement sql = connection.createStatement()) {
       // A deliberately identical created_at: two deployments queued by ONE build-succeeded event
       // land in the same tick, and nothing but the tiebreak may decide their order.
@@ -70,8 +78,7 @@ public class PdSchemaTest {
     // No FK into the topology, deliberately: a service removed from the catalogue or a tier torn
     // down must not take its deployment history with it, and the rollback pins are read off that
     // history while qits-artifacts' image GC waits on the answer.
-    String url = migrated();
-    try (Connection connection = DriverManager.getConnection(url, "sa", "");
+    try (Connection connection = migrated();
         Statement sql = connection.createStatement()) {
       deployment(sql, "d-orphan", "a-service-no-row-describes", "'a-tier-no-row-describes'", SHA_A, "ACTIVE");
       assertEquals(List.of("d-orphan"), rows(sql, "select id from pd_deployment"));
@@ -84,8 +91,7 @@ public class PdSchemaTest {
     // and `p.environment_id = o.environment_id` matches NOTHING when both are null — so the query
     // tests for null explicitly. Getting this wrong is silent: the successor of a handoff comes up,
     // finds no predecessor to decommission, and two rows claim to be ACTIVE.
-    String url = migrated();
-    try (Connection connection = DriverManager.getConnection(url, "sa", "");
+    try (Connection connection = migrated();
         Statement sql = connection.createStatement()) {
       deployment(sql, "p-env", "qits-platform-deployments", "'env-1'", SHA_A, "ACTIVE");
       deployment(sql, "p-platform", "qits-platform-deployments", "null", SHA_A, "ACTIVE");
@@ -109,11 +115,10 @@ public class PdSchemaTest {
     // The shape that retired the ancestors' composite (environment_id, name) uniqueness and the
     // partial-index problem it carried: a service name is unique outright, so nothing has to be
     // enforced inside a transaction because a null made two rows "distinct".
-    String url = migrated();
-    try (Connection connection = DriverManager.getConnection(url, "sa", "");
+    try (Connection connection = migrated();
         Statement sql = connection.createStatement()) {
-      // Named columns, not positional: V2 added one, and a positional insert makes every later
-      // migration a change to this file.
+      // Named columns, not positional: a later migration that adds one must not become a change to
+      // this file.
       sql.execute(
           "insert into pd_environment (id, name, branch, network, platform, created_at) values"
               + " ('env-1', 'dev', 'environment/dev', 'qits-net', true, timestamp with time zone"
@@ -123,8 +128,8 @@ public class PdSchemaTest {
               + " health_path, created_at) values ('svc-1', 'qits-gateway', 'ENVIRONMENT', null,"
               + " true, '/q/health/ready', timestamp with time zone '2026-08-06 10:00:00Z')");
       sql.execute(
-          "insert into pd_service_link values ('link-1', 'svc-1', 'env-1', timestamp with time"
-              + " zone '2026-08-06 10:00:00Z')");
+          "insert into pd_service_link (id, service_id, environment_id, created_at) values"
+              + " ('link-1', 'svc-1', 'env-1', timestamp with time zone '2026-08-06 10:00:00Z')");
 
       assertEquals(
           List.of("qits-gateway|env-1"),
@@ -148,14 +153,44 @@ public class PdSchemaTest {
     }
   }
 
-  private static String migrated() {
-    String url = "jdbc:h2:mem:pd-schema-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+  @Test
+  public void aPlatformPlaneResourceIsUniqueBecauseItsNullsAreNotDistinct() throws Exception {
+    // The claim `unique nulls not distinct` exists for, and the reason this table could not have
+    // been written before the move off H2. A platform-plane resource has a null environment_name,
+    // and under the DEFAULT rule every null is distinct — so the registry would take one row per
+    // deployment, the "row exists" arm of the idempotency matrix would never be reached, and every
+    // self-deploy would rotate a password that was working.
+    try (Connection connection = migrated();
+        Statement sql = connection.createStatement()) {
+      resource(sql, "r-1", "qits-artifacts", "null", "db", "qits_artifacts");
+      assertThrows(
+          SQLException.class,
+          () -> resource(sql, "r-2", "qits-artifacts", "null", "db", "qits_artifacts"),
+          "a second platform-plane row for the same (application, resource) is refused");
+    }
+
+    // The same triple in two different tiers is two different resources, which is the whole point
+    // of the environment column being part of the key.
+    try (Connection connection = migrated();
+        Statement sql = connection.createStatement()) {
+      resource(sql, "r-1", "qits-projects", "'dev'", "db", "qits_projects");
+      resource(sql, "r-2", "qits-projects", "'prod'", "db", "qits_projects");
+      assertEquals(
+          List.of("dev", "prod"),
+          rows(sql, "select environment_name from pd_resource order by environment_name"));
+    }
+  }
+
+  /** A freshly created, freshly migrated database — one per test, so no test inherits rows. */
+  private static Connection migrated() throws Exception {
+    String database = "pd_deployments_" + UUID.randomUUID().toString().replace("-", "");
+    String url = EmbeddedPg.url(database);
     Flyway.configure()
-        .dataSource(url, "sa", "")
+        .dataSource(url, EmbeddedPg.USER, EmbeddedPg.PASSWORD)
         .locations("classpath:db/platformdeployments/migration")
         .load()
         .migrate();
-    return url;
+    return DriverManager.getConnection(url, EmbeddedPg.USER, EmbeddedPg.PASSWORD);
   }
 
   private static void deployment(
@@ -176,6 +211,31 @@ public class PdSchemaTest {
             + "', 'container-"
             + id
             + "', timestamp with time zone '2026-08-06 12:00:00Z')");
+  }
+
+  private static void resource(
+      Statement sql,
+      String id,
+      String applicationName,
+      String environmentName,
+      String resourceName,
+      String databaseName)
+      throws SQLException {
+    sql.execute(
+        "insert into pd_resource (id, application_name, environment_name, resource_name,"
+            + " resource_type, database_name, role_name, password, created_at) values ('"
+            + id
+            + "', '"
+            + applicationName
+            + "', "
+            + environmentName
+            + ", '"
+            + resourceName
+            + "', 'postgresql', '"
+            + databaseName
+            + "', '"
+            + databaseName
+            + "', 'not-a-real-secret', timestamp with time zone '2026-08-09 12:00:00Z')");
   }
 
   private static List<String> rows(Statement sql, String query) throws Exception {

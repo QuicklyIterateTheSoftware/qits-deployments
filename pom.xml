@@ -74,6 +74,20 @@
              (docs/project-setup-quinoa-angular.md in the qits superproject). -->
         <quinoa.version>2.8.2</quinoa.version>
 
+        <!-- Embedded PostgreSQL for the suites. The component's store IS postgres now, so the
+             tests that touch SQL have to run against one — and the first rule here is that a clone
+             tests green with NO DOCKER, which rules out Testcontainers and Quarkus dev services
+             alike. Zonky resolves real postgres binaries as ordinary Maven artifacts and spawns
+             them as a child process: a maven dependency, not a container.
+
+             Two coordinates, on purpose. The BOM pins which POSTGRES the binaries are (18.4.0 —
+             the platform's own postgres tag), the library version is the harness around them, and
+             they move independently. Every architecture the suite may run on is named explicitly
+             in the modules that use it: the binaries are per-arch artifacts, and a missing one
+             fails at test time rather than at resolution. -->
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
+
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <failsafe-plugin.version>3.5.4</failsafe-plugin.version>
@@ -104,6 +118,23 @@
                 <version>${quarkus.platform.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <!-- Which postgres the embedded binaries ARE — 18.4.0, the tag the platform's own
+                     qits-oci-postgresql image is built from. `unique nulls not distinct` in V1
+                     needs PG >= 15, so the suite proving that constraint has to run on a real one.
+                     Imported as a BOM because the per-arch artifacts are separate coordinates. -->
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
             </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>

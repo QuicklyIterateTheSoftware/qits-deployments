@@ -47,12 +47,24 @@
             <artifactId>quarkus-jackson</artifactId>
         </dependency>
         <dependency>
+            <!-- The component's store. It was a file H2 until the resource mechanism landed; this
+                 component is now adopter #1 of its own `resources:` contract and runs on the
+                 platform's postgres, provisioned by the bootstrap before it first boots. The
+                 driver is also what the resource provisioner speaks plain JDBC through — one
+                 pgjdbc on the classpath, no second datasource. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-h2</artifactId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits here because
+                 this module owns the lineage. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

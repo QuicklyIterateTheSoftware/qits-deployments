@@ -60,7 +60,7 @@ public class PdDeployment extends PanacheEntityBase {
   public String containerName;
 
   /** What went wrong (docker's own output, bounded), or null on the happy path. */
-  @Column(columnDefinition = "clob")
+  @Column(columnDefinition = "text")
   public String detail;
 
   @Column(name = "created_at", nullable = false)

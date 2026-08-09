@@ -32,8 +32,9 @@ gives you a `native-image` and `./mvnw verify -Dnative` produces
 keep in your head: a missing GraalVM does not fail the build (Quarkus falls back to a container build
 — grep the log for `Cannot find the native-image`); prefer what is already in the image
 (`ProcessBuilder` over a docker client library — the reason `PdProcess` shells out); every config
-default the app boots with is part of the native surface (the AUTO_SERVER lesson: the H2 URL carries
-none, do not add it); and anything returned as `Response.entity(...)` is invisible to the build-time
+default the app boots with is part of the native surface (the AUTO_SERVER lesson, which now reads as:
+the datasource ships an *expression* over `QITS_RESOURCE_DB_*` and no fallback URL at all, so there
+is no default with a feature in it to lose); and anything returned as `Response.entity(...)` is invisible to the build-time
 Jackson analysis, which is what `api/ApiWireReflection` exists for. **A new response type joins that
 list in the commit that adds it** — the failure is a 500 in the native binary while every JVM test
 stays green, and it has been paid for once already.
@@ -343,14 +344,28 @@ the catalogue says today.
 its own datasource — keep appending, never edit an applied migration. It lives in `environments/`
 because the component is one database; the module split is code, not storage.
 
+**The store is PostgreSQL, and the lineage restarted at V1 to say so.** The H2 lineage (V1 + V2) was
+deleted rather than continued, and that was a decision with one precondition: the migration onto
+postgres is an **unwrap and a re-bootstrap**, so no database anywhere is on the H2 lineage and no
+`V3__move_to_postgres.sql` had a reader. What the fresh V1 is, is the two H2 migrations translated —
+identity columns instead of `auto_increment`, `text` instead of `clob`, V2's `platform` flag folded
+into the table it belongs to with **no backfill**, since every database reaching it is empty and the
+bootstrap creates the tier with the flag already set. Two parity notes are written into its header
+because postgres would now permit what H2 could not, and the answers are still the code's: no check
+constraint on any enum column, and no partial unique index on `pd_environment.platform`. **A second
+clean start is not a precedent** — it cost a re-bootstrap, and the ordinary rule (append, never edit)
+is back from V1 onward.
+
 The suites run every migration against an **empty** schema, so a backfill is untested by them.
-`deployments/src/test/.../PdSchemaTest` is the shape to copy: plain JUnit, a real H2, Flyway, then
-the claims. A migration that backfills needs a test that migrates to the version before, writes the
-rows the old code wrote, and migrates the rest of the way — `PdPlatformEnvironmentMigrationTest`
-is that, for V2, and `Flyway.configure().target("1")` is how it stops halfway.
+`deployments/src/test/.../PdSchemaTest` is the shape to copy: plain JUnit, a real postgres from
+`EmbeddedPg`, Flyway, then the claims. A migration that backfills needs a test that migrates to the
+version before, writes the rows the old code wrote, and migrates the rest of the way —
+`Flyway.configure().target("<version>")` is how it stops halfway. (V2's backfill test was that, and
+it went with V2.)
 
 Write inserts in those tests with **named columns**. A positional one makes every later migration a
-change to a test that had nothing to do with it, which V2 demonstrated.
+change to a test that had nothing to do with it — the H2 lineage's V2 demonstrated it by adding one
+column and breaking every positional insert in the suite.
 
 Deployment listings order by `seq`, V1's identity column, and **not** by `createdAt desc, id desc`:
 the id is a random UUID, so that tiebreak swapped two rows recorded in the same tick at random —
@@ -383,10 +398,17 @@ against.
 
 - App-level config lives in `service/src/main/resources/application.properties` and Quarkus merges it
   into the test config. **Never re-declare an app-level setting in test resources** — the test copy
-  carries only the port, the in-memory H2, and `quarkus.devservices.enabled=false`.
-- **No dev services, ever.** A dev service is a container start, and the first rule here is that a
-  clone tests green with no docker. `quarkus-oidc` in particular launches a real Keycloak the moment
-  a profile leaves `quarkus.oidc.auth-server-url` unset — measured on the ancestors, not feared.
+  carries only the port, the persistence-unit wiring and `quarkus.devservices.enabled=false`.
+- **No dev services and no containers, ever.** A dev service is a container start, and the first rule
+  here is that a clone tests green with no docker. `quarkus-oidc` in particular launches a real
+  Keycloak the moment a profile leaves `quarkus.oidc.auth-server-url` unset — measured on the
+  ancestors, not feared. The store being postgres does not change that answer: `testdb/EmbeddedPg`
+  starts **zonky's** postgres — real binaries resolved as Maven artifacts, spawned as a child
+  process — and `testdb/EmbeddedPgConfigSource` hands its url, username and password to every
+  `@QuarkusTest` at an ordinal above `application.properties`, because the port is chosen at run
+  time and cannot be written down. Testcontainers is not on this classpath and must not arrive.
+  `EmbeddedPg` is **copied** into `deployments/` rather than shared: a test-jar dependency between
+  two modules that have none is the higher price.
 - **Machine-token tests mint their own tokens.** `MachineTokens` signs RS256 with the key pair in
   `service/src/test/resources/machine-token-*.pem`, and `MachineGuardEnforcedProfile` hands
   quarkus-oidc the public half, so the enforced path is exercised end to end with no
@@ -395,7 +417,7 @@ against.
   across tests: reset both in `@BeforeEach`, use distinct **environment names, repository ids and
   service names** per test, and read their state through their **methods** — the injected reference
   is a CDI client proxy, and a field read on a proxy sees the proxy's fields, not the bean's. The
-  suite shares one in-memory database across classes (Flyway cleans at start, not between tests), and
+  suite shares one embedded database across classes (Flyway cleans at start, not between tests), and
   a **platform** service registered by one class shows up in every other class's link query — so
   assert with `hasItem`, never with a size.
 - They live in `…deployments.control`, the seam's own package, which is also what lets
@@ -411,9 +433,13 @@ against.
   `src/test` lands in the committed document unless it is hidden.
 - `PdPackagedSurfaceIT` runs the **packaged artifact** (fast-jar under `-DskipITs=false`, binary
   under `-Dnative`) and asserts what a native build can silently lose: the build-time route prefixes,
-  the shipped `${user.home}`-rooted H2 default (it relocates `user.home` rather than restating the
-  URL), Flyway's migration surviving as a resource, and — the claim the ancestors could not make —
-  both domains round-tripping in one process against one database. It points
+  the shipped datasource *expression* (it hands the launched process `QITS_RESOURCE_DB_URL` and its
+  two siblings — the generic contract a deployment supplies — rather than restating the datasource
+  keys, so the jar's own `${…}` indirection is what is under test), Flyway's migration surviving as
+  a resource, and — the claim the ancestors could not make —
+  both domains round-tripping in one process against one database. Its embedded postgres reaches
+  the profile through a **system property**, because a `QuarkusTestProfile` is instantiated in two
+  classloaders and a static field is not shared between them. It points
   `qits.platform.deployments.container-runtime` at a binary that does not exist, which keeps it
   free of host side effects and proves every driver call degrades to a warning rather than a
   failure.
@@ -467,7 +493,7 @@ platform-shaped (no environment id, one instance, no links). `platform/main` and
 integration trunk: a push to it builds and ships nothing.
 
 **Which environment is the platform one is a column now** — `pd_environment.platform`, true on
-exactly one row (V2). `DeployService.registerPlatform` asks whether the *platform* environment is
+exactly one row. `DeployService.registerPlatform` asks whether the *platform* environment is
 among the tiers listening to the built branch; the environment arm still fans out over all of them.
 That closes what used to be recorded here as the thing gating environment #2: under the old gate any
 tier's branch rolled the one platform instance, which was never a fan-out — it was several tiers
@@ -476,8 +502,9 @@ taking turns overwriting one container. A second environment is an ordinary thin
 The flag is a designation, not a link. A platform service still belongs to no tier, still keeps the
 bare wire alias, and is still reachable from every environment; what the column decides is which
 branch may roll it. **`EnvironmentService.designate` moves it** — clearing the old holder and
-setting the new one in one transaction — because the schema cannot: H2 has no partial unique index,
-the same wall V1 hit from the other side with null rows. Clearing the flag outright is a 409, and so
+setting the new one in one transaction — because that is where the invariant belongs. Postgres does
+have a partial unique index and V1 deliberately declines it: an index would also forbid the
+intermediate state of the very two statements that move the flag. Clearing the flag outright is a 409, and so
 is deleting the environment holding it; both would leave the plane running with no branch able to
 replace it. `PdEnvironmentApiTest` holds those claims, and
 `PdDeploymentFlowTest.onlyThePlatformEnvironmentsBranchRollsThePlatformPlane` holds the gate.
