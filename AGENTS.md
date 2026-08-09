@@ -346,7 +346,11 @@ because the component is one database; the module split is code, not storage.
 The suites run every migration against an **empty** schema, so a backfill is untested by them.
 `deployments/src/test/.../PdSchemaTest` is the shape to copy: plain JUnit, a real H2, Flyway, then
 the claims. A migration that backfills needs a test that migrates to the version before, writes the
-rows the old code wrote, and migrates the rest of the way.
+rows the old code wrote, and migrates the rest of the way — `PdPlatformEnvironmentMigrationTest`
+is that, for V2, and `Flyway.configure().target("1")` is how it stops halfway.
+
+Write inserts in those tests with **named columns**. A positional one makes every later migration a
+change to a test that had nothing to do with it, which V2 demonstrated.
 
 Deployment listings order by `seq`, V1's identity column, and **not** by `createdAt desc, id desc`:
 the id is a random UUID, so that tiebreak swapped two rows recorded in the same tick at random —
@@ -451,23 +455,38 @@ lockfile keeps the developer-host origin, which is correct locally.
 
 **This repo is its own deployer**, and it is an **environment service** — one instance per
 environment, deploying that environment. Its `.config/qits/deployments.yml` takes the default
-target and names `deploy_branches: environment/prod`, so a push to `environment/prod` is a
-deployment. A green run announces this component to itself and it takes the self-update handoff; the
+target and names no branch at all: a push to the branch an environment listens to is a deployment.
+A green run announces this component to itself and it takes the self-update handoff; the
 `/platform-deployments` surface blips mid-cutover, and a successor that misses its health gate
 leaves the predecessor serving.
 
 **`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
-*environment* listens to its branch — `DeployService.registerPlatform` asks
-`environments.onBranch(branch)`, the same question the environment arm asks, and what comes out is
-still platform-shaped (no environment id, one instance, no links). `platform/main` and
+*environment* listens to its branch, and what comes out on the platform plane is still
+platform-shaped (no environment id, one instance, no links). `platform/main` and
 `SpecSource.DEFAULT_PLATFORM_BRANCH` are gone, and so is the spec's `branch:` key. `main` stays the
 integration trunk: a push to it builds and ships nothing.
 
-The consequence to revisit: with several environments, **any** environment's branch rolls the one
-platform instance. That is acceptable while one environment exists and has to be answered before
-the second one is created — the plan gates environment #2 on it anyway.
+**Which environment is the platform one is a column now** — `pd_environment.platform`, true on
+exactly one row (V2). `DeployService.registerPlatform` asks whether the *platform* environment is
+among the tiers listening to the built branch; the environment arm still fans out over all of them.
+That closes what used to be recorded here as the thing gating environment #2: under the old gate any
+tier's branch rolled the one platform instance, which was never a fan-out — it was several tiers
+taking turns overwriting one container. A second environment is an ordinary thing to create.
 
-**`deploy_branches:` is parsed here and used by nobody here.** The release flow reads the same file
-for its promotion targets, and this parser fails a deployment on an unknown key — so a key another
-reader needs is a key this reader has to know. It is validated all the same: a ref this file cannot
-spell is a mistake wherever it is read.
+The flag is a designation, not a link. A platform service still belongs to no tier, still keeps the
+bare wire alias, and is still reachable from every environment; what the column decides is which
+branch may roll it. **`EnvironmentService.designate` moves it** — clearing the old holder and
+setting the new one in one transaction — because the schema cannot: H2 has no partial unique index,
+the same wall V1 hit from the other side with null rows. Clearing the flag outright is a 409, and so
+is deleting the environment holding it; both would leave the plane running with no branch able to
+replace it. `PdEnvironmentApiTest` holds those claims, and
+`PdDeploymentFlowTest.onlyThePlatformEnvironmentsBranchRollsThePlatformPlane` holds the gate.
+
+**`deploy_branches:` is retired: accepted, validated, acted on by nobody.** Its one reader was
+qits-workspaces' release flow, which pushed a release onto *every* branch the list named — a
+fan-out rather than a ladder, and with three tiers it would have shipped into all three at once. A
+release lands on one entry branch from that component's own configuration now, and no repository
+states it. The parser still tolerates the key, and the reason is sharper than the `singleton`
+alias's: **a spec is fetched at the BUILT sha**, so a rollback pin or a redeploy of an older commit
+still presents a file carrying it, and an unknown key fails a deployment. Do not write it into a new
+file; do not remove the tolerance.

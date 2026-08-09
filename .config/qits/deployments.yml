@@ -1,4 +1,11 @@
-# How this repository is deployed. It is read from the git host at the built sha.
+# How qits-platform-deployments deploys this repo. It reads this file from the git host at
+# the built sha, so the answer travels with the commit.
+#
+# CARRYING THE FILE AT ALL is the other thing it says. qits-workspaces reads it on a release to
+# decide whether this repository deploys — a library or an SPA carries none and its release is
+# the trunk push alone — and then promotes onto the branch it is configured with
+# (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
+# thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
 #
 # This component is an ENVIRONMENT service: one instance per environment, deploying that
 # environment. It owns the topology and the docker socket, and one environment's copy answers for
@@ -6,17 +13,6 @@
 # back when one instance served every tier.
 #
 # `deployment_target` is omitted because `environment` is the default, and a default written out is
-# a second place to keep it right.
-#
-# `deploy_branches` is what the release flow promotes onto; the deployer itself takes no notice of
-# it — a green build deploys wherever an environment listens to the built branch, and that is the
-# environment row's answer, not this file's.
-deploy_branches: environment/prod
-
-# The convention would derive the health path from the repository name, but the route path
-# deliberately did not move with the rename — the service still serves /platform-deployments. Without this line
-# the deployer probes a 404 and rolls every deployment back as unhealthy.
-#
-# `health_cmd` is the alternative and the two are mutually exclusive: it names a command the
-# container runs instead of the HTTP probe, for images with no HTTP surface. This one has one.
-health_path: /platform-deployments/q/health/ready
+# a second place to keep it right. Which leaves this file with no keys at all, and that is a
+# complete answer: a green build deploys wherever an environment listens to the built branch, and
+# that is the environment row's answer, never this file's.

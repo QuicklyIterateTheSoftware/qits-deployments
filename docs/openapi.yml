@@ -31,6 +31,8 @@ components:
           type: string
         network:
           type: string
+        platform:
+          type: boolean
         applications:
           type: array
           deprecated: true
@@ -159,6 +161,8 @@ components:
           type: string
         network:
           type: string
+        platform:
+          type: boolean
         createdAt:
           $ref: "#/components/schemas/Instant"
         applications:
@@ -215,6 +219,8 @@ components:
           type: string
         branch:
           type: string
+        platform:
+          type: boolean
     UpsertServiceRequest:
       type: object
       properties:
@@ -306,7 +312,8 @@ paths:
       - Pd Environment Controller
   /platform-deployments/api/environments/{environmentId}:
     patch:
-      summary: Rename an environment or point it at another branch
+      summary: "Rename an environment, point it at another branch, or designate it\
+        \ the platform environment"
       parameters:
       - name: environmentId
         in: path
@@ -331,7 +338,8 @@ paths:
         "404":
           description: No such environment
         "409":
-          description: Another environment already has that name
+          description: "Another environment already has that name, or the platform\
+            \ designation was cleared rather than moved"
         "401":
           description: Gate on and no machine token presented
         "403":
@@ -370,6 +378,8 @@ paths:
           description: Torn down
         "404":
           description: No such environment
+        "409":
+          description: This is the platform environment
         "401":
           description: Gate on and no machine token presented
         "403":
@@ -479,4 +489,4 @@ paths:
       - Pd Service Controller
 info:
   title: qits-platform-deployments API
-  version: 2026.0.0
+  version: 2026.808.155533

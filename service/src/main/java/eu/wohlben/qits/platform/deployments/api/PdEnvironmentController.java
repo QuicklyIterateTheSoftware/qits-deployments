@@ -75,18 +75,29 @@ public class PdEnvironmentController {
    * holds one identity for a service (its name), so a {@code (repoId, name)} pair that disagrees
    * has nowhere to land. The field is still accepted so an older sender's payload keeps
    * deserializing; send nothing.
+   *
+   * <p>{@code platform} makes this the <b>platform environment</b> — the one tier whose branch
+   * deploys the platform plane. Omitted is false, and the bootstrap is the sender that sets it: it
+   * creates the standing environment that {@code --platform-env} names. Creating a tier without it
+   * on a database that has no platform environment yet is legal and logs a warning, because a
+   * platform build would then deploy nowhere and say nothing.
    */
   public record CreateEnvironmentRequest(
       @NotBlank String name,
       String branch,
       String network,
+      Boolean platform,
       @Deprecated List<@Valid ApplicationSpec> applications) {}
 
   /**
-   * The rename/retarget payload — both fields optional, an omitted one is left alone. This is how
-   * an environment moves onto the {@code environment/<name>} branch convention.
+   * The rename/retarget/designate payload — every field optional, an omitted one is left alone.
+   * This is how an environment moves onto the {@code environment/<name>} branch convention, and how
+   * the platform designation moves between tiers.
+   *
+   * <p>{@code platform: true} moves the designation to this environment. {@code false} is refused
+   * (409): the platform plane always has a tier, so the designation is moved, never dropped.
    */
-  public record UpdateEnvironmentRequest(String name, String branch) {}
+  public record UpdateEnvironmentRequest(String name, String branch, Boolean platform) {}
 
   public record EnvironmentResponse(PdEnvironmentDto environment) {}
 
@@ -110,7 +121,11 @@ public class PdEnvironmentController {
           request.applications().size(), request.name());
     }
     PdEnvironment environment =
-        environments.create(request.name(), request.branch(), request.network());
+        environments.create(
+            request.name(),
+            request.branch(),
+            request.network(),
+            Boolean.TRUE.equals(request.platform()));
     return Response.status(Response.Status.CREATED).entity(toResponse(environment)).build();
   }
 
@@ -120,14 +135,20 @@ public class PdEnvironmentController {
    * reach for on a live environment. The bundle network is not renamed either: dev's is {@code
    * qits-net} by design. The next deployment of each application moves it onto the networks the new
    * name derives; what runs now keeps running.
+   *
+   * <p>Moving the platform designation has none either, for the same reason plus one of its own: a
+   * platform service has no environment id and keeps its bare wire alias, so the plane's containers
+   * are not a tier's to move. The flag decides which branch may roll them next.
    */
   @PATCH
   @Path("/{environmentId}")
-  @Operation(summary = "Rename an environment or point it at another branch")
+  @Operation(summary = "Rename an environment, point it at another branch, or designate it the platform environment")
   @APIResponse(responseCode = "200", description = "The updated environment")
   @APIResponse(responseCode = "400", description = "A name or branch failed validation")
   @APIResponse(responseCode = "404", description = "No such environment")
-  @APIResponse(responseCode = "409", description = "Another environment already has that name")
+  @APIResponse(
+      responseCode = "409",
+      description = "Another environment already has that name, or the platform designation was cleared rather than moved")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
   public EnvironmentResponse update(
@@ -137,7 +158,8 @@ public class PdEnvironmentController {
         environments.update(
             environmentId,
             request == null ? null : request.name(),
-            request == null ? null : request.branch());
+            request == null ? null : request.branch(),
+            request == null ? null : request.platform());
     return toResponse(environment);
   }
 
@@ -183,12 +205,16 @@ public class PdEnvironmentController {
   /**
    * Tear the environment down: its recorded deployments, its containers, its networks, and last the
    * tier itself. 204 — after this the branch deploys nowhere.
+   *
+   * <p>The platform environment is refused: the platform plane would be left deployable from no
+   * branch at all. Designate another environment first.
    */
   @DELETE
   @Path("/{environmentId}")
   @Operation(summary = "Tear an environment down (rows, containers, networks)")
   @APIResponse(responseCode = "204", description = "Torn down")
   @APIResponse(responseCode = "404", description = "No such environment")
+  @APIResponse(responseCode = "409", description = "This is the platform environment")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
   public Response delete(@PathParam("environmentId") String environmentId) {

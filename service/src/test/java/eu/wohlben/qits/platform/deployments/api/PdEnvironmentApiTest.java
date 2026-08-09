@@ -501,6 +501,98 @@ public class PdEnvironmentApiTest {
         .body("deployments", notNullValue());
   }
 
+  // --- the platform environment -----------------------------------------------------------------
+
+  @Test
+  public void anEnvironmentIsNotThePlatformOneUnlessItSaysSo() {
+    create("env-plain");
+    given()
+        .when()
+        .get(ENVIRONMENTS)
+        .then()
+        .statusCode(200)
+        .body("environments.find { it.name == 'env-plain' }.platform", equalTo(false));
+  }
+
+  @Test
+  public void designatingMovesTheFlagRatherThanAddingASecondHolder() {
+    // The at-most-one invariant, and the schema does not hold it — H2 has no partial unique index,
+    // so EnvironmentService moves the flag inside one transaction and this is what pins that.
+    String first = create(Map.of("name", "env-plane-a", "platform", true));
+    String second = create(Map.of("name", "env-plane-b", "platform", true));
+
+    given()
+        .when()
+        .get(ENVIRONMENTS + "/" + first)
+        .then()
+        .statusCode(200)
+        .body("environment.platform", equalTo(false));
+    given()
+        .when()
+        .get(ENVIRONMENTS + "/" + second)
+        .then()
+        .statusCode(200)
+        .body("environment.platform", equalTo(true));
+  }
+
+  @Test
+  public void aPatchMovesTheDesignationToAnExistingTier() {
+    // The future "switch the platform environment" is this call. It is rows only: a platform
+    // service has no environment id and keeps its bare wire alias, so nothing moves on the host —
+    // what changes is which branch may roll the plane next.
+    create(Map.of("name", "env-move-from", "platform", true));
+    String to = create("env-move-to");
+
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("platform", true))
+        .when()
+        .patch(ENVIRONMENTS + "/" + to)
+        .then()
+        .statusCode(200)
+        .body("environment.platform", equalTo(true))
+        .body("environment.name", equalTo("env-move-to"));
+
+    given()
+        .when()
+        .get(ENVIRONMENTS)
+        .then()
+        .statusCode(200)
+        .body("environments.find { it.name == 'env-move-from' }.platform", equalTo(false));
+  }
+
+  @Test
+  public void theDesignationIsMovedNeverCleared() {
+    // A window with no platform environment is a window in which a green build of a platform
+    // service registers nothing and reports no error. So there is no way to ask for one.
+    String only = create(Map.of("name", "env-nodrop", "platform", true));
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("platform", false))
+        .when()
+        .patch(ENVIRONMENTS + "/" + only)
+        .then()
+        .statusCode(409);
+  }
+
+  @Test
+  public void thePlatformEnvironmentCannotBeTornDown() {
+    // Deleting it would leave the platform plane running and deployable from no branch at all.
+    // Designate another tier first; that is a move, and the plane has a tier throughout.
+    String platform = create(Map.of("name", "env-undeletable", "platform", true));
+    given()
+        .when()
+        .delete(ENVIRONMENTS + "/" + platform)
+        .then()
+        .statusCode(409);
+
+    given().when().get(ENVIRONMENTS + "/" + platform).then().statusCode(200);
+
+    // …and once the designation has moved, the same delete goes through.
+    create(Map.of("name", "env-undeletable-successor", "platform", true));
+    given().when().delete(ENVIRONMENTS + "/" + platform).then().statusCode(204);
+  }
+
   // --- helpers ----------------------------------------------------------------------------------
 
   private String create(String name) {

@@ -17,9 +17,9 @@ import java.util.Set;
  * <pre>
  * deployment_target: environment       # default when the key or the file is absent | platform
  * available_on_env: false              # default; true = public node (bundle + hub joins)
- * deploy_branches: environment/prod    # comma-separated refs; read here, used by the release flow
  * health_path: /q/health/ready         # default: /&lt;name without the qits- prefix&gt;/q/health/ready
  * health_cmd: pg_isready -U postgres   # instead of health_path: the probe runs in the container
+ * deploy_branches: environment/prod    # RETIRED, accepted and ignored — see below
  * </pre>
  *
  * <p><b>{@code health_cmd} and {@code health_path} are alternatives, and setting both is an
@@ -28,12 +28,19 @@ import java.util.Set;
  * HTTP surface — postgres, the first of them — can pass no path-shaped gate, having neither curl
  * nor anything on 8080, so it says how it is ready in its own words instead.
  *
- * <p><b>{@code deploy_branches} is parsed and not acted on.</b> Where a build deploys is decided by
- * the environment rows — a green build deploys wherever an environment listens to its branch — so
- * this component never reads the key back. It is accepted because qits-workspaces' release flow
- * reads the same file for its promotion targets, and this parser fails a deployment on an unknown
- * key: a key another reader needs is a key this reader has to know. It is still validated, because
- * a ref this file cannot spell is a mistake wherever it is read.
+ * <p><b>{@code deploy_branches} is RETIRED: accepted, validated, and acted on by nobody.</b> Where
+ * a build deploys was always decided by the environment rows — a green build deploys wherever an
+ * environment listens to its branch — so this component never read the key back. Its one reader was
+ * qits-workspaces' release flow, which promoted a release onto every branch the list named; that is
+ * a fan-out rather than a ladder, and with three tiers it would have shipped a release into all
+ * three at once. A release now lands on one entry branch, from that component's own configuration,
+ * and no repository states it.
+ *
+ * <p>It stays accepted for the same reason {@code singleton} does, and the reason is sharper here.
+ * <b>A spec is fetched at the BUILT sha</b>, so a rollback pin, a redeploy of an older commit or a
+ * repository nobody has edited yet still presents a file carrying the key — and this parser fails a
+ * deployment on an unknown one. Making it unknown would turn every such deployment red. Do not
+ * write it into a new file, and do not remove the tolerance.
  *
  * <p><b>Strict on purpose.</b> A typo in this file decides where a container runs and what can
  * reach it, and a lenient parser answers a typo with a default — silently deploying the wrong

@@ -433,21 +433,22 @@ public class DeployService implements BuildAnnouncements {
    * check: the catalogue holds one identity for a service and derived registration has always named
    * an application after its repository, so the name IS the repository.
    *
-   * <p><b>The branch decides whether this event is for this plane at all, and it is the same
-   * question the environment arm asks.</b> A platform service deploys when an environment listens
-   * to the built branch — there is one set of deploy refs on the platform, {@code
+   * <p><b>The branch decides whether this event is for this plane at all, and it is nearly the same
+   * question the environment arm asks.</b> There is one set of deploy refs on the platform, {@code
    * environment/<name>}, and a plane of its own with a second convention was one ref more than the
    * model needed. A build on a branch no environment tracks registers nothing and deploys nothing,
    * which is what keeps a push to the integration trunk from shipping the platform.
    *
-   * <p>What it deploys is still platform-shaped — one instance, no environment id, no links — so
-   * with several environments any one of their branches would roll the single platform instance.
-   * That is acceptable while one environment exists and has to be revisited before the second one
-   * is created; the plan gates environment #2 on it anyway.
+   * <p>Where the two arms differ is <b>which</b> environment counts. The environment arm fans out
+   * over every tier listening to the branch; this one deploys only when the <b>platform
+   * environment</b> is among them. What it deploys is one instance with no environment id and no
+   * links, so "every tier's branch rolls it" was never a fan-out — it was several tiers taking turns
+   * overwriting one container. {@code PdEnvironment.platform} is what settles which tier owns that
+   * turn, and it is why a second environment is now an ordinary thing to create.
    */
   private List<Target> registerPlatform(
       String repoId, String branch, DeploymentSpec spec, Optional<LinkedService> known) {
-    if (environments.onBranch(branch).isEmpty()) {
+    if (environments.onBranch(branch).stream().noneMatch(environment -> environment.platform)) {
       return List.of();
     }
     if (known.isEmpty()) {

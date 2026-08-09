@@ -99,7 +99,7 @@ public class PdRegistrationTest {
     // everywhere, which is what makes a new environment pick it up without anyone editing it. It
     // carries no branch either, and that is the newer half: the plane has no deploy ref of its own,
     // so there is nothing to write down.
-    createEnvironment("reg-platform", "environment/reg-platform");
+    createPlatformEnvironment("reg-platform", "environment/reg-platform");
     specs.script(
         "repo-reg-idp",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
@@ -117,7 +117,7 @@ public class PdRegistrationTest {
     // The deploy refs are `environment/<name>` and nothing else — one set for the whole platform,
     // asked the same way on both planes. What it deploys is still platform-shaped: one instance,
     // no environment, no links.
-    createEnvironment("reg-trunk", "environment/reg-trunk");
+    createPlatformEnvironment("reg-trunk", "environment/reg-trunk");
     specs.script(
         "repo-reg-trunk",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
@@ -135,7 +135,7 @@ public class PdRegistrationTest {
     // `main` is the integration trunk and no environment listens to it: it builds and ships
     // nothing. A release reaches an environment by fast-forwarding `environment/<name>` onto it,
     // and until that push the event on the trunk must leave no row and start no container.
-    createEnvironment("reg-mainonly", "environment/reg-mainonly");
+    createPlatformEnvironment("reg-mainonly", "environment/reg-mainonly");
     specs.script(
         "repo-reg-mainonly",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
@@ -151,7 +151,7 @@ public class PdRegistrationTest {
   public void theRetiredSingletonSpellingStillRegistersAPlatformService() {
     // The alias is not a parser curiosity: a repository still carrying the word must keep deploying
     // across the cutover, and what it gets has to be the platform plane in every respect.
-    createEnvironment("reg-alias", "environment/reg-alias");
+    createPlatformEnvironment("reg-alias", "environment/reg-alias");
     specs.script(
         "repo-alias", DeploymentSpecParserAlias.parse("deployment_target: singleton\n"));
     postBuildSucceeded("repo-alias", "environment/reg-alias", SHA_A);
@@ -171,7 +171,7 @@ public class PdRegistrationTest {
     // environment id could not be asked for at all — every platform row was recorded and then
     // unreadable, and a client drawing "what is deployed" showed the tiers and nothing else.
     // `platform` is the stand-in the application id already carries, reused as the filter value.
-    createEnvironment("reg-plane", "environment/reg-plane");
+    createPlatformEnvironment("reg-plane", "environment/reg-plane");
     specs.script(
         "repo-reg-plane",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
@@ -196,7 +196,7 @@ public class PdRegistrationTest {
     // The filter is a filter, not a widening: asking for the plane must not answer with the rows of
     // every tier as well. An environment deployment and a platform one, and only the latter comes
     // back.
-    createEnvironment("reg-planes", "environment/reg-planes");
+    createPlatformEnvironment("reg-planes", "environment/reg-planes");
     postBuildSucceeded("repo-reg-tiered", "environment/reg-planes", SHA_A);
     awaitStarted(1);
     specs.script(
@@ -287,7 +287,7 @@ public class PdRegistrationTest {
   public void aPlatformServiceGetsTheSameHealthPathResolution() {
     // The platform plane is not a different rule: the convention, the spec and an existing value
     // rank the same way there.
-    createEnvironment("reg-health-plane", "environment/reg-health-plane");
+    createPlatformEnvironment("reg-health-plane", "environment/reg-health-plane");
     specs.script(
         "qits-idp",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
@@ -360,9 +360,22 @@ public class PdRegistrationTest {
   }
 
   private String createEnvironment(String name, String branch) {
+    return createEnvironment(name, branch, false);
+  }
+
+  /**
+   * The tier the platform plane deploys from. A platform build ships only when THIS environment
+   * listens to the built branch, so every platform-plane test here designates its own — and
+   * designating moves the flag, so the suite's shared database never holds two.
+   */
+  private String createPlatformEnvironment(String name, String branch) {
+    return createEnvironment(name, branch, true);
+  }
+
+  private String createEnvironment(String name, String branch, boolean platform) {
     return given()
         .contentType(ContentType.JSON)
-        .body(Map.of("name", name, "branch", branch))
+        .body(Map.of("name", name, "branch", branch, "platform", platform))
         .when()
         .post("/platform-deployments/api/environments")
         .then()

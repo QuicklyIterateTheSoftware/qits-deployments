@@ -50,9 +50,22 @@ public class PdDeploymentFlowTest {
   }
 
   private String createEnvironment(String name) {
+    return createEnvironment(name, false);
+  }
+
+  /**
+   * The tier the platform plane deploys from. A platform build ships only when THIS environment
+   * listens to the built branch, so every platform-plane test here designates its own — and
+   * designating moves the flag, so the suite's shared database never holds two.
+   */
+  private String createPlatformEnvironment(String name) {
+    return createEnvironment(name, true);
+  }
+
+  private String createEnvironment(String name, boolean platform) {
     return given()
         .contentType(ContentType.JSON)
-        .body(Map.of("name", name))
+        .body(Map.of("name", name, "platform", platform))
         .when()
         .post("/platform-deployments/api/environments")
         .then()
@@ -348,7 +361,7 @@ public class PdDeploymentFlowTest {
     // A platform service updating itself, so the handoff path has to work with the platform naming
     // and networks — a predecessor found on the legacy network, a successor named without any tier
     // segment, and still no container stopped by this process.
-    createEnvironment("flow-selfplane");
+    createPlatformEnvironment("flow-selfplane");
     specs.script(
         "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
     String selfId = "abcdef123456";
@@ -457,7 +470,7 @@ public class PdDeploymentFlowTest {
 
   @Test
   public void aPlatformServiceRunsOnThePlatformNetworkAndJoinsEveryApplicationNetwork() {
-    String environmentId = createEnvironment("flow-single");
+    String environmentId = createPlatformEnvironment("flow-single");
     driver.scriptExistingNetwork(
         new DeploymentDriver.Network(
             "qits-env-flow-single-app-single-seed",
@@ -514,7 +527,7 @@ public class PdDeploymentFlowTest {
     // A platform service asks the same branch question a tiered one does — does an environment
     // listen to this ref. `release` is nobody's deploy ref, so the first event ships nothing and
     // only the second one does.
-    createEnvironment("flow-pinned");
+    createPlatformEnvironment("flow-pinned");
     specs.script(
         "repo-pinned", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
     postBuildSucceeded("repo-pinned", "release", SHA_A);
@@ -524,6 +537,40 @@ public class PdDeploymentFlowTest {
     awaitWorkerIdle();
     assertEquals(1, driver.started().size(), "only the environment's branch shipped");
     assertEquals(SHA_B, driver.started().get(0).commitSha());
+  }
+
+  @Test
+  public void onlyThePlatformEnvironmentsBranchRollsThePlatformPlane() {
+    // The claim that makes a second tier ordinary. Both environments are real deploy refs and both
+    // would once have shipped this service, because the gate asked only whether SOME environment
+    // listened — and with one instance and no environment id, that was never a fan-out, it was two
+    // tiers taking turns overwriting one container. Now the platform environment owns the turn.
+    createEnvironment("flow-otherplane");
+    createPlatformEnvironment("flow-thisplane");
+    specs.script(
+        "repo-planegate",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+
+    postBuildSucceeded("repo-planegate", "environment/flow-otherplane", SHA_A);
+    awaitWorkerIdle();
+    assertEquals(List.of(), driver.started(), "another tier's branch leaves the plane alone");
+    assertTrue(
+        given()
+            .when()
+            .get("/platform-deployments/api/services")
+            .then()
+            .statusCode(200)
+            .extract()
+            .jsonPath()
+            .getList("services.name", String.class)
+            .stream()
+            .noneMatch("repo-planegate"::equals),
+        "and registers nothing — there is no half-registered state");
+
+    postBuildSucceeded("repo-planegate", "environment/flow-thisplane", SHA_B);
+    awaitStarted(1);
+    assertEquals(SHA_B, driver.started().get(0).commitSha());
+    assertNull(driver.started().get(0).environmentId(), "still one instance, on no tier");
   }
 
   @Test
@@ -625,7 +672,7 @@ public class PdDeploymentFlowTest {
     // A platform service belongs to no tier, so a container carrying a tier's id is never its
     // predecessor — while an unlabelled one still is, because that is what its own live migration
     // off the legacy network depends on.
-    createEnvironment("flow-plane");
+    createPlatformEnvironment("flow-plane");
     specs.script(
         "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
     driver.scriptAliasHolders(
@@ -685,7 +732,7 @@ public class PdDeploymentFlowTest {
     // The conversion, in one test: a repository that is an environment application today can
     // become a platform service with the commit that adds its deployments.yml. The old rows must
     // not sit beside the new one — one repository deploys to one place.
-    String environmentId = createEnvironment("flow-convert");
+    String environmentId = createPlatformEnvironment("flow-convert");
     postBuildSucceeded("repo-convert", "environment/flow-convert", SHA_A);
     awaitDeployments(environmentId, 1);
 
@@ -732,7 +779,7 @@ public class PdDeploymentFlowTest {
     // the history", and the environment deployment would find the running platform container
     // through the legacy network and remove it — leaving a row saying ACTIVE about nothing. So it
     // is refused, and the refusal is written where an operator looks: a FAILED row on the plane.
-    createEnvironment("flow-unflip");
+    createPlatformEnvironment("flow-unflip");
     specs.script(
         "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
     postBuildSucceeded("repo-unflip", "environment/flow-unflip", SHA_A);
@@ -778,7 +825,7 @@ public class PdDeploymentFlowTest {
     // and ServiceCatalog.upsert's own lock is another, but the contract under test is the worker:
     // handling the WHOLE event on one thread is what makes read-then-write atomic against every
     // other event — which is what the ancestor's null-environment_id row had no constraint for.
-    createEnvironment("flow-once");
+    createPlatformEnvironment("flow-once");
     specs.script(
         "repo-once", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
     int senders = 8;
