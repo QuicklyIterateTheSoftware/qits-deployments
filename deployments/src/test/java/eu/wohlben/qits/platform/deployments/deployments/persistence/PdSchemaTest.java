@@ -112,9 +112,12 @@ public class PdSchemaTest {
     String url = migrated();
     try (Connection connection = DriverManager.getConnection(url, "sa", "");
         Statement sql = connection.createStatement()) {
+      // Named columns, not positional: V2 added one, and a positional insert makes every later
+      // migration a change to this file.
       sql.execute(
-          "insert into pd_environment values ('env-1', 'dev', 'environment/dev', 'qits-net',"
-              + " timestamp with time zone '2026-08-06 10:00:00Z')");
+          "insert into pd_environment (id, name, branch, network, platform, created_at) values"
+              + " ('env-1', 'dev', 'environment/dev', 'qits-net', true, timestamp with time zone"
+              + " '2026-08-06 10:00:00Z')");
       sql.execute(
           "insert into pd_service (id, name, deployment_target, branch, available_on_env,"
               + " health_path, created_at) values ('svc-1', 'qits-gateway', 'ENVIRONMENT', null,"

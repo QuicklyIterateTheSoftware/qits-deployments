@@ -2,6 +2,7 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
 
 import eu.wohlben.qits.platform.deployments.environments.control.EnvironmentService;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdEnvironment;
+import eu.wohlben.qits.platform.deployments.environments.error.ConflictException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.util.LinkedHashSet;
@@ -50,8 +51,8 @@ public class EnvironmentOperations {
    * network could not be created yet is still an environment (the driver re-ensures every network
    * before every deployment), so a momentarily unreachable docker must not make the create fail.
    */
-  public PdEnvironment create(String name, String branch, String network) {
-    PdEnvironment environment = environments.create(name, branch, network);
+  public PdEnvironment create(String name, String branch, String network, boolean platform) {
+    PdEnvironment environment = environments.create(name, branch, network, platform);
     driver.ensureNetwork(
         new DeploymentDriver.Network(
             environment.network, environment.id, DeploymentDriver.NetworkKind.BUNDLE, null));
@@ -64,9 +65,14 @@ public class EnvironmentOperations {
    * and delete is the one operation never to reach for on a live environment. The next deployment
    * of each application moves it onto the networks the new name derives; what runs now keeps
    * running.
+   *
+   * <p>Moving the platform designation is a pass-through for the same reason, and it is the one
+   * place that reasoning is worth restating: a platform service has no environment id and keeps its
+   * bare wire alias, so the containers of the platform plane are not this tier's to move. What the
+   * flag changes is which branch is allowed to roll them.
    */
-  public PdEnvironment update(String environmentId, String name, String branch) {
-    return environments.update(environmentId, name, branch);
+  public PdEnvironment update(String environmentId, String name, String branch, Boolean platform) {
+    return environments.update(environmentId, name, branch, platform);
   }
 
   /**
@@ -96,9 +102,22 @@ public class EnvironmentOperations {
    * them from it would cut qits-idp off from the platform, and this component would be doing it to
    * itself mid-request. So it is skipped for both steps, and the environment's derived
    * per-application networks still go.
+   *
+   * <p><b>The platform environment is refused.</b> It is the tier whose branch rolls the platform
+   * plane, so tearing it down would leave qits-platform-idp and the rest deployable from no branch
+   * at all — running, unreachable by any future build, and with nothing in the model to say why.
+   * Designate another environment first; that is a move, and it leaves the plane with a tier
+   * throughout.
    */
   public void delete(String environmentId) {
     PdEnvironment environment = environments.require(environmentId);
+    if (environment.platform) {
+      throw new ConflictException(
+          "Environment "
+              + environment.name
+              + " is the platform environment: the platform plane would have no branch to deploy"
+              + " from. Designate another environment first.");
+    }
     String legacy = legacyNetwork.map(String::strip).filter(n -> !n.isEmpty()).orElse(null);
     Set<String> networks = new LinkedHashSet<>();
     networks.add(environment.network);

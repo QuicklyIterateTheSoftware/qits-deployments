@@ -10,7 +10,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import org.jboss.logging.Logger;
 
 /**
  * Environment lifecycle, <b>rows only</b>: creation with the conventions filled in (branch {@code
@@ -34,6 +36,8 @@ import java.util.UUID;
 @ApplicationScoped
 public class EnvironmentService {
 
+  private static final Logger LOG = Logger.getLogger(EnvironmentService.class);
+
   /**
    * The branch an environment listens to when its creator names none. A tier deploys from its own
    * ref — {@code main} stays the integration trunk, and a release reaches dev by fast-forwarding
@@ -47,8 +51,13 @@ public class EnvironmentService {
   @Inject PdEnvironmentRepository environments;
   @Inject PdServiceLinkRepository links;
 
-  /** {@code branch} and {@code network} are optional; each omitted one takes its convention. */
-  public PdEnvironment create(String name, String branch, String network) {
+  /**
+   * {@code branch} and {@code network} are optional; each omitted one takes its convention.
+   *
+   * <p>{@code platform} designates this tier as the one the platform plane deploys from, and
+   * designating is a <b>move</b> — see {@link #designate}.
+   */
+  public PdEnvironment create(String name, String branch, String network, boolean platform) {
     PdIdentifiers.requireName(name, "environment name");
     String effectiveBranch =
         PdIdentifiers.requireBranch(isBlank(branch) ? BRANCH_PREFIX + name : branch);
@@ -68,16 +77,32 @@ public class EnvironmentService {
               environment.name = name;
               environment.branch = effectiveBranch;
               environment.network = effectiveNetwork;
+              environment.platform = platform;
               environment.createdAt = Instant.now();
               environments.persist(environment);
+              if (platform) {
+                designate(environment);
+              } else if (environments.listPlatform().isEmpty()) {
+                // Silent otherwise, and the silence is the problem: a platform service's green
+                // build would register nothing and report no error, because "no tier is the
+                // platform one" and "this branch is not the platform tier's" are the same answer.
+                LOG.warnf(
+                    "Created environment %s and no environment is the platform one — until one is"
+                        + " designated, a green build of a platform service deploys nowhere",
+                    name);
+              }
               return environment;
             });
   }
 
   /**
-   * Rename an environment or point it at another branch. Both fields are optional; an omitted one
-   * is left alone. This is the migration path onto the {@code environment/<name>} branch convention
-   * and onto new names.
+   * Rename an environment, point it at another branch, or make it the platform environment. Every
+   * field is optional; an omitted one is left alone. This is the migration path onto the {@code
+   * environment/<name>} branch convention and onto new names.
+   *
+   * <p>{@code platform = true} moves the designation here (see {@link #designate}). {@code false} is
+   * refused: the platform plane must always have a tier to deploy from, so the designation is moved
+   * to another environment, never dropped.
    *
    * <p><b>No docker side effects, deliberately</b> — a rename that tore containers down would be a
    * delete in disguise, and delete is the one operation never to reach for on a live environment.
@@ -86,7 +111,8 @@ public class EnvironmentService {
    * derives ({@code qits-env-<env>-<app>}); what runs now keeps the networks it is on until its own
    * next deploy moves it.
    */
-  public PdEnvironment update(String environmentId, String name, String branch) {
+  public PdEnvironment update(
+      String environmentId, String name, String branch, Boolean platform) {
     String newName = isBlank(name) ? null : PdIdentifiers.requireName(name, "environment name");
     String newBranch = isBlank(branch) ? null : PdIdentifiers.requireBranch(branch);
     return QuarkusTransaction.requiringNew()
@@ -102,8 +128,45 @@ public class EnvironmentService {
               if (newBranch != null) {
                 environment.branch = newBranch;
               }
+              if (Boolean.TRUE.equals(platform)) {
+                designate(environment);
+              } else if (Boolean.FALSE.equals(platform) && environment.platform) {
+                throw new ConflictException(
+                    "The platform environment cannot be cleared, only moved: designate another"
+                        + " environment instead of undesignating "
+                        + environment.name);
+              }
               return environment;
             });
+  }
+
+  /**
+   * Make this the platform environment, by <b>moving</b> the designation rather than setting it:
+   * whoever held it loses it here, in the caller's transaction.
+   *
+   * <p>The move IS the at-most-one constraint. The schema carries no partial unique index because
+   * H2 has none (V2's comment, and V1 reached the same answer about null rows), so there is no
+   * second enforcement to fall back on and this must stay the only way the flag goes true.
+   *
+   * <p>Moving is also the right shape for the operation a caller actually wants. "The platform
+   * environment is prod now" is one fact, and expressing it as a clear plus a set would leave a
+   * window with no platform environment at all — during which a green build of a platform service
+   * would register nothing and quietly deploy nowhere.
+   *
+   * <p><b>Rows only, like everything else here.</b> The containers do not move: a platform service
+   * has no environment id and keeps its bare wire alias, so what changes is which branch is allowed
+   * to roll it, not where it runs. Actually relocating a running platform plane is a larger
+   * operation and is not this.
+   */
+  private void designate(PdEnvironment environment) {
+    for (PdEnvironment holder : environments.listPlatform()) {
+      if (!holder.id.equals(environment.id)) {
+        holder.platform = false;
+        LOG.infof(
+            "The platform environment moves from %s to %s", holder.name, environment.name);
+      }
+    }
+    environment.platform = true;
   }
 
   /**
@@ -159,6 +222,19 @@ public class EnvironmentService {
   public List<PdEnvironment> onBranch(String branch) {
     return QuarkusTransaction.joiningExisting()
         .call(() -> List.copyOf(environments.listByBranch(branch)));
+  }
+
+  /**
+   * The platform environment, if one is designated — the tier whose branch deploys the platform
+   * plane.
+   *
+   * <p>Empty is a real answer and not only a fresh-database one: an install can be mid-bootstrap,
+   * and a platform build then registers nothing rather than picking a tier at random. {@link
+   * #designate} is what fills it.
+   */
+  public Optional<PdEnvironment> platformEnvironment() {
+    return QuarkusTransaction.joiningExisting()
+        .call(() -> environments.listPlatform().stream().findFirst());
   }
 
   private static boolean isBlank(String value) {

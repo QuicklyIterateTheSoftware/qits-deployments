@@ -49,6 +49,25 @@ public class PdEnvironment extends PanacheEntityBase {
   @Column(nullable = false)
   public String network;
 
+  /**
+   * <b>The platform environment</b>, of which there is exactly one: the tier whose branch deploys
+   * the platform plane. A green build of a {@link PdDeploymentTarget#PLATFORM} service ships only
+   * when this environment listens to the built branch — every other tier's branch leaves the one
+   * platform instance alone.
+   *
+   * <p>It is not a link and it does not put anything in this tier. A platform service still belongs
+   * to no environment, still keeps the bare wire alias, and is still reachable from every tier. What
+   * this flag decides is which branch is allowed to roll it.
+   *
+   * <p><b>At most one row is true, and the schema does not enforce it</b> — H2 has no partial unique
+   * index, so {@link
+   * eu.wohlben.qits.platform.deployments.environments.control.EnvironmentService} designates by
+   * moving the flag inside one transaction. See V2's comment for why that is the same answer V1
+   * reached about null rows.
+   */
+  @Column(nullable = false)
+  public boolean platform;
+
   @Column(name = "created_at", nullable = false)
   public Instant createdAt;
 }

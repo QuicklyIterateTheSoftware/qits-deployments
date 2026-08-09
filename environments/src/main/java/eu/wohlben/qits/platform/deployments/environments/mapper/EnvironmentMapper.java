@@ -30,6 +30,7 @@ public class EnvironmentMapper {
         environment.name,
         environment.branch,
         environment.network,
+        environment.platform,
         environment.createdAt,
         applications == null ? null : applications.stream().map(this::toDto).toList());
   }

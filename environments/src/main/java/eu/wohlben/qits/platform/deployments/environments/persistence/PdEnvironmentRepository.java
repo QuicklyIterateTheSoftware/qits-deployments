@@ -26,4 +26,14 @@ public class PdEnvironmentRepository implements PanacheRepositoryBase<PdEnvironm
   public List<PdEnvironment> listByBranch(String branch) {
     return list("branch = ?1 order by createdAt, id", branch);
   }
+
+  /**
+   * The platform environment. A list rather than an optional because the schema does not enforce
+   * the "at most one" — H2 has no partial unique index, so {@code EnvironmentService.designate}
+   * does, and a query that threw on a second row would turn a repairable state into an outage.
+   * Ordered, so the answer is at least stable if one ever appears.
+   */
+  public List<PdEnvironment> listPlatform() {
+    return list("platform = true order by createdAt, id");
+  }
 }
