@@ -144,6 +144,24 @@ The startup sweep (`DeployService.onStart`) fails rows left `QUEUED`/`STARTING` 
 **deliberately reaps no containers** — a deployed application outlives its deployer, and whatever
 was ACTIVE before the restart is still serving. Do not "complete" the sweep with a reap.
 
+**The worker survives losing its own datasource, in exactly three brackets.** This component deploys
+qits-oci-postgresql — the postgres its own registry lives in — so cutting that container over kills
+every connection the deployment performing it is holding. It did: eaa34fbc cut over cleanly, went
+healthy, and then ended `FAILED: [unexpected: JDBCConnectionException …]` because the post-gate
+bookkeeping ran on dead connections, while a second event was dropped the same way in the worker's
+own catch. `DbRetry` wraps the catalogue read an event opens with, the cutover bookkeeping and
+`finish` — **connection-class failures only** (SQLState `08*`/`57P0x`, the pool's acquisition
+timeout, Hibernate's `JDBCConnectionException`), thirty seconds of half-second sleeps, safe because
+the worker is single-threaded and those three brackets re-read what they write.
+
+**What is deliberately NOT retried, and it is a rule rather than an omission:** `queue`,
+`recordRejection`, the `STARTING` transition and the platform conversion. They insert or move rows,
+so a commit whose outcome the connection died before reporting would be duplicated by a second
+attempt — and all of them run before anything docker-side has happened, so losing one drops the
+event with nothing half-done. Retry what comes *after* a container is running, where dropping the
+work leaves a live container with no row that admits it. Never a business failure: a 409 retried is
+one visible failure turned into a slow one.
+
 ## The health gate is patient, and that is not a tuning choice
 
 `HealthGate` (in `deployments/control`, polled by the driver) ends early on exactly two verdicts:

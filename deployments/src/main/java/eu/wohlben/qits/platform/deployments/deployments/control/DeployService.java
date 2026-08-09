@@ -60,6 +60,12 @@ import org.jboss.logging.Logger;
  * slow docker work never holds a transaction, and everything the docker calls need is copied into a
  * plain {@link Plan} first — the worker thread has no request context and no open session.
  *
+ * <p><b>Three of those brackets are wrapped in {@link DbRetry}</b>, because this component deploys
+ * the postgres its own registry lives in and a cutover of qits-oci-postgresql kills the connections
+ * of the very deployment performing it: the catalogue read an event opens with, the post-gate
+ * cutover bookkeeping, and {@link #finish}. Connection-class failures only, thirty seconds only —
+ * the rest of the brackets are deliberately left alone, and {@link #queue} says why.
+ *
  * <p><b>The cutover invariant:</b> the previous container is only <i>stopped</i> during the gate and
  * is removed only after the new one passed it; a failed deployment — image missing, docker refused,
  * health gate expired — removes the fresh container and restarts what was stopped, so the previous
@@ -319,6 +325,24 @@ public class DeployService implements BuildAnnouncements {
   }
 
   /**
+   * The catalogue read every event starts with — and the first database access a build-succeeded
+   * event makes, which is why it is retried.
+   *
+   * <p>An event arriving while this component's own postgres is cutting over used to die here and
+   * be swallowed: the intake is fire-and-forget, the worker logs the exception, and the build that
+   * caused it is simply never deployed. There is no row to look at afterwards, because a row is
+   * what the read was on the way to creating.
+   */
+  private Optional<LinkedService> findService(String repoId) {
+    return DbRetry.call("The catalogue lookup of " + repoId, () -> catalog.find(repoId));
+  }
+
+  /** The tiers listening to a branch — the topology half of the same read. See {@link #findService}. */
+  private List<PdEnvironment> tiersOnBranch(String branch) {
+    return DbRetry.call("The tier lookup for " + branch, () -> environments.onBranch(branch));
+  }
+
+  /**
    * Bring the catalogue up to date with what the repository declares, and answer where to deploy.
    * The whole of derived registration.
    */
@@ -331,7 +355,7 @@ public class DeployService implements BuildAnnouncements {
       LOG.warnf("Repository %s cannot be an application name, so nothing was registered", repoId);
       return List.of();
     }
-    Optional<LinkedService> known = catalog.find(repoId);
+    Optional<LinkedService> known = findService(repoId);
     return spec.target() == PdDeploymentTarget.PLATFORM
         ? registerPlatform(repoId, branch, spec, known)
         : registerInEnvironments(runId, repoId, branch, commitSha, spec, known);
@@ -380,7 +404,7 @@ public class DeployService implements BuildAnnouncements {
       return List.of();
     }
 
-    List<PdEnvironment> matching = environments.onBranch(branch);
+    List<PdEnvironment> matching = tiersOnBranch(branch);
     if (matching.isEmpty()) {
       // No tier listens to this branch: the normal case for every green build on a branch without
       // an environment. Nothing to link into, so nothing is written.
@@ -457,7 +481,7 @@ public class DeployService implements BuildAnnouncements {
    */
   private List<Target> registerPlatform(
       String repoId, String branch, DeploymentSpec spec, Optional<LinkedService> known) {
-    if (environments.onBranch(branch).stream().noneMatch(environment -> environment.platform)) {
+    if (tiersOnBranch(branch).stream().noneMatch(environment -> environment.platform)) {
       return List.of();
     }
     if (known.isEmpty()) {
@@ -580,7 +604,7 @@ public class DeployService implements BuildAnnouncements {
    * no container starts off one of them.
    */
   private List<Target> alreadyRegistered(String repoId, String branch) {
-    Optional<LinkedService> known = catalog.find(repoId);
+    Optional<LinkedService> known = findService(repoId);
     if (known.isEmpty()) {
       return List.of();
     }
@@ -588,7 +612,7 @@ public class DeployService implements BuildAnnouncements {
     if (linked.service().deploymentTarget == PdDeploymentTarget.PLATFORM) {
       // The same branch question the deploying path asks, so a spec read that failed records the
       // failure exactly where a successful one would have deployed.
-      return environments.onBranch(branch).isEmpty()
+      return tiersOnBranch(branch).isEmpty()
           ? List.of()
           : List.of(
               new Target(
@@ -603,7 +627,7 @@ public class DeployService implements BuildAnnouncements {
                   List.of()));
     }
     List<Target> targets = new ArrayList<>();
-    for (PdEnvironment environment : environments.onBranch(branch)) {
+    for (PdEnvironment environment : tiersOnBranch(branch)) {
       if (linked.environmentIds().contains(environment.id)) {
         targets.add(
             new Target(
@@ -621,6 +645,17 @@ public class DeployService implements BuildAnnouncements {
     return List.copyOf(targets);
   }
 
+  /**
+   * Write one {@code QUEUED} row per place this build deploys to.
+   *
+   * <p><b>Deliberately not retried</b>, and it is the same answer for {@link #recordRejection}, the
+   * {@code STARTING} transition and the platform conversion. They INSERT or move rows, so a commit
+   * whose outcome the connection died before reporting would be duplicated by a second attempt; and
+   * they all run before anything docker-side has happened, so losing one drops the event with
+   * nothing half-done and a resent event replays it. The retried brackets are the ones that come
+   * AFTER a container is already running, where dropping the work leaves a live container with no
+   * row that admits it.
+   */
   private List<String> queue(String runId, String commitSha, List<Target> targets) {
     if (targets.isEmpty()) {
       return List.of();
@@ -911,25 +946,34 @@ public class DeployService implements BuildAnnouncements {
     // Cutover: the new deployment is the application's ACTIVE one, whatever was ACTIVE before is
     // decommissioned — rows first, then the stopped containers (rows' and alias-holders' alike;
     // a set, since the healthy path sees most containers from both angles).
+    //
+    // THE RETRY IS NOT DECORATION HERE. This component deploys the platform's postgres, and a
+    // cutover of qits-oci-postgresql kills every connection this process holds — in the middle of
+    // the deployment that just performed it. The container was healthy; only the bookkeeping died,
+    // and it recorded the whole deployment FAILED for it. Re-running the bracket is safe because it
+    // re-reads its entities and writes them the same values.
     List<String> oldContainers =
-        QuarkusTransaction.requiringNew()
-            .call(
-                () -> {
-                  List<String> old = new ArrayList<>();
-                  for (PdDeployment previous :
-                      deployments.listActiveByApplication(
-                          plan.applicationName(), plan.environmentId())) {
-                    previous.status = PdDeploymentStatus.DECOMMISSIONED;
-                    previous.finishedAt = Instant.now();
-                    if (previous.containerName != null) {
-                      old.add(previous.containerName);
-                    }
-                  }
-                  PdDeployment deployment = deployments.findById(deploymentId);
-                  deployment.status = PdDeploymentStatus.ACTIVE;
-                  deployment.finishedAt = Instant.now();
-                  return old;
-                });
+        DbRetry.call(
+            "The cutover bookkeeping of " + deploymentId,
+            () ->
+                QuarkusTransaction.requiringNew()
+                    .call(
+                        () -> {
+                          List<String> old = new ArrayList<>();
+                          for (PdDeployment previous :
+                              deployments.listActiveByApplication(
+                                  plan.applicationName(), plan.environmentId())) {
+                            previous.status = PdDeploymentStatus.DECOMMISSIONED;
+                            previous.finishedAt = Instant.now();
+                            if (previous.containerName != null) {
+                              old.add(previous.containerName);
+                            }
+                          }
+                          PdDeployment deployment = deployments.findById(deploymentId);
+                          deployment.status = PdDeploymentStatus.ACTIVE;
+                          deployment.finishedAt = Instant.now();
+                          return old;
+                        }));
     Set<String> toRemove = new LinkedHashSet<>(oldContainers);
     for (DeploymentDriver.Holder predecessor : predecessors) {
       toRemove.add(predecessor.name());
@@ -1106,18 +1150,26 @@ public class DeployService implements BuildAnnouncements {
     }
   }
 
+  /**
+   * Record the outcome. Retried on a connection-class failure for the same reason the cutover
+   * bookkeeping is: this is the last write of a deployment that may have just replaced the database
+   * it writes to, and an outcome nobody could record is a row that says {@code STARTING} forever.
+   */
   private void finish(String deploymentId, PdDeploymentStatus status, String detail) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              PdDeployment deployment = deployments.findById(deploymentId);
-              if (deployment == null) {
-                return; // environment torn down mid-deploy
-              }
-              deployment.status = status;
-              deployment.detail = detail;
-              deployment.finishedAt = Instant.now();
-            });
+    DbRetry.run(
+        "Recording deployment " + deploymentId + " as " + status,
+        () ->
+            QuarkusTransaction.requiringNew()
+                .run(
+                    () -> {
+                      PdDeployment deployment = deployments.findById(deploymentId);
+                      if (deployment == null) {
+                        return; // environment torn down mid-deploy
+                      }
+                      deployment.status = status;
+                      deployment.detail = detail;
+                      deployment.finishedAt = Instant.now();
+                    }));
     if (status != PdDeploymentStatus.ACTIVE) {
       LOG.warnf("Deployment %s ended %s: %s", deploymentId, status, firstLine(detail));
     }
