@@ -57,6 +57,21 @@ public final class HealthGate {
   }
 
   /**
+   * The gate's one early success verdict, on its own so nothing has to restate it.
+   *
+   * <p>{@link DeploymentObserver} settles a row on exactly this reading — a {@code FAILED} row is
+   * only recovered when the container would have passed the gate — and "healthy" spelled twice is
+   * two things to keep in agreement. A container docker cannot inspect is never healthy, whatever
+   * its last known state was.
+   */
+  public static boolean healthy(Poll observed) {
+    return observed != null
+        && observed.gone() == null
+        && observed.state() != null
+        && observed.state().endsWith("/healthy");
+  }
+
+  /**
    * Park until the container is healthy or the timeout expires.
    *
    * @param timeout the gate's whole budget — the caller's config, untouched by this class
@@ -76,7 +91,7 @@ public final class HealthGate {
             false, "container vanished: " + observed.gone());
       }
       last = observed.state();
-      if (last.endsWith("/healthy")) {
+      if (healthy(observed)) {
         return new DeploymentDriver.HealthResult(true, null);
       }
       if (System.nanoTime() >= deadline) {

@@ -589,11 +589,16 @@ public class DockerDeploymentDriver implements DeploymentDriver {
   @Override
   public HealthResult awaitHealthy(String containerName, Duration timeout) {
     return HealthGate.await(
-        timeout, HEALTH_POLL, () -> inspectState(containerName), () -> logs(containerName));
+        timeout, HEALTH_POLL, () -> observe(containerName), () -> logs(containerName));
   }
 
-  /** One {@code docker inspect} of the container's state, as the gate reads it. */
-  private HealthGate.Poll inspectState(String containerName) {
+  /**
+   * One {@code docker inspect} of the container's state, as the gate reads it — and as the periodic
+   * observation reads it too. The gate polls this in a loop; the observer asks it once per pass. One
+   * docker call, one meaning of "healthy", one meaning of "gone".
+   */
+  @Override
+  public HealthGate.Poll observe(String containerName) {
     PdProcess.Result inspected =
         PdProcess.run(
             null,
