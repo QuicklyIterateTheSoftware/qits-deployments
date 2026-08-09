@@ -61,8 +61,6 @@ public class ResourceProvisioning {
   /** 128 bits, hex — argv-safe, URL-safe, and it needs no quoting in a SQL string literal. */
   private static final int PASSWORD_BYTES = 16;
 
-  private static final SecureRandom RANDOM = new SecureRandom();
-
   @Inject PdResourceRepository resources;
   @Inject ResourceProvisioner provisioner;
   @Inject EnvironmentService environments;
@@ -276,8 +274,11 @@ public class ResourceProvisioning {
    * argv, a JDBC url and a SQL string literal without one escaping rule between them.
    */
   private static String freshPassword() {
+    // Created per call, not held in a static: a build-time SecureRandom lands in the native
+    // image heap with a cached seed, and GraalVM refuses to build the image over it.
+    // Provisioning is rare; the construction cost is nothing.
     byte[] bytes = new byte[PASSWORD_BYTES];
-    RANDOM.nextBytes(bytes);
+    new SecureRandom().nextBytes(bytes);
     StringBuilder hex = new StringBuilder(PASSWORD_BYTES * 2);
     for (byte b : bytes) {
       hex.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
