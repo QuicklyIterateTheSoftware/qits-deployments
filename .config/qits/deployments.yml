@@ -27,4 +27,11 @@
 # what it was handed at every boot — so the first self-deploy after that finds a registry row, takes
 # the no-op arm, and is injected the credential it is already connected with. Without the row it
 # would rotate its own password out from under its own connection pool.
+# The convention would derive the health path from the repository name, but the route path
+# deliberately did not move with the rename — the service still serves /platform-deployments.
+# Without this line the successor's probe curls /deployments/… into a 404 and every self-update
+# rolls back as unhealthy. The old platform survived on an operator-corrected pd_service row;
+# a row is not durable across a re-bootstrap — this line is.
+health_path: /platform-deployments/q/health/ready
+
 resources: postgresql:db
