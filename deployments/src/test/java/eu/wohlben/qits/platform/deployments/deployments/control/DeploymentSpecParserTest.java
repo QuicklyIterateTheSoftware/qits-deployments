@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec;
+import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec.ResourceSpec;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -40,7 +41,94 @@ class DeploymentSpecParserTest {
   }
 
   @Test
-  void theFiveKeysAreReadAndCommentsAndQuotesAreNot() {
+  void aRepositoryAsksForADatabaseOfItsOwnWithOneLine() {
+    // The three shapes the grammar has, and all three are in the plan's own examples: the bare
+    // default, an explicit database, and two resources on one line. The type is spelled out so a
+    // second one can arrive without changing the shape.
+    assertEquals(
+        List.of(new ResourceSpec("db", null)), parse("resources: postgresql:db\n").resources());
+    assertEquals(
+        List.of(new ResourceSpec("db", "qits_artifacts")),
+        parse("resources: postgresql:db:qits_artifacts\n").resources());
+    assertEquals(
+        List.of(new ResourceSpec("projects", null), new ResourceSpec("epics", "qits_epics")),
+        parse("resources: postgresql:projects, postgresql:epics:qits_epics\n").resources());
+  }
+
+  @Test
+  void anOmittedDatabaseIsNullBecauseTheParserDoesNotKnowTheApplication() {
+    // Null is "the convention", not "no database": the default is qits_ plus the application name
+    // without its qits- prefix, and this parser has never been told which application it is
+    // reading for. DeployService.register resolves it.
+    assertNull(parse("resources: postgresql:db\n").resources().get(0).database());
+  }
+
+  @Test
+  void aFileThatNamesNoResourcesGetsAnEmptyListAndNotANull() {
+    assertEquals(List.of(), parse("available_on_env: true\n").resources());
+    assertEquals(List.of(), DeploymentSpec.DEFAULTS.resources());
+  }
+
+  @Test
+  void aResourceTypeThisComponentCannotProvisionIsAnError() {
+    // The strictness that matters most here: a typo answered with a default would be a deployment
+    // whose application boots without the credential it declared it needs.
+    String message = messageOf("resources: mysql:db\n");
+    assertTrue(message.contains("postgresql"), message);
+    assertTrue(messageOf("resources: db\n").contains("resources"), "a bare name is not an entry");
+    assertTrue(
+        messageOf("resources: postgresql:db:qits_a:extra\n").contains("resources"),
+        "and neither is a fourth segment");
+  }
+
+  @Test
+  void aResourceNameOrDatabaseOutsideItsCharsetIsAnError() {
+    // Both values are repository-authored and both end up somewhere that cannot be parametrized —
+    // the name in an env key on a docker run, the database in DDL against the platform's shared
+    // postgres. So they are allowlists, and this is the parser end of the three checkpoints.
+    assertTrue(messageOf("resources: postgresql:DB\n").contains("resources"));
+    assertTrue(messageOf("resources: postgresql:db name\n").contains("resources"));
+    assertTrue(messageOf("resources: postgresql:-db\n").contains("resources"));
+    assertTrue(messageOf("resources: postgresql:db-\n").contains("resources"));
+    // The qits_ prefix is what structurally excludes postgres, template0/1 and every pg_* name.
+    assertTrue(messageOf("resources: postgresql:db:postgres\n").contains("qits_"));
+    assertTrue(messageOf("resources: postgresql:db:template1\n").contains("qits_"));
+    assertTrue(messageOf("resources: postgresql:db:pg_catalog\n").contains("qits_"));
+    assertTrue(messageOf("resources: postgresql:db:qits_a; drop database x\n").contains("qits_"));
+  }
+
+  @Test
+  void aBlankEntryIsAnError() {
+    // `resources:` with nothing after it, and a trailing comma: a writer who meant to say
+    // something. The deploy_branches rule, applied to the key that provisions.
+    assertTrue(messageOf("resources:\n").contains("resources"));
+    assertTrue(messageOf("resources: postgresql:db,\n").contains("resources"));
+    assertTrue(messageOf("resources: postgresql:db, ,postgresql:other\n").contains("resources"));
+  }
+
+  @Test
+  void namingOneThingTwiceIsAnError() {
+    // A repeated name would make one env triple silently overwrite another; a repeated literal
+    // database would point two of a repository's own resources at one store.
+    assertTrue(
+        messageOf("resources: postgresql:db, postgresql:db\n").contains("twice"),
+        "the same resource name");
+    assertTrue(
+        messageOf("resources: postgresql:a:qits_x, postgresql:b:qits_x\n").contains("twice"),
+        "the same database under two names");
+  }
+
+  @Test
+  void anIndentedResourceListIsStillNesting() {
+    // The grammar is flat because the file is. A YAML sequence would need a parser this file
+    // deliberately does not have, which is why the entries share one comma-separated line.
+    assertTrue(
+        messageOf("resources: postgresql:db\n  - postgresql:other\n").contains("nesting"),
+        "an indented list is refused before it can look like it works");
+  }
+
+  @Test
+  void theScalarKeysAreReadAndCommentsAndQuotesAreNot() {
     DeploymentSpec spec =
         parse(
             """
@@ -170,7 +258,10 @@ class DeploymentSpecParserTest {
   @Test
   void anUnknownKeyIsAnError() {
     // A lenient parser answers a typo with a default, which deploys the wrong topology in silence.
-    assertTrue(messageOf("deployment_targets: platform\n").contains("unknown key"));
+    String message = messageOf("deployment_targets: platform\n");
+    assertTrue(message.contains("unknown key"), message);
+    // ...and the message lists every key there is, so a typo is answered with the vocabulary.
+    assertTrue(message.contains("resources"), message);
   }
 
   @Test

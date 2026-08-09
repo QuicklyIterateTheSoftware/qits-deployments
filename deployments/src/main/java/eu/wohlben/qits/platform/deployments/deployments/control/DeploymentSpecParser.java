@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Five scalar keys, no nesting, no YAML
+ * The strict reader of {@code .config/qits/deployments.yml}. Six scalar keys, no nesting, no YAML
  * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
@@ -19,6 +19,7 @@ import java.util.Set;
  * available_on_env: false              # default; true = public node (bundle + hub joins)
  * health_path: /q/health/ready         # default: /&lt;name without the qits- prefix&gt;/q/health/ready
  * health_cmd: pg_isready -U postgres   # instead of health_path: the probe runs in the container
+ * resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
  * deploy_branches: environment/prod    # RETIRED, accepted and ignored — see below
  * </pre>
  *
@@ -27,6 +28,21 @@ import java.util.Set;
  * container fetches, and the command replaces that whole mechanism. A deployable image with no
  * HTTP surface — postgres, the first of them — can pass no path-shaped gate, having neither curl
  * nor anything on 8080, so it says how it is ready in its own words instead.
+ *
+ * <p><b>{@code resources} is a flat comma-separated list, and it will never be anything else.</b>
+ * The grammar is {@code postgresql:<name>[:<database>]} because this file has no YAML sequences and
+ * no nesting to give it — the same reason {@code deploy_branches} is comma-separated. What a
+ * repository names there is a database of its own on the platform's shared postgres, so the two
+ * names are allowlisted (see {@link PdIdentifiers#requireResourceName} and {@link
+ * PdIdentifiers#requireDatabaseName}), and the {@code qits_} prefix is what keeps the namespace it
+ * can reach disjoint from the instance's own.
+ *
+ * <p><b>Once this key ships it can never become unknown again</b>, and that is worth writing down
+ * in the commit that adds it rather than learning later. A spec is fetched at the BUILT sha, so a
+ * rollback pin or a redeploy of an older commit presents whatever file that commit carried, and an
+ * unknown key fails a deployment. {@code deploy_branches} below is the same lesson, learned the
+ * expensive way; this is it applied in advance. Retiring the key later means keeping the tolerance
+ * forever, exactly as that one did.
  *
  * <p><b>{@code deploy_branches} is RETIRED: accepted, validated, and acted on by nobody.</b> Where
  * a build deploys was always decided by the environment rows — a green build deploys wherever an
@@ -64,6 +80,10 @@ public final class DeploymentSpecParser {
   private static final String DEPLOY_BRANCHES = "deploy_branches";
   private static final String HEALTH_PATH = "health_path";
   private static final String HEALTH_CMD = "health_cmd";
+  private static final String RESOURCES = "resources";
+
+  /** The only resource type there is. It is spelled in the file so a second one can arrive. */
+  private static final String POSTGRESQL = "postgresql";
 
   /** The retired vocabulary, still understood. See the class javadoc. */
   private static final String PLATFORM_ALIAS = "singleton";
@@ -80,6 +100,7 @@ public final class DeploymentSpecParser {
     List<String> deployBranches = List.of();
     String healthPath = null;
     String healthCmd = null;
+    List<DeploymentSpec.ResourceSpec> resources = List.of();
     Set<String> seen = new HashSet<>();
 
     String[] lines = (yaml == null ? "" : yaml).split("\\R", -1);
@@ -108,6 +129,7 @@ public final class DeploymentSpecParser {
         case DEPLOY_BRANCHES -> deployBranches = deployBranches(value, source, lineNumber);
         case HEALTH_PATH -> healthPath = healthPath(value, source, lineNumber);
         case HEALTH_CMD -> healthCmd = healthCmd(value, source, lineNumber);
+        case RESOURCES -> resources = resources(value, source, lineNumber);
         default ->
             throw error(
                 source,
@@ -122,8 +144,10 @@ public final class DeploymentSpecParser {
                     + DEPLOY_BRANCHES
                     + ", "
                     + HEALTH_PATH
+                    + ", "
+                    + HEALTH_CMD
                     + " and "
-                    + HEALTH_CMD);
+                    + RESOURCES);
       }
     }
 
@@ -146,7 +170,94 @@ public final class DeploymentSpecParser {
               + ": true` is not something a platform service can be — it already runs on every"
               + " environment's networks, and the bundle is environment-scoped");
     }
-    return new DeploymentSpec(target, availableOnEnv, deployBranches, healthPath, healthCmd);
+    return new DeploymentSpec(
+        target, availableOnEnv, deployBranches, healthPath, healthCmd, resources);
+  }
+
+  /**
+   * The resources a repository asks to have provisioned before its container starts:
+   * {@code postgresql:<name>[:<database>]}, comma-separated. One line, because this file has no
+   * YAML sequences — and neither a type, a name nor a database may contain a comma or a colon,
+   * which is what makes both separators safe.
+   *
+   * <p>A missing third segment means "the convention", not "no database": the default is {@code
+   * qits_} plus the application name without its {@code qits-} prefix, and it is resolved by {@code
+   * DeployService.register}, which is the first caller that knows the application's name. Null
+   * travels out of here as that statement.
+   *
+   * <p>Both duplicates are refused, and only one of the two can be caught here. A repeated <b>name</b>
+   * would make one env triple silently win over another; a repeated <b>literal database</b> would
+   * point two of a repository's own resources at one store. The second form a defaulted database
+   * can also take — two resources whose names both default to the same thing — is caught after
+   * resolution, where the defaults exist.
+   */
+  private static List<DeploymentSpec.ResourceSpec> resources(String value, String source, int line) {
+    List<DeploymentSpec.ResourceSpec> declared = new ArrayList<>();
+    Set<String> names = new HashSet<>();
+    Set<String> databases = new HashSet<>();
+    for (String candidate : value.split(",", -1)) {
+      String entry = candidate.strip();
+      if (entry.isBlank()) {
+        // `resources:` with nothing after it, or a trailing comma: a writer who meant to say
+        // something. A silent empty answer is exactly what this parser exists to refuse.
+        throw error(source, line, "`" + RESOURCES + "` has a blank entry");
+      }
+      String[] parts = entry.split(":", -1);
+      if (parts.length < 2 || parts.length > 3) {
+        throw error(
+            source,
+            line,
+            "`"
+                + RESOURCES
+                + "` entries are `"
+                + POSTGRESQL
+                + ":<name>` or `"
+                + POSTGRESQL
+                + ":<name>:<database>`, got: "
+                + entry);
+      }
+      if (!POSTGRESQL.equals(parts[0])) {
+        throw error(
+            source,
+            line,
+            "`" + RESOURCES + "` knows the type `" + POSTGRESQL + "` and no other, got: " + parts[0]);
+      }
+      String name;
+      try {
+        name = PdIdentifiers.requireResourceName(parts[1]);
+      } catch (RuntimeException e) {
+        throw error(
+            source,
+            line,
+            "`"
+                + RESOURCES
+                + "` names are lowercase letters, digits and inner dashes (max 32), got: "
+                + parts[1]);
+      }
+      String database = null;
+      if (parts.length == 3) {
+        try {
+          database = PdIdentifiers.requireDatabaseName(parts[2]);
+        } catch (RuntimeException e) {
+          throw error(
+              source,
+              line,
+              "`"
+                  + RESOURCES
+                  + "` databases are `qits_` followed by lowercase letters, digits and underscores"
+                  + " (max 63), got: "
+                  + parts[2]);
+        }
+      }
+      if (!names.add(name)) {
+        throw error(source, line, "`" + RESOURCES + "` names `" + name + "` twice");
+      }
+      if (database != null && !databases.add(database)) {
+        throw error(source, line, "`" + RESOURCES + "` names the database `" + database + "` twice");
+      }
+      declared.add(new DeploymentSpec.ResourceSpec(name, database));
+    }
+    return List.copyOf(declared);
   }
 
   private static PdDeploymentTarget target(String value, String source, int line) {

@@ -363,7 +363,7 @@ public class PdDeploymentFlowTest {
     // segment, and still no container stopped by this process.
     createPlatformEnvironment("flow-selfplane");
     specs.script(
-        "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     String selfId = "abcdef123456";
     String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
@@ -450,7 +450,7 @@ public class PdDeploymentFlowTest {
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-hub-seed"));
     specs.script(
-        "repo-gw", new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null));
+        "repo-gw", new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null, null));
     postBuildSucceeded("repo-gw", "environment/flow-hub", SHA_A);
 
     awaitDeployments(environmentId, 1);
@@ -478,7 +478,7 @@ public class PdDeploymentFlowTest {
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-single-seed"));
     specs.script(
-        "repo-idp", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-idp", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     // An environment's own branch, because that is the only kind of deploy ref there is — and what
     // comes out of it is still platform-shaped.
     postBuildSucceeded("repo-idp", "environment/flow-single", SHA_A);
@@ -529,7 +529,7 @@ public class PdDeploymentFlowTest {
     // only the second one does.
     createPlatformEnvironment("flow-pinned");
     specs.script(
-        "repo-pinned", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-pinned", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-pinned", "release", SHA_A);
     postBuildSucceeded("repo-pinned", "environment/flow-pinned", SHA_B);
 
@@ -549,7 +549,7 @@ public class PdDeploymentFlowTest {
     createPlatformEnvironment("flow-thisplane");
     specs.script(
         "repo-planegate",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
 
     postBuildSucceeded("repo-planegate", "environment/flow-otherplane", SHA_A);
     awaitWorkerIdle();
@@ -674,7 +674,7 @@ public class PdDeploymentFlowTest {
     // off the legacy network depends on.
     createPlatformEnvironment("flow-plane");
     specs.script(
-        "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     driver.scriptAliasHolders(
         List.of(
             new DeploymentDriver.Holder("dd".repeat(32), "an-env-copy", "some-env-id"),
@@ -737,7 +737,7 @@ public class PdDeploymentFlowTest {
     awaitDeployments(environmentId, 1);
 
     specs.script(
-        "repo-convert", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-convert", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-convert", "environment/flow-convert", SHA_B);
     awaitStarted(2);
 
@@ -781,13 +781,13 @@ public class PdDeploymentFlowTest {
     // is refused, and the refusal is written where an operator looks: a FAILED row on the plane.
     createPlatformEnvironment("flow-unflip");
     specs.script(
-        "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-unflip", "environment/flow-unflip", SHA_A);
     awaitStarted(1);
 
     // The file goes back to saying `environment`, on the tier's own branch this time.
     specs.script(
-        "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, null, null, null));
+        "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, null, null, null, null));
     postBuildSucceeded("repo-unflip", "environment/flow-unflip", SHA_B);
     awaitWorkerIdle();
 
@@ -827,7 +827,7 @@ public class PdDeploymentFlowTest {
     // other event — which is what the ancestor's null-environment_id row had no constraint for.
     createPlatformEnvironment("flow-once");
     specs.script(
-        "repo-once", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        "repo-once", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     int senders = 8;
     java.util.concurrent.ExecutorService pool =
         java.util.concurrent.Executors.newFixedThreadPool(senders);

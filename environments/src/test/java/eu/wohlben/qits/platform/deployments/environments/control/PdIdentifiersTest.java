@@ -99,6 +99,61 @@ class PdIdentifiersTest {
   }
 
   @Test
+  void aResourceNameIsAnEnvKeySegmentInLowerCase() {
+    assertEquals("db", PdIdentifiers.requireResourceName("db"));
+    assertEquals("read-replica", PdIdentifiers.requireResourceName("read-replica"));
+    assertEquals(32, PdIdentifiers.requireResourceName("a".repeat(32)).length());
+  }
+
+  @Test
+  void aResourceNameThatCouldNotBeAnEnvKeyIsRefused() {
+    // It becomes QITS_RESOURCE_<NAME>_URL on a docker run, so it gets the health-path treatment:
+    // an allowlist, and nothing that would read as punctuation or as a second variable.
+    for (String name :
+        new String[] {
+          null, "", " ", "DB", "1db", "-db", "db-", "db_name", "db name", "db=x", "a".repeat(33)
+        }) {
+      assertThrows(
+          BadRequestException.class,
+          () -> PdIdentifiers.requireResourceName(name),
+          String.valueOf(name));
+    }
+  }
+
+  @Test
+  void aDatabaseNameCarriesTheQitsPrefixAndPostgresIdentifierLimits() {
+    assertEquals("qits_deployments", PdIdentifiers.requireDatabaseName("qits_deployments"));
+    assertEquals("qits_a", PdIdentifiers.requireDatabaseName("qits_a"));
+    assertEquals(63, PdIdentifiers.requireDatabaseName("qits_" + "a".repeat(58)).length());
+  }
+
+  @Test
+  void aDatabaseNameOutsideTheQitsNamespaceIsRefused() {
+    // The prefix is the structural half of the guard: it excludes the instance's own databases by
+    // construction, so no repository can name one the platform depends on. The charset is the
+    // other half — this value lands in DDL, which cannot be parametrized.
+    for (String database :
+        new String[] {
+          null,
+          "",
+          "postgres",
+          "template0",
+          "template1",
+          "pg_catalog",
+          "qits_",
+          "QITS_x",
+          "qits_x-y",
+          "qits_x; drop database postgres",
+          "qits_" + "a".repeat(59)
+        }) {
+      assertThrows(
+          BadRequestException.class,
+          () -> PdIdentifiers.requireDatabaseName(database),
+          String.valueOf(database));
+    }
+  }
+
+  @Test
   void anApplicationKeyIsJoinableFromBothSides() {
     // The client joins the applications listing against a deployment's applicationId, and neither
     // side has a row to take an id from — so both derive it from (tier, name) through this one

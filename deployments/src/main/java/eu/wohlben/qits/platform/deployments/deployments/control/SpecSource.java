@@ -29,7 +29,7 @@ public interface SpecSource {
   DeploymentSpec read(String repoId, String sha);
 
   /**
-   * What a repository declares about how it is deployed. Five keys, all optional, and the shape a
+   * What a repository declares about how it is deployed. Six keys, all optional, and the shape a
    * repository with no file at all gets is {@link #DEFAULTS}.
    *
    * <p>{@code healthPath} is the exception rather than the rule: a service that says nothing gets
@@ -41,6 +41,10 @@ public interface SpecSource {
    * the parser refuses a file that sets both. Null means the HTTP probe, which is every service
    * this platform had before deployable images existed.
    *
+   * <p>{@code resources} is what the repository asks to have provisioned before its container
+   * starts — a database of its own, whose credential arrives as {@code QITS_RESOURCE_<NAME>_*}. An
+   * empty list is every application that stores nothing, which is most of them.
+   *
    * <p><b>{@code deployBranches} is read and not used here</b>, and that is deliberate — see {@link
    * #deployBranches()}.
    */
@@ -49,16 +53,31 @@ public interface SpecSource {
       boolean availableOnEnv,
       List<String> deployBranches,
       String healthPath,
-      String healthCmd) {
+      String healthCmd,
+      List<ResourceSpec> resources) {
 
-    /** A null list and an empty one are the same statement: the file named no refs. */
+    /** A null list and an empty one are the same statement: the file named none. */
     public DeploymentSpec {
       deployBranches = deployBranches == null ? List.of() : List.copyOf(deployBranches);
+      resources = resources == null ? List.of() : List.copyOf(resources);
     }
+
+    /**
+     * One resource a repository declares — {@code postgresql:<name>[:<database>]}.
+     *
+     * <p>{@code database} is <b>null when the file omitted it</b>, and that is not a default this
+     * record could fill in: the convention is {@code qits_} plus the application name without its
+     * {@code qits-} prefix, and the parser does not know the application name. {@code
+     * DeployService.register} resolves it, where the repository id is in hand.
+     *
+     * <p>There is no type field because there is one type. When a second arrives it becomes one,
+     * and the grammar already carries it in the entry's first segment.
+     */
+    record ResourceSpec(String name, String database) {}
 
     /** No file, or a file that sets nothing: an ordinary environment application. */
     public static final DeploymentSpec DEFAULTS =
-        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, List.of(), null, null);
+        new DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, false, List.of(), null, null, List.of());
 
     /**
      * The refs the repository declares itself deployable from — {@code deploy_branches:} in the

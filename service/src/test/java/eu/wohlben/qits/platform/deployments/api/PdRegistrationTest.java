@@ -84,7 +84,7 @@ public class PdRegistrationTest {
     String environmentId = createEnvironment("reg-hub", "environment/reg-hub");
     specs.script(
         "repo-reg-gw",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null, null));
     postBuildSucceeded("repo-reg-gw", "environment/reg-hub", SHA_A);
     awaitStarted(1);
 
@@ -102,7 +102,7 @@ public class PdRegistrationTest {
     createPlatformEnvironment("reg-platform", "environment/reg-platform");
     specs.script(
         "repo-reg-idp",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-idp", "environment/reg-platform", SHA_A);
     awaitStarted(1);
 
@@ -120,7 +120,7 @@ public class PdRegistrationTest {
     createPlatformEnvironment("reg-trunk", "environment/reg-trunk");
     specs.script(
         "repo-reg-trunk",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-trunk", "environment/reg-trunk", SHA_A);
     awaitStarted(1);
 
@@ -138,7 +138,7 @@ public class PdRegistrationTest {
     createPlatformEnvironment("reg-mainonly", "environment/reg-mainonly");
     specs.script(
         "repo-reg-mainonly",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-mainonly", "main", SHA_A);
     awaitWorkerIdle();
 
@@ -174,7 +174,7 @@ public class PdRegistrationTest {
     createPlatformEnvironment("reg-plane", "environment/reg-plane");
     specs.script(
         "repo-reg-plane",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-plane", "environment/reg-plane", SHA_A);
     awaitStarted(1);
     awaitWorkerIdle();
@@ -201,7 +201,7 @@ public class PdRegistrationTest {
     awaitStarted(1);
     specs.script(
         "repo-reg-crossplane",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-crossplane", "environment/reg-planes", SHA_A);
     awaitStarted(2);
     awaitWorkerIdle();
@@ -233,7 +233,7 @@ public class PdRegistrationTest {
     specs.script(
         "qits-gateway",
         new SpecSource.DeploymentSpec(
-            PdDeploymentTarget.ENVIRONMENT, true, null, "/q/health/ready", null));
+            PdDeploymentTarget.ENVIRONMENT, true, null, "/q/health/ready", null, null));
     postBuildSucceeded("qits-gateway", "environment/reg-health-gw", SHA_A);
     awaitStarted(1);
 
@@ -249,7 +249,12 @@ public class PdRegistrationTest {
     specs.script(
         "qits-db",
         new SpecSource.DeploymentSpec(
-            PdDeploymentTarget.ENVIRONMENT, false, null, null, "pg_isready -U postgres || exit 1"));
+            PdDeploymentTarget.ENVIRONMENT,
+            false,
+            null,
+            null,
+            "pg_isready -U postgres || exit 1",
+            null));
     postBuildSucceeded("qits-db", "environment/reg-health-cmd", SHA_A);
     awaitStarted(1);
 
@@ -290,7 +295,7 @@ public class PdRegistrationTest {
     createPlatformEnvironment("reg-health-plane", "environment/reg-health-plane");
     specs.script(
         "qits-idp",
-        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null));
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("qits-idp", "environment/reg-health-plane", SHA_A);
     awaitStarted(1);
 

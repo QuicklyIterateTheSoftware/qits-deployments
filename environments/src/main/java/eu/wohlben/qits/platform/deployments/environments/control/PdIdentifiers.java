@@ -3,7 +3,8 @@ package eu.wohlben.qits.platform.deployments.environments.control;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 
 /**
- * Validates the untrusted strings the topology <b>stores</b>: names, branches and health paths.
+ * Validates the untrusted strings the topology <b>stores</b>: names, branches, health paths, and
+ * the resource and database names a repository asks for.
  *
  * <p>Every value checked here is read back by something that assembles an argv. A service name
  * becomes a docker network name, a network alias, an image reference and part of a container name;
@@ -38,6 +39,21 @@ public final class PdIdentifiers {
    * container's {@code --health-cmd} string, so the allowlist is the guard.
    */
   private static final String HEALTH_PATH = "/[A-Za-z0-9._/-]{0,254}";
+
+  /**
+   * What a repository may call a resource of its own. It becomes the {@code <NAME>} segment of
+   * {@code QITS_RESOURCE_<NAME>_URL} (uppercased, dashes to underscores) and the registry's key, so
+   * the charset is the env-key one written in lower case.
+   */
+  private static final String RESOURCE_NAME = "[a-z][a-z0-9-]{0,31}";
+
+  /**
+   * A database this component may create, and the role that owns it. 63 characters is postgres'
+   * identifier limit, and the mandatory {@code qits_} prefix is doing the real work: it structurally
+   * excludes {@code postgres}, {@code template0}, {@code template1} and every {@code pg_*} name, so
+   * no repository can name a database the platform's own instance already depends on.
+   */
+  private static final String DATABASE_NAME = "qits_[a-z0-9_]{1,58}";
 
   private PdIdentifiers() {}
 
@@ -82,5 +98,46 @@ public final class PdIdentifiers {
           "Invalid health path — an absolute path of letters, digits, dots, dashes and slashes");
     }
     return healthPath;
+  }
+
+  /**
+   * The name a repository gives one of its resources in {@code resources:}.
+   *
+   * <p><b>It gets the health-path treatment, and for the health path's reason.</b> This is
+   * repository-authored input that ends up in an argv — {@code --env QITS_RESOURCE_<NAME>_URL=…} —
+   * so it is an allowlist, checked at the parser and re-checked at the last line before the argv. A
+   * trailing dash is refused like {@code requireName}'s: the name is uppercased and its dashes
+   * become underscores, and a variable ending in one reads as a truncated word.
+   *
+   * @throws BadRequestException if the name is not a lowercase env-key-safe slug
+   */
+  public static String requireResourceName(String resourceName) {
+    if (resourceName == null || !resourceName.matches(RESOURCE_NAME) || resourceName.endsWith("-")) {
+      throw new BadRequestException(
+          "Invalid resource name — lowercase letters, digits and inner dashes, max 32 chars");
+    }
+    return resourceName;
+  }
+
+  /**
+   * The database a repository asks this component to create for it, which is also the login role
+   * that owns it.
+   *
+   * <p><b>The strictest value here after the health path, and for a sharper reason than a charset.</b>
+   * It is interpolated into DDL run against a postgres instance the WHOLE PLATFORM shares — DDL
+   * cannot be parametrized, so the allowlist is the only guard there is — and the mandatory {@code
+   * qits_} prefix is what keeps the namespace a repository can reach disjoint from the instance's
+   * own. Checked at the parser, again immediately before the SQL is assembled, and again at the
+   * argv, exactly like {@link #requireHealthPath}.
+   *
+   * @throws BadRequestException if the name is not a {@code qits_}-prefixed lowercase identifier
+   */
+  public static String requireDatabaseName(String databaseName) {
+    if (databaseName == null || !databaseName.matches(DATABASE_NAME)) {
+      throw new BadRequestException(
+          "Invalid database name — `qits_` followed by lowercase letters, digits and underscores,"
+              + " max 63 chars");
+    }
+    return databaseName;
   }
 }
