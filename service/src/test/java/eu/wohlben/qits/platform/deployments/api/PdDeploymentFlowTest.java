@@ -269,6 +269,28 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
+  public void aContainerThatRestartsIntoHealthBeforeTheDeadlineIsAnActiveDeployment() {
+    // The boot race every PostgreSQL-backed application takes on a pipeline deploy: `docker run`
+    // puts the container on its primary network alone, the joins that make the postgres alias
+    // resolve happen after the start, so the first boot dies on an acquisition timeout and
+    // `--restart unless-stopped` brings it back seconds later with the networks in place.
+    //
+    // The gate used to read `restarting/unhealthy` once and fail a deployment that was about to
+    // work — which is how qits-platform-idp's first PG deployment ended 18 seconds in. Restarting
+    // is PENDING now, and only the deadline fails it.
+    String environmentId = createEnvironment("flow-restarting");
+    driver.scriptRestartingUntilHealthy(4);
+    postBuildSucceeded("repo-restarting", "environment/flow-restarting", SHA_A);
+
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+
+    assertEquals("ACTIVE", deployments.get(0).get("status"));
+    // The container that came back is the one serving: nothing was removed and nothing rolled back.
+    assertEquals(List.of(), driver.removedContainers());
+    assertEquals(List.of(), driver.restartedContainers());
+  }
+
+  @Test
   public void aRefusedStartIsAFailedDeployment() {
     driver.scriptStart(new DeploymentDriver.StartResult(false, "docker: connection refused"));
     String environmentId = createEnvironment("flow-refused");

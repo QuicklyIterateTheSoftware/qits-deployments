@@ -2,6 +2,7 @@ package eu.wohlben.qits.platform.deployments.dockerhost;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
+import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
 import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
@@ -579,43 +580,40 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     return new StartResult(true, null);
   }
 
+  /**
+   * The gate is {@link HealthGate}'s — this half is only the docker calls it polls through. The
+   * semantics live in the domain module because the suite's fake gate has to be the same gate: a
+   * container that is restarting or not yet healthy is PENDING until the deadline, and only the
+   * deadline or a container docker cannot find at all ends it.
+   */
   @Override
   public HealthResult awaitHealthy(String containerName, Duration timeout) {
-    long deadline = System.nanoTime() + timeout.toNanos();
-    while (System.nanoTime() < deadline) {
-      PdProcess.Result inspected =
-          PdProcess.run(
-              null,
-              List.of(
-                  runtime,
-                  "inspect",
-                  "--format",
-                  // Status is `running`/`exited`/`dead`; Health.Status only exists because every
-                  // run here carries a --health-cmd.
-                  "{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
-                  containerName),
-              INSPECT_TIMEOUT,
-              8192);
-      if (inspected.exitCode() != 0) {
-        return new HealthResult(false, "container vanished: " + inspected.output());
-      }
-      String state = inspected.output() == null ? "" : inspected.output().strip();
-      if (state.endsWith("/healthy")) {
-        return new HealthResult(true, null);
-      }
-      boolean stillComing = state.startsWith("running/");
-      if (!stillComing || state.endsWith("/unhealthy")) {
-        return new HealthResult(false, "container " + state + "\n" + logs(containerName));
-      }
-      try {
-        Thread.sleep(HEALTH_POLL.toMillis());
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return new HealthResult(false, "interrupted while waiting on the health gate");
-      }
+    return HealthGate.await(
+        timeout, HEALTH_POLL, () -> inspectState(containerName), () -> logs(containerName));
+  }
+
+  /** One {@code docker inspect} of the container's state, as the gate reads it. */
+  private HealthGate.Poll inspectState(String containerName) {
+    PdProcess.Result inspected =
+        PdProcess.run(
+            null,
+            List.of(
+                runtime,
+                "inspect",
+                "--format",
+                // Status is `running`/`restarting`/`exited`/`dead`; Health.Status only exists
+                // because every run here carries a --health-cmd.
+                "{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+                containerName),
+            INSPECT_TIMEOUT,
+            8192);
+    if (inspected.exitCode() != 0) {
+      // Not a state at all: docker has no such container. Every other answer is something to keep
+      // waiting on — a container under `--restart unless-stopped` that died on its first boot is
+      // seconds away from a second one, and that second boot is the deployment working.
+      return HealthGate.Poll.gone(inspected.output());
     }
-    return new HealthResult(
-        false, "health gate not passed within " + timeout.toSeconds() + "s\n" + logs(containerName));
+    return HealthGate.Poll.of(inspected.output() == null ? "" : inspected.output().strip());
   }
 
   @Override

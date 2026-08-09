@@ -144,6 +144,31 @@ The startup sweep (`DeployService.onStart`) fails rows left `QUEUED`/`STARTING` 
 **deliberately reaps no containers** — a deployed application outlives its deployer, and whatever
 was ACTIVE before the restart is still serving. Do not "complete" the sweep with a reap.
 
+## The health gate is patient, and that is not a tuning choice
+
+`HealthGate` (in `deployments/control`, polled by the driver) ends early on exactly two verdicts:
+**healthy**, and a container docker cannot inspect at all. **Restarting is PENDING. Running-but-
+unhealthy is PENDING.** The deadline — `qits.platform.deployments.health-timeout-seconds`, unchanged
+— is what fails a deployment, and the verdict then reads `container still <state> after <n>s` with
+the log tail under it.
+
+The reason is structural rather than generous. `docker run` takes **one** network, so a fresh
+container starts on its primary one and every other join happens after the start
+(`DeployService.join`). A PostgreSQL-backed application runs Flyway immediately, cannot resolve the
+postgres wire alias yet, and dies with an acquisition timeout; `--restart unless-stopped` brings it
+back seconds later into a world where the joins are done, and the second boot works. The old gate
+read `restarting/unhealthy` once and failed the deployment 18 seconds in — measured on
+qits-platform-idp's first PostgreSQL deployment. H2-era applications could never hit it, which is
+why the instant fail survived this long.
+
+**The follow-up this makes optional:** `docker create` → connects → `docker start` would remove the
+race outright. It moves the argv off `run`, grows `StartSpec` with the join set, and drags the
+self-update handoff and the cutover's call-order assertions with it. Recorded, not done — a patient
+gate is the fix, and it is the one that also covers every other slow first boot.
+
+The gate lives in the domain module rather than in `dockerhost/` so the suite's fake gate IS the
+shipped gate: `FakeDeploymentDriver.scriptRestartingUntilHealthy` feeds it states and nothing else.
+
 ## The vocabulary rename, and the alias
 
 `singleton` → `platform`, everywhere: `PdDeploymentTarget.PLATFORM`, label

@@ -51,6 +51,14 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private volatile PullResult nextPull = new PullResult(PullOutcome.OK, null);
   private volatile StartResult nextStart = new StartResult(true, null);
   private volatile HealthResult nextHealth = new HealthResult(true, null);
+
+  /**
+   * How many polls the container spends restarting before it comes up healthy. Zero — the default —
+   * is the scripted answer in {@link #nextHealth}; anything else runs the REAL {@link HealthGate},
+   * so a test about the gate's patience is a test of the shipped gate rather than of this fake.
+   */
+  private volatile int restartingPolls = 0;
+
   private volatile List<Holder> nextHolders = List.of();
   private volatile String selfId = "";
   private final List<Network> existingNetworks = Collections.synchronizedList(new ArrayList<>());
@@ -91,6 +99,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     nextPull = new PullResult(PullOutcome.OK, null);
     nextStart = new StartResult(true, null);
     nextHealth = new HealthResult(true, null);
+    restartingPolls = 0;
     nextHolders = List.of();
     selfId = "";
     ensuredNetworkSpecs.clear();
@@ -189,6 +198,20 @@ public class FakeDeploymentDriver implements DeploymentDriver {
 
   public void scriptHealth(HealthResult result) {
     nextHealth = result;
+  }
+
+  /**
+   * The boot race a PostgreSQL-backed application takes: docker answers {@code
+   * restarting/unhealthy} for the first {@code polls} observations and {@code running/healthy}
+   * afterwards, because the container died once before its networks were joined and its restart
+   * policy brought it back.
+   *
+   * <p>The gate itself is the shipped {@link HealthGate}, only polled fast — the fake supplies the
+   * states, not the verdict. That is what makes a flow test asserting {@code ACTIVE} an assertion
+   * about the gate's patience rather than about this class.
+   */
+  public void scriptRestartingUntilHealthy(int polls) {
+    restartingPolls = polls;
   }
 
   public List<String> ensuredNetworks() {
@@ -319,7 +342,18 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   @Override
   public HealthResult awaitHealthy(String containerName, Duration timeout) {
     awaited.add(containerName);
-    return nextHealth;
+    if (restartingPolls <= 0) {
+      return nextHealth;
+    }
+    java.util.concurrent.atomic.AtomicInteger left =
+        new java.util.concurrent.atomic.AtomicInteger(restartingPolls);
+    return HealthGate.await(
+        timeout,
+        Duration.ofMillis(5),
+        () ->
+            HealthGate.Poll.of(
+                left.getAndDecrement() > 0 ? "restarting/unhealthy" : "running/healthy"),
+        () -> "(the fake keeps no logs)");
   }
 
   @Override
