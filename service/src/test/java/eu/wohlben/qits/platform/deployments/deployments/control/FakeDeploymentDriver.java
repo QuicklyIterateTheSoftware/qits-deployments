@@ -59,6 +59,13 @@ public class FakeDeploymentDriver implements DeploymentDriver {
    */
   private volatile int restartingPolls = 0;
 
+  /**
+   * What {@link #observe} answers per container name. A name nothing scripted is <b>absent</b>: this
+   * fake performs nothing, so the only containers docker could have are the ones a test said exist.
+   */
+  private final java.util.Map<String, HealthGate.Poll> containerStates =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
   private volatile List<Holder> nextHolders = List.of();
   private volatile String selfId = "";
   private final List<Network> existingNetworks = Collections.synchronizedList(new ArrayList<>());
@@ -96,6 +103,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     disconnections.clear();
     handoffs.clear();
     containerIds.clear();
+    containerStates.clear();
     nextPull = new PullResult(PullOutcome.OK, null);
     nextStart = new StartResult(true, null);
     nextHealth = new HealthResult(true, null);
@@ -154,6 +162,21 @@ public class FakeDeploymentDriver implements DeploymentDriver {
 
   public void scriptContainerId(String containerName, String id) {
     containerIds.put(containerName, id);
+  }
+
+  /**
+   * The state {@link #observe} reports for this container — docker's own {@code <status>/<health>}
+   * spelling ({@code running/healthy}, {@code restarting/unhealthy}, {@code exited/unhealthy}).
+   * Unscripted names answer "gone", which is what an observation of a container docker does not have
+   * looks like.
+   */
+  public void scriptContainerState(String containerName, String state) {
+    containerStates.put(containerName, HealthGate.Poll.of(state));
+  }
+
+  /** The container docker cannot inspect at all — removed underneath a row that still names it. */
+  public void scriptContainerGone(String containerName, String detail) {
+    containerStates.put(containerName, HealthGate.Poll.gone(detail));
   }
 
   public List<HandoffSpec> handoffs() {
@@ -354,6 +377,20 @@ public class FakeDeploymentDriver implements DeploymentDriver {
             HealthGate.Poll.of(
                 left.getAndDecrement() > 0 ? "restarting/unhealthy" : "running/healthy"),
         () -> "(the fake keeps no logs)");
+  }
+
+  /**
+   * Recorded in the call log like every other driver call, which is what lets a test assert that an
+   * observation pass and a deployment never interleave: both run on the one deploy worker, so the
+   * pass's observations form a block rather than sitting between a deployment's calls.
+   */
+  @Override
+  public HealthGate.Poll observe(String containerName) {
+    calls.add("observe:" + containerName);
+    HealthGate.Poll scripted = containerStates.get(containerName);
+    return scripted == null
+        ? HealthGate.Poll.gone("Error: No such object: " + containerName)
+        : scripted;
   }
 
   @Override

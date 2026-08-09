@@ -141,6 +141,22 @@ retired qits-cd started, is adopted rather than run beside. The search asks abou
 *and* the bare application name, because every container started before the tier qualifier existed
 holds only the latter. Every removal is a decision recorded on a deployment row.
 
+**A status is written by the deployment that earned it, and then observed.** Every thirty seconds
+(`qits.platform.deployments.observe-interval-seconds`, `0` to switch it off) the **latest** row of
+each (application, tier) is read back against the container it names, on the same worker the
+deployments run on. A row that says `FAILED` about a container that is running and healthy becomes
+`ACTIVE` — with the original failure text kept under the recovery stamp — and a row that says
+`ACTIVE` about a container that is absent or terminally exited on **two consecutive** passes becomes
+`FAILED`. Restarting and running-but-unhealthy are neither: they are the health gate's own patience,
+and a container coming back from the postgres-alias boot race must not be declared dead on the way.
+Rows that are not the latest for their place are history and stay untouched, as do `QUEUED`,
+`STARTING` and `DECOMMISSIONED`. **The observation writes rows only** — it starts, stops and removes
+nothing.
+
+It exists because a status used to be final: one deployment cut its own postgres over, went healthy,
+lost every connection it held mid-bookkeeping, and left a row saying `FAILED` beside a container that
+served for hours. The connections are retried now; the row needed reading back too.
+
 ## Networks are hub and spoke, and docker is the bookkeeping
 
 - an environment application runs on `qits-env-<env>-<app>` — only its own containers are there;

@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -55,6 +56,10 @@ import org.jboss.logging.Logger;
  * is gone. Registration writes rows in the same transaction as everything else here, resolution is
  * a repository query with an index behind it, and there is no outage to have a posture about. The
  * one remote call left is the spec read, and its posture stays exactly as it was.
+ *
+ * <p><b>The worker carries one thing that is not an event</b>: the periodic observation pass ({@link
+ * DeploymentObserver}), enqueued by a ticker here and running in queue order like everything else.
+ * That is the whole reason it may touch deployment rows at all — see {@link #enqueueObservation()}.
  *
  * <p>Each DB transition sits in its own {@link QuarkusTransaction#requiringNew()} bracket so the
  * slow docker work never holds a transaction, and everything the docker calls need is copied into a
@@ -96,6 +101,7 @@ public class DeployService implements BuildAnnouncements {
   @Inject ServiceCatalog catalog;
   @Inject EnvironmentService environments;
   @Inject ResourceProvisioning resourceProvisioning;
+  @Inject DeploymentObserver observer;
 
   @ConfigProperty(name = "qits.artifacts.registry-host")
   String registryHost;
@@ -112,6 +118,10 @@ public class DeployService implements BuildAnnouncements {
 
   @ConfigProperty(name = "qits.platform.deployments.health-timeout-seconds")
   long healthTimeoutSeconds;
+
+  /** How often the observation pass is enqueued; {@code 0} switches the observer off entirely. */
+  @ConfigProperty(name = "qits.platform.deployments.observe-interval-seconds")
+  long observeIntervalSeconds;
 
   /**
    * The network every fresh container additionally joins while the platform still holds direct
@@ -134,8 +144,28 @@ public class DeployService implements BuildAnnouncements {
             return t;
           });
 
+  /**
+   * At most one observation pass is pending behind the deploy queue at a time. A tick that fires
+   * while one is already waiting collapses into it: an observation is a statement about NOW, so
+   * stacking ten of them behind a long deploy queue would only re-answer a question the first one is
+   * about to answer.
+   */
+  private final AtomicBoolean observationPending = new AtomicBoolean();
+
+  /**
+   * The observation tick — a bare daemon thread, the worker's own shape, rather than the
+   * quarkus-scheduler extension. It has one job (submit a runnable every n seconds), it must not run
+   * the pass itself, and a scheduler extension would add a managed thread pool and a second
+   * concurrency model to a component whose whole ordering story is "one worker, in queue order".
+   */
+  private volatile Thread observerTicker;
+
   @PreDestroy
   void shutdown() {
+    Thread ticker = observerTicker;
+    if (ticker != null) {
+      ticker.interrupt();
+    }
     worker.shutdownNow();
   }
 
@@ -158,6 +188,72 @@ public class DeployService implements BuildAnnouncements {
     } catch (RuntimeException e) {
       LOG.warnf(e, "Could not sweep interrupted deployments at startup");
     }
+    startObserving();
+  }
+
+  /**
+   * Start the periodic tick that keeps deployment rows honest ({@link DeploymentObserver}).
+   *
+   * <p>Nothing here in test mode, for the same reason the sweep is skipped: {@code onStart} returns
+   * before this on a {@code LaunchMode.TEST} boot, so no {@code @QuarkusTest} has a ticker running
+   * behind it and the suite's observation tests drive {@link #enqueueObservation()} themselves. That
+   * is also why the interval keeps its shipped default in the suite — a test-resource override would
+   * be re-declaring an app-level setting to disable something that never starts.
+   */
+  private void startObserving() {
+    if (observeIntervalSeconds <= 0) {
+      LOG.info(
+          "Deployment observation is off (qits.platform.deployments.observe-interval-seconds=0):"
+              + " a row's status will be whatever the deployment that wrote it said");
+      return;
+    }
+    Thread ticker =
+        new Thread(
+            () -> {
+              while (!Thread.currentThread().isInterrupted()) {
+                try {
+                  Thread.sleep(Duration.ofSeconds(observeIntervalSeconds).toMillis());
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                  return;
+                }
+                enqueueObservation();
+              }
+            },
+            "pd-observation-ticker");
+    ticker.setDaemon(true);
+    observerTicker = ticker;
+    ticker.start();
+    LOG.infof("Observing deployment rows every %ds on the deploy worker", observeIntervalSeconds);
+  }
+
+  /**
+   * Queue one observation pass <b>on the deploy worker</b>. Package-private so the suite drives a
+   * pass without waiting on the tick.
+   *
+   * <p>The placement is the concurrency contract, not a convenience. Serial execution is what makes
+   * "the previous ACTIVE deployment" an uncontended read during a cutover, and an observer thread
+   * reading and writing those same rows while a cutover runs would take that invariant away — it
+   * would see the half-written state between a cutover's own brackets and could demote a row a
+   * deployment is in the middle of promoting. On the worker there is no middle: the pass runs between
+   * events, never inside one.
+   */
+  void enqueueObservation() {
+    if (!observationPending.compareAndSet(false, true)) {
+      LOG.debugf("An observation pass is already queued; this tick collapses into it");
+      return;
+    }
+    worker.submit(
+        () -> {
+          // Cleared as the pass BEGINS, not when it ends: a tick arriving during a long pass may
+          // queue the next one, so the queue holds at most one pending pass plus the running one.
+          observationPending.set(false);
+          try {
+            observer.observeOnce();
+          } catch (RuntimeException e) {
+            LOG.warnf(e, "The deployment observation pass failed; the next tick tries again");
+          }
+        });
   }
 
   /** Package-private so the suite drives the sweep without a real StartupEvent. */

@@ -179,6 +179,20 @@ public interface DeploymentDriver {
    */
   HealthResult awaitHealthy(String containerName, Duration timeout);
 
+  /**
+   * <b>One</b> observation of the named container — docker's {@code <status>/<health>} string, or the
+   * statement that docker has no such container. The same reading {@link #awaitHealthy} polls
+   * through, and deliberately the same type: {@link DeploymentObserver} settles a row on {@link
+   * HealthGate#healthy}, so "healthy" means to an observation exactly what it means to a gate, and
+   * "gone" is a structural fact rather than a wording match.
+   *
+   * <p>It exists because a deployment's status used to be written once and never read back against
+   * the world. Asking about a container by <b>name</b> rather than by alias is the point: only the
+   * container a row itself named may settle that row, and a healthy container belonging to somebody
+   * else must not resurrect it.
+   */
+  HealthGate.Poll observe(String containerName);
+
   /** Remove the container, running or not. Every decommission and every failed cutover ends here. */
   void remove(String containerName);
 

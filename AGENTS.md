@@ -162,6 +162,56 @@ event with nothing half-done. Retry what comes *after* a container is running, w
 work leaves a live container with no row that admits it. Never a business failure: a 409 retried is
 one visible failure turned into a slow one.
 
+## The observer: the second half of the eaa34fbc story
+
+`DbRetry` fixed the **cause** above. It did nothing for the row: eaa34fbc still says `FAILED` while
+`qits-pd-prod-qits-oci-postgresql-eaa34fbc` has been `Up (healthy)` for hours holding the
+`prod-qits-oci-postgresql` alias, because a status was written once at deploy time and never read
+back. `DeploymentObserver` is that second half, and the mirror image it also closes: an `ACTIVE` row
+whose container died an hour after the gate passed, with nothing ever noticing.
+
+- **It runs on the deploy worker**, enqueued by a bare daemon ticker (`pd-observation-ticker`) every
+  `qits.platform.deployments.observe-interval-seconds` (30; `0` is off). Not quarkus-scheduler: the
+  ticker's whole job is `worker.submit`, and a scheduler extension would put a second concurrency
+  model beside a component whose entire ordering story is "one worker, in queue order". An observer
+  thread of its own would take away the invariant serial execution buys — "the previous ACTIVE
+  deployment is an uncontended read" — and could read the state between a cutover's own brackets. A
+  tick that fires while one pass is already pending **collapses** into it (`observationPending`): an
+  observation is a statement about now, so ten of them stacked behind a long deploy queue would all
+  answer the same question.
+- **It settles the LATEST row per (application, tier) only**, latest by `seq`. History stays history:
+  an older `FAILED` row describes an attempt that really did fail, and today's healthy container says
+  nothing about it. `QUEUED`/`STARTING` belong to the worker's state machine and to the startup sweep
+  — a self-update handoff sits in `STARTING` with a healthy successor **on purpose** —
+  and `DECOMMISSIONED` is another deployment's decision.
+- **`FAILED` → `ACTIVE`** when the container **the row itself names** is healthy by
+  `HealthGate.healthy` (the gate's own verdict, extracted so there is one spelling of it). Only the
+  row's own container: the seam asks by container **name**, never by alias, so a healthy container of
+  somebody else's deployment cannot resurrect a foreign row. The detail **appends** — the original
+  failure text is the diagnosis and is what made the bug findable in the first place.
+- **`ACTIVE` → `FAILED`** only when the container is **absent or terminally exited/dead**, and only
+  when **two consecutive** passes agree. Both halves are the health gate's patience restated:
+  restarting is not dead, running-but-unhealthy is not dead (that is the postgres-alias boot race the
+  gate already tolerates), and one `docker inspect` that could not answer must not flip a deployment
+  that is serving. The strike count is in memory on purpose — it is a debounce, not a fact, and a
+  restart that loses it spends two more passes agreeing.
+- **A recovery also decommissions the prior `ACTIVE` rows of that place.** The bookkeeping that died
+  in eaa34fbc was one bracket doing two things, so a recovered row often has a predecessor still
+  claiming to serve, and two `ACTIVE` rows for one (application, tier) is the invariant
+  `listActiveByApplication` and the rollback pins are written around.
+- **It writes rows and nothing else** — no container started, stopped or removed, no network touched.
+  The sweep's "deliberately reaps no containers" stance, and it applies more strongly here: the sweep
+  runs once at boot, this runs forever beside a live platform. Whatever still holds an alias is
+  absorbed by the next deployment's predecessor search, which is where that decision belongs.
+- The reads and the writes are `DbRetry`-wrapped for the same reason the cutover bookkeeping is: this
+  is bookkeeping *after* a container is running, and one day a pass will run during a postgres
+  self-cutover. The docker call sits between the two brackets, never inside one.
+
+No ticker runs under a `@QuarkusTest` — `onStart` returns early in test mode — so the interval keeps
+its shipped default in the suite and `PdDeploymentObservationTest` drives `observeOnce()` and
+`enqueueObservation()` directly, the `PdSweepAdoptionTest` shape. That test also holds the serialization
+claim, off the fake's call log: the pass's `observe:` calls land after the deployment's last one.
+
 ## The health gate is patient, and that is not a tuning choice
 
 `HealthGate` (in `deployments/control`, polled by the driver) ends early on exactly two verdicts:
