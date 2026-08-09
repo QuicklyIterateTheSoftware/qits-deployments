@@ -46,6 +46,11 @@ class DockerDeploymentDriverTest {
   }
 
   private DeploymentDriver.StartSpec spec(String healthPath, String healthCmd) {
+    return spec(healthPath, healthCmd, List.of());
+  }
+
+  private DeploymentDriver.StartSpec spec(
+      String healthPath, String healthCmd, List<DeploymentDriver.ResourceBinding> resources) {
     return new DeploymentDriver.StartSpec(
         "env-id",
         "dev",
@@ -59,7 +64,8 @@ class DockerDeploymentDriverTest {
         healthPath,
         healthCmd,
         PdDeploymentTarget.ENVIRONMENT,
-        true);
+        true,
+        resources);
   }
 
   /** A platform-plane container: no environment at all, and qits-platform as its primary network. */
@@ -77,7 +83,8 @@ class DockerDeploymentDriverTest {
         "/cd/q/health/ready",
         null,
         PdDeploymentTarget.PLATFORM,
-        false);
+        false,
+        List.of());
   }
 
   @Test
@@ -172,7 +179,8 @@ class DockerDeploymentDriverTest {
             "/q/health/ready",
             null,
             PdDeploymentTarget.ENVIRONMENT,
-            false);
+            false,
+            List.of());
 
     assertThrows(BadRequestException.class, () -> driver().buildArgv(forged));
   }
@@ -474,6 +482,89 @@ class DockerDeploymentDriverTest {
 
     int flag = argv.indexOf("--health-cmd");
     assertEquals("test -f /ready", argv.get(flag + 1));
+  }
+
+  @Test
+  void aProvisionedResourceArrivesAsTheGenericTripleBeforeTheRunArgs() {
+    // The contract an application maps in its OWN shipped defaults: this component names no
+    // framework and no datasource key, which is what lets one code path deploy a Quarkus service
+    // and a plain image. The name is uppercased and its dashes underscored.
+    List<String> argv =
+        driver()
+            .buildArgv(
+                spec(
+                    "/q/health/ready",
+                    null,
+                    List.of(
+                        new DeploymentDriver.ResourceBinding(
+                            "read-replica",
+                            "jdbc:postgresql://dev-qits-oci-postgresql:5432/qits_gateway",
+                            "qits_gateway",
+                            "0123456789abcdef0123456789abcdef"))));
+
+    assertTrue(
+        argv.contains(
+            "QITS_RESOURCE_READ_REPLICA_URL=jdbc:postgresql://dev-qits-oci-postgresql:5432/qits_gateway"),
+        argv.toString());
+    assertTrue(argv.contains("QITS_RESOURCE_READ_REPLICA_USERNAME=qits_gateway"));
+    assertTrue(
+        argv.contains("QITS_RESOURCE_READ_REPLICA_PASSWORD=0123456789abcdef0123456789abcdef"));
+    // Before the image, like every other flag — and an application that declared none gets none.
+    assertEquals("qits-artifacts:8080/qits/qits-gateway:abc1234", argv.get(argv.size() - 1));
+    assertTrue(
+        driver().buildArgv(spec("/q/health/ready")).stream()
+            .noneMatch(a -> a.startsWith("QITS_RESOURCE_")),
+        "an application that declared no resource is told about none");
+  }
+
+  @Test
+  void anOperatorsRunArgsStillOverrideAnInjectedResource() {
+    // The precedence rule, extended to the newest injection and measured the same way: docker keeps
+    // the LAST assignment of a repeated env key, and the resource triple is written before the run
+    // args, so it is a default rather than something an operator has to fight.
+    DockerDeploymentDriver driver =
+        driver(
+            Map.of(
+                DockerDeploymentDriver.RUN_ARGS_PREFIX + "qits-gateway",
+                "-e QITS_RESOURCE_DB_URL=jdbc:postgresql://somewhere-else:5432/qits_gateway"));
+
+    List<String> argv =
+        driver.buildArgv(
+            spec(
+                "/q/health/ready",
+                null,
+                List.of(
+                    new DeploymentDriver.ResourceBinding(
+                        "db",
+                        "jdbc:postgresql://dev-qits-oci-postgresql:5432/qits_gateway",
+                        "qits_gateway",
+                        "0123456789abcdef0123456789abcdef"))));
+
+    int injected =
+        argv.indexOf(
+            "QITS_RESOURCE_DB_URL=jdbc:postgresql://dev-qits-oci-postgresql:5432/qits_gateway");
+    int operators =
+        argv.indexOf("QITS_RESOURCE_DB_URL=jdbc:postgresql://somewhere-else:5432/qits_gateway");
+    assertTrue(injected > 0, "this component still writes its own default");
+    assertTrue(injected < operators, "and it is EARLIER, which is what makes it the loser");
+  }
+
+  @Test
+  void aHostileResourceNameCannotReachTheArgv() {
+    // The belt beside the health path's, on the value that becomes an environment-variable KEY. It
+    // is what turns a loosened boundary check into a failed deployment rather than a container
+    // carrying a variable this component never meant to write.
+    assertThrows(
+        BadRequestException.class,
+        () ->
+            driver()
+                .buildArgv(
+                    spec(
+                        "/q/health/ready",
+                        null,
+                        List.of(
+                            new DeploymentDriver.ResourceBinding(
+                                "db=x -e EVIL", "jdbc:postgresql://h:5432/qits_a", "qits_a", "pw")))));
   }
 
   @Test

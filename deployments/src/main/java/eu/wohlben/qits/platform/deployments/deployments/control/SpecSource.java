@@ -73,7 +73,7 @@ public interface SpecSource {
      * <p>There is no type field because there is one type. When a second arrives it becomes one,
      * and the grammar already carries it in the entry's first segment.
      */
-    record ResourceSpec(String name, String database) {}
+    public record ResourceSpec(String name, String database) {}
 
     /** No file, or a file that sets nothing: an ordinary environment application. */
     public static final DeploymentSpec DEFAULTS =

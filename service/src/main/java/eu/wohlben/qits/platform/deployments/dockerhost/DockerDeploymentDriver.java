@@ -742,6 +742,25 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     String resourceAttributes = resourceAttributes(spec);
     env(argv, "OTEL_RESOURCE_ATTRIBUTES", resourceAttributes);
     env(argv, "QUARKUS_OTEL_RESOURCE_ATTRIBUTES", resourceAttributes);
+    // What ResourceProvisioning made exist a moment ago, as the generic contract:
+    // QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD. The application maps these three in its own
+    // shipped defaults, so this component names no framework and no datasource key — which is what
+    // lets one code path deploy a Quarkus service, a plain image and whatever comes next.
+    //
+    // The name is re-validated HERE, at the last line before the argv, exactly like the health
+    // path: it is repository-authored input, it is being spliced into an environment-variable key,
+    // and this is the belt that turns a loosened boundary check into a failed deployment rather
+    // than a forged second variable. The VALUES are this component's own — generated, or read back
+    // from its registry — and nothing arriving over HTTP contributes one.
+    for (ResourceBinding binding : spec.resources()) {
+      String key =
+          PdIdentifiers.requireResourceName(binding.name())
+              .toUpperCase(Locale.ROOT)
+              .replace('-', '_');
+      env(argv, "QITS_RESOURCE_" + key + "_URL", binding.url());
+      env(argv, "QITS_RESOURCE_" + key + "_USERNAME", binding.username());
+      env(argv, "QITS_RESOURCE_" + key + "_PASSWORD", binding.password());
+    }
     // The deployment's own additions for this application —
     // qits.platform.deployments.run-args.<name>, whitespace split, no re-quoting (an argument that
     // needs a space in it does not fit this seam). The application name was already

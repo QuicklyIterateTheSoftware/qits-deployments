@@ -13,6 +13,18 @@
 # back when one instance served every tier.
 #
 # `deployment_target` is omitted because `environment` is the default, and a default written out is
-# a second place to keep it right. Which leaves this file with no keys at all, and that is a
-# complete answer: a green build deploys wherever an environment listens to the built branch, and
-# that is the environment row's answer, never this file's.
+# a second place to keep it right. Where a green build deploys is the environment row's answer and
+# never this file's, so nothing here states it.
+#
+# ONE KEY, and it is the component describing itself with its own mechanism. This repo's
+# store is PostgreSQL, and the line below is what provisions it: a role and a database of its own on
+# the tier's postgres, created before the successor container starts, injected as
+# QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD — the generic contract, which the environments jar's
+# datasource defaults read verbatim.
+#
+# ADOPTER #1, AND THE ONE THAT CANNOT PROVISION ITSELF FROM COLD. The bootstrap creates this role
+# and this database over plain JDBC before this process exists, and BootResourceRegistration records
+# what it was handed at every boot — so the first self-deploy after that finds a registry row, takes
+# the no-op arm, and is injected the credential it is already connected with. Without the row it
+# would rotate its own password out from under its own connection pool.
+resources: postgresql:db

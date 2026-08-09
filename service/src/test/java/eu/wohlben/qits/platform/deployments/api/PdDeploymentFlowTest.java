@@ -7,7 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
+import eu.wohlben.qits.platform.deployments.deployments.control.ResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource;
@@ -40,6 +42,7 @@ public class PdDeploymentFlowTest {
 
   @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
+  @Inject FakeResourceProvisioner provisioner;
   @Inject DeployService deployService;
   @Inject PdDeploymentRepository deployments;
 
@@ -47,6 +50,7 @@ public class PdDeploymentFlowTest {
   void reset() {
     driver.reset();
     specs.reset();
+    provisioner.reset();
   }
 
   private String createEnvironment(String name) {
@@ -395,6 +399,83 @@ public class PdDeploymentFlowTest {
     // Nothing stopped, nothing removed by THIS process — the referee owns retirement.
     assertEquals(List.of(), driver.stoppedContainers());
     assertEquals(List.of(), driver.removedContainers());
+  }
+
+  @Test
+  public void aDeclaredResourceIsProvisionedBeforeThePullAndInjectedIntoTheContainer() {
+    // The whole mechanism through the front door: the repository says `resources: postgresql:db`,
+    // the role and the database are made to exist before anything docker-side happens, and the
+    // container is started with the generic triple for them.
+    String environmentId = createEnvironment("flow-resource");
+    specs.script(
+        "qits-storing",
+        new SpecSource.DeploymentSpec(
+            PdDeploymentTarget.ENVIRONMENT,
+            false,
+            null,
+            null,
+            null,
+            List.of(new SpecSource.DeploymentSpec.ResourceSpec("db", null))));
+    postBuildSucceeded("qits-storing", "environment/flow-resource", SHA_A);
+
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+    assertEquals("ACTIVE", deployments.get(0).get("status"));
+
+    assertEquals(1, provisioner.requests().size(), "the seam saw exactly one resource");
+    ResourceProvisioner.Request request = provisioner.requests().get(0);
+    // The database defaulted from the application name, and the address from the tier.
+    assertEquals("qits_storing", request.databaseName());
+    assertEquals("flow-resource-qits-oci-postgresql", request.host());
+    assertNull(request.storedPassword(), "nothing had recorded one yet");
+
+    DeploymentDriver.StartSpec started = driver.started().get(0);
+    assertEquals(1, started.resources().size());
+    DeploymentDriver.ResourceBinding binding = started.resources().get(0);
+    assertEquals("db", binding.name());
+    assertEquals(
+        "jdbc:postgresql://flow-resource-qits-oci-postgresql:5432/qits_storing", binding.url());
+    assertEquals("qits_storing", binding.username());
+    assertEquals(request.freshPassword(), binding.password());
+  }
+
+  @Test
+  public void aResourceThatCannotBeProvisionedFailsTheDeploymentBeforeAnythingDockerSide() {
+    // The placement of the hook, asserted as behaviour: the row exists to record the failure on,
+    // and nothing was pulled, started or stopped — so whatever was serving is still serving.
+    String environmentId = createEnvironment("flow-resource-refused");
+    specs.script(
+        "qits-refused",
+        new SpecSource.DeploymentSpec(
+            PdDeploymentTarget.ENVIRONMENT,
+            false,
+            null,
+            null,
+            null,
+            List.of(new SpecSource.DeploymentSpec.ResourceSpec("db", null))));
+    provisioner.scriptResult(
+        new ResourceProvisioner.Result(false, null, "postgres refused: too many connections"));
+    postBuildSucceeded("qits-refused", "environment/flow-resource-refused", SHA_A);
+
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+    assertEquals("FAILED", deployments.get(0).get("status"));
+    String detail = (String) deployments.get(0).get("detail");
+    assertTrue(detail.contains("resource provisioning failed"), detail);
+    assertTrue(detail.contains("too many connections"), "postgres' own words are on the row: " + detail);
+    assertEquals(List.of(), driver.pulledRefs(), "nothing was pulled");
+    assertEquals(List.of(), driver.started(), "and nothing was started");
+    assertEquals(List.of(), driver.stoppedContainers());
+  }
+
+  @Test
+  public void aRepositoryThatDeclaresNoResourceIsDeployedExactlyAsBefore() {
+    // The backward-compatibility half, which is every application on the platform today: the seam
+    // is never called and the container is told about nothing.
+    String environmentId = createEnvironment("flow-resource-none");
+    postBuildSucceeded("repo-nostore", "environment/flow-resource-none", SHA_A);
+
+    assertEquals("ACTIVE", awaitDeployments(environmentId, 1).get(0).get("status"));
+    assertEquals(List.of(), provisioner.requests());
+    assertEquals(List.of(), driver.started().get(0).resources());
   }
 
   @Test

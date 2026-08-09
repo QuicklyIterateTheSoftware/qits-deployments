@@ -217,6 +217,10 @@ public interface DeploymentDriver {
    * <p>{@code healthCmd} is the repository's own readiness probe and, when present, <b>replaces</b>
    * the health gate rather than adding to it: {@code healthPath} is then unused, because an image
    * with no HTTP surface has no path to fetch. Null is every service that has one.
+   *
+   * <p>{@code resources} is what {@code ResourceProvisioning} made exist a moment ago, one entry
+   * per resource the repository declared. Empty for every application that stores nothing, which is
+   * most of them.
    */
   record StartSpec(
       String environmentId,
@@ -231,7 +235,28 @@ public interface DeploymentDriver {
       String healthPath,
       String healthCmd,
       PdDeploymentTarget target,
-      boolean availableOnEnv) {}
+      boolean availableOnEnv,
+      List<ResourceBinding> resources) {
+
+    /** A null list and an empty one are the same statement: this application declared none. */
+    public StartSpec {
+      resources = resources == null ? List.of() : List.copyOf(resources);
+    }
+  }
+
+  /**
+   * One provisioned resource, as the container is told about it: {@code
+   * QITS_RESOURCE_<NAME>_URL/_USERNAME/_PASSWORD}, with {@code name} uppercased and its dashes
+   * underscored.
+   *
+   * <p><b>The contract is generic on purpose.</b> An application maps these three variables in its
+   * own shipped configuration defaults — this component names no framework and no datasource key,
+   * so a Quarkus service, a plain image and whatever comes next are all deployed by the same code.
+   *
+   * <p>The password here is a value this component generated and holds in its own registry. Nothing
+   * arriving over HTTP contributes it, and nothing writes it to a log.
+   */
+  record ResourceBinding(String name, String url, String username, String password) {}
 
   enum PullOutcome {
     OK,

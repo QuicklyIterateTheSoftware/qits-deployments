@@ -89,6 +89,7 @@ public class DeployService implements BuildAnnouncements {
   @Inject SpecSource specs;
   @Inject ServiceCatalog catalog;
   @Inject EnvironmentService environments;
+  @Inject ResourceProvisioning resourceProvisioning;
 
   @ConfigProperty(name = "qits.artifacts.registry-host")
   String registryHost;
@@ -244,10 +245,11 @@ public class DeployService implements BuildAnnouncements {
    * before anything is queued and carried by value from there on — the docker work must not need a
    * second query to know where it is going.
    *
-   * <p>{@code healthCmd} is the spec's {@code health_cmd} and is <b>the only field here no row
-   * holds</b>. It needs none: it is read fresh from the repository before every deployment, and
-   * the one path that resolves targets from the catalogue instead ({@link #alreadyRegistered})
-   * records a failure and deploys nothing. Null is the HTTP probe over {@code healthPath}.
+   * <p>{@code healthCmd} and {@code resources} are the spec's, and are <b>the only fields here no
+   * row holds</b>. They need none: the spec is read fresh from the repository before every
+   * deployment, and the one path that resolves targets from the catalogue instead ({@link
+   * #alreadyRegistered}) records a failure and deploys nothing. Null is the HTTP probe over {@code
+   * healthPath}; an empty resource list is every application that stores nothing.
    */
   record Target(
       String applicationName,
@@ -257,7 +259,8 @@ public class DeployService implements BuildAnnouncements {
       PdDeploymentTarget target,
       boolean availableOnEnv,
       String healthPath,
-      String healthCmd) {}
+      String healthCmd,
+      List<ResourceProvisioning.Resolved> resources) {}
 
   /**
    * One build-succeeded event, start to finish, on the worker thread: read what the repository
@@ -390,6 +393,11 @@ public class DeployService implements BuildAnnouncements {
       links.add(environment.id);
     }
     String healthPath = resolveHealthPath(repoId, spec, known);
+    // The spec's databases, with the convention filled in where the file left it out. Resolved
+    // ONCE, here, because this is the first place that knows the application's name — and before
+    // any Target is built, so a collision is one refusal rather than one per tier.
+    List<ResourceProvisioning.Resolved> resources =
+        ResourceProvisioning.resolve(repoId, spec.resources());
     catalog.upsert(
         new ServiceCatalog.Upsert(
             repoId,
@@ -413,7 +421,8 @@ public class DeployService implements BuildAnnouncements {
               PdDeploymentTarget.ENVIRONMENT,
               spec.availableOnEnv(),
               healthPath,
-              spec.healthCmd()));
+              spec.healthCmd(),
+              resources));
     }
     return List.copyOf(targets);
   }
@@ -455,6 +464,8 @@ public class DeployService implements BuildAnnouncements {
       LOG.infof("Registered %s as a platform service", repoId);
     }
     String healthPath = resolveHealthPath(repoId, spec, known);
+    List<ResourceProvisioning.Resolved> resources =
+        ResourceProvisioning.resolve(repoId, spec.resources());
     catalog.upsert(
         new ServiceCatalog.Upsert(
             repoId,
@@ -490,7 +501,8 @@ public class DeployService implements BuildAnnouncements {
             PdDeploymentTarget.PLATFORM,
             false,
             healthPath,
-            spec.healthCmd()));
+            spec.healthCmd(),
+            resources));
   }
 
   /**
@@ -587,7 +599,8 @@ public class DeployService implements BuildAnnouncements {
                   PdDeploymentTarget.PLATFORM,
                   false,
                   linked.service().healthPath,
-                  null));
+                  null,
+                  List.of()));
     }
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : environments.onBranch(branch)) {
@@ -601,7 +614,8 @@ public class DeployService implements BuildAnnouncements {
                 PdDeploymentTarget.ENVIRONMENT,
                 linked.service().availableOnEnv,
                 linked.service().healthPath,
-                null));
+                null,
+                List.of()));
       }
     }
     return List.copyOf(targets);
@@ -653,6 +667,10 @@ public class DeployService implements BuildAnnouncements {
 
     boolean availableOnEnv() {
       return target.availableOnEnv();
+    }
+
+    List<ResourceProvisioning.Resolved> resources() {
+      return target.resources();
     }
 
     boolean platform() {
@@ -715,6 +733,31 @@ public class DeployService implements BuildAnnouncements {
                       target.healthCmd());
                 });
     if (plan == null) {
+      return;
+    }
+
+    // PROVISIONING GOES HERE, between the row's STARTING transition and the pull, and the placement
+    // is three decisions at once:
+    //   * AFTER the transition, because the row is what a failure is recorded on — a resource that
+    //     cannot be made to exist has to be readable as a failed deployment, not as a log line
+    //     under a fire-and-forget intake;
+    //   * BEFORE the pull, because nothing docker-side has happened yet: there is no fresh
+    //     container to remove and no predecessor stopped to restart, so the failure path is a
+    //     single `finish` and the previous deployment is untouched;
+    //   * on plain values, because Plan is plain values — no transaction and no open session spans
+    //     the DDL call to another server.
+    List<DeploymentDriver.ResourceBinding> bindings;
+    try {
+      bindings =
+          resourceProvisioning.ensureAll(
+              plan.applicationName(), plan.environmentName(), plan.resources());
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          "Could not provision the resources of %s: %s", plan.applicationName(), e.getMessage());
+      finish(
+          deploymentId,
+          PdDeploymentStatus.FAILED,
+          "[resource provisioning failed: " + e.getMessage() + "]");
       return;
     }
 
@@ -800,7 +843,7 @@ public class DeployService implements BuildAnnouncements {
       // instance's own sweep marks it FAILED — each outcome recorded by the instance that survived
       // it.
       DeploymentDriver.StartResult successor =
-          driver.start(startSpec(plan, primaryNetwork, imageRef, containerName));
+          driver.start(startSpec(plan, primaryNetwork, imageRef, containerName, bindings));
       if (!successor.started()) {
         driver.remove(containerName);
         finish(deploymentId, PdDeploymentStatus.FAILED, safe(successor.detail()));
@@ -829,7 +872,7 @@ public class DeployService implements BuildAnnouncements {
     }
 
     DeploymentDriver.StartResult started =
-        driver.start(startSpec(plan, primaryNetwork, imageRef, containerName));
+        driver.start(startSpec(plan, primaryNetwork, imageRef, containerName, bindings));
     if (!started.started()) {
       driver.remove(containerName); // in case docker created it and then failed
       rollback(predecessors);
@@ -915,7 +958,11 @@ public class DeployService implements BuildAnnouncements {
   }
 
   private DeploymentDriver.StartSpec startSpec(
-      Plan plan, String primaryNetwork, String imageRef, String containerName) {
+      Plan plan,
+      String primaryNetwork,
+      String imageRef,
+      String containerName,
+      List<DeploymentDriver.ResourceBinding> bindings) {
     return new DeploymentDriver.StartSpec(
         plan.environmentId(),
         plan.environmentName(),
@@ -929,7 +976,8 @@ public class DeployService implements BuildAnnouncements {
         plan.healthPath(),
         plan.healthCmd(),
         plan.target().target(),
-        plan.availableOnEnv());
+        plan.availableOnEnv(),
+        bindings);
   }
 
   /**
