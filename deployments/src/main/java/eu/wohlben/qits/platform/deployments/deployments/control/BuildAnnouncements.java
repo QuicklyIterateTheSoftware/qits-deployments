@@ -4,39 +4,41 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
  * How a green build reaches the deploy orchestration. One method, implemented by {@link
  * DeployService}, called by whatever door the announcement came through.
  *
- * <p>Today there is exactly one door: {@code POST /platform-deployments/api/events/build-succeeded},
- * the direct HTTP intake qits-ci's notifier has always posted to. It stays, and it stays the
- * transitional and the manual door — the bootstrap replays lost events through it by hand, and a
- * fire-and-forget POST is what qits-ci sends.
- *
- * <p><b>The target model is the bus, and it is wave 3 — deliberately not this repo's dependency
- * yet.</b> qits-ci already publishes {@code BuildSuccessful} and {@code SoftwareRelease} onto
- * qits-events, and a deployment should follow from those rather than from a point-to-point call
- * that no one retries and no one can replay. What lands then is one class in {@code service/} — a
- * bus subscriber that decodes an event and calls {@link #announce} — plus the eventstream
- * dependency it needs. Nothing in this interface changes: the seam is the reason it exists ahead of
- * the consumer.
- *
- * <p>What is NOT here, on purpose:
+ * <p><b>Wave 3 has landed, and there are two doors now.</b> Neither wins, because they are not in
+ * competition: both funnel into {@link #announce} and everything downstream of it — the spec read,
+ * derived registration, the queue, the health-gated cutover — cannot tell them apart and is
+ * unchanged. This interface is unchanged too, which is what it existed ahead of the consumer for.
  *
  * <ul>
- *   <li>no eventstream dependency, and no client for one. Adding it before the subscriber exists
- *       would put a peer on the boot path for a capability nothing uses.
- *   <li>no stub, no fake and no test double for a bus. The suites drive the HTTP intake, which is
- *       the door that ships; a double for a subscriber nobody wrote would assert a shape wave 3 is
- *       still free to choose.
+ *   <li>{@code POST /platform-deployments/api/events/build-succeeded} — the direct HTTP intake
+ *       ({@code api/PdEventController}). It stays, and it stays the <b>manual and bootstrap</b>
+ *       door: a bootstrap replays a lost event through it by hand, and it is the door that still
+ *       works before qits-events exists. It is fire-and-forget and nobody retries it.
+ *   <li>The bus ({@code bus/PdBuildSuccessfulSubscriber}) — a durable consumer of qits-ci's
+ *       {@code BuildSuccessful}, which is the door a deployment should follow from: the publisher
+ *       retries it, the log replays it after a cutover, and the eventstream library hands it over
+ *       exactly once per event whichever channel delivered it.
  * </ul>
  *
+ * <p><b>Idempotency is unchanged by the second door and was never this seam's job.</b> Two
+ * announcements of one commit are two deployments of one commit, exactly as two POSTs always were:
+ * the container is named after the deployment rather than the sha, the predecessor search finds the
+ * first one and cuts it over. What the bus adds is a guarantee the POST never had — an event is not
+ * lost when nobody was listening — and one obligation the POST never had, which is ordering. A
+ * replayed event can be <em>older</em> than one already deployed, so the subscriber collapses to
+ * the tip ({@link BuildTips}) before it calls this. That check belongs to the door, not here: the
+ * manual door is an operator choosing a commit, and guarding it would be refusing the choice.
+ *
  * <p>Whichever door delivers it, the triple that drives the deployment is {@code (repoId, branch,
- * commitSha)} and the run id is a pointer nothing resolves — so a bus event carrying the same four
- * values needs no new contract here.
+ * commitSha)} and the run id is a pointer nothing resolves.
  */
 public interface BuildAnnouncements {
 
   /**
    * One green pipeline for one commit. Returns as soon as the event is accepted: the deployment
-   * runs on this component's own worker, and the announcer — a fire-and-forget POST today, a bus
-   * subscriber tomorrow — has nothing to do with the outcome.
+   * runs on this component's own worker, and the announcer — a fire-and-forget POST or a bus
+   * subscriber — has nothing to do with the outcome. A bus subscriber in particular must return
+   * from its handler rather than wait: it is holding the claim transaction open while it does.
    *
    * @param runId the qits-ci run that produced the image, optional and resolved against nothing
    * @throws eu.wohlben.qits.platform.deployments.environments.error.BadRequestException if any of

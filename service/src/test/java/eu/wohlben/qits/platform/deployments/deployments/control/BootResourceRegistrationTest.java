@@ -13,8 +13,8 @@ import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 /**
- * What this component records about its OWN database at boot — the row that makes its next
- * self-deploy a no-op instead of a password rotation against a pool it is holding open.
+ * What this component records about its OWN databases at boot — the rows that make its next
+ * self-deploy a no-op instead of a password rotation against pools it is holding open.
  *
  * <p>The startup observer is skipped under TEST (a suite boots dozens of times and has no
  * deployment environment), so this drives the package-private {@code record} directly — the
@@ -28,21 +28,25 @@ public class BootResourceRegistrationTest {
   @Inject PdResourceRepository resources;
 
   private PdResource rowOf(String environmentName) {
+    return rowOf(environmentName, BootResourceRegistration.RESOURCE_NAME);
+  }
+
+  private PdResource rowOf(String environmentName, String resourceName) {
     return QuarkusTransaction.requiringNew()
         .call(
             () ->
                 resources
-                    .findOne(
-                        BootResourceRegistration.APPLICATION,
-                        environmentName,
-                        BootResourceRegistration.RESOURCE_NAME)
+                    .findOne(BootResourceRegistration.APPLICATION, environmentName, resourceName)
                     .orElseThrow(
-                        () -> new AssertionError("no resource row for " + environmentName)));
+                        () ->
+                            new AssertionError(
+                                "no " + resourceName + " resource row for " + environmentName)));
   }
 
   @Test
   public void aBootRecordsTheDatabaseAndTheCredentialItWasHanded() {
     registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
         "jdbc:postgresql://boot-a-qits-oci-postgresql:5432/qits_deployments_a",
         "qits_deployments_a",
         "0123456789abcdef0123456789abcdef",
@@ -62,6 +66,7 @@ public class BootResourceRegistrationTest {
   @Test
   public void aSecondBootRewritesTheOneRowRatherThanAddingAnother() {
     registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
         "jdbc:postgresql://boot-b-qits-oci-postgresql:5432/qits_deployments_b",
         "qits_deployments_b",
         "first-password-that-was-recorded",
@@ -72,6 +77,7 @@ public class BootResourceRegistrationTest {
     // row still naming the old one would send the next self-deploy down the reconcile arm against
     // a credential that already works.
     registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
         "jdbc:postgresql://boot-b-qits-oci-postgresql:5432/qits_deployments_b",
         "qits_deployments_b",
         "second-password-after-a-rotation",
@@ -93,6 +99,7 @@ public class BootResourceRegistrationTest {
     // The stamp says when the role and the database were last CONFIRMED to exist, which a boot
     // cannot know and must not overwrite.
     registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
         "jdbc:postgresql://boot-c-qits-oci-postgresql:5432/qits_deployments_c",
         "qits_deployments_c",
         "a-password",
@@ -102,12 +109,56 @@ public class BootResourceRegistrationTest {
         .run(() -> rowOfManaged("boot-c").lastProvisionedAt = stamped);
 
     registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
         "jdbc:postgresql://boot-c-qits-oci-postgresql:5432/qits_deployments_c",
         "qits_deployments_c",
         "a-password",
         "boot-c");
 
     assertEquals(stamped, rowOf("boot-c").lastProvisionedAt);
+  }
+
+  @Test
+  public void theEventstreamStoreGetsARowOfItsOwn() {
+    // The second resource the spec declares, handed over by the bootstrap exactly as `db` is. Its
+    // own row is what keeps the first self-deploy from rotating the bus client's password while
+    // this instance's outbox pool is holding it — the same failure `db` records against, one
+    // datasource over.
+    registration.record(
+        BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME,
+        "jdbc:postgresql://boot-d-qits-oci-postgresql:5432/qits_deployments_eventstream",
+        "qits_deployments_eventstream",
+        "an-eventstream-password",
+        "boot-d");
+    registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
+        "jdbc:postgresql://boot-d-qits-oci-postgresql:5432/qits_deployments_d",
+        "qits_deployments_d",
+        "a-registry-password",
+        "boot-d");
+
+    PdResource eventstream = rowOf("boot-d", BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME);
+    assertEquals("qits_deployments_eventstream", eventstream.databaseName);
+    assertEquals("an-eventstream-password", eventstream.password);
+    // Two rows for one tier, one per resource — neither overwrites the other.
+    assertEquals("qits_deployments_d", rowOf("boot-d").databaseName);
+  }
+
+  @Test
+  public void theVariableNamesFollowTheResourceName() {
+    // The generic contract: rename a resource in .config/qits/deployments.yml and the variables it
+    // is injected as move with it. This is the one place that spelling is derived rather than typed.
+    assertEquals(
+        "QITS_RESOURCE_DB_URL",
+        BootResourceRegistration.variable(BootResourceRegistration.RESOURCE_NAME, "URL"));
+    assertEquals(
+        "QITS_RESOURCE_EVENTSTREAM_PASSWORD",
+        BootResourceRegistration.variable(
+            BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME, "PASSWORD"));
+    assertEquals(
+        "QITS_RESOURCE_OBJECT_STORE_USERNAME",
+        BootResourceRegistration.variable("object-store", "USERNAME"),
+        "a resource name is a dns label, and a hyphen is an underscore in an environment key");
   }
 
   @Test

@@ -44,6 +44,16 @@ Jackson analysis, which is what `api/ApiWireReflection` exists for. **A new resp
 list in the commit that adds it** — the failure is a 500 in the native binary while every JVM test
 stays green, and it has been paid for once already.
 
+**There is a second such list now, `bus/EventWireReflection`, and it exists for a different
+reason**: `CanonicalJson` builds its own `ObjectMapper` on purpose — the payload string is a
+byte-for-byte wire contract and a consuming application's customizers must not reach it — so the
+whole graph it binds is invisible to the same analysis. It registers the consuming path
+(`EventFrame`, the package-private `EventPage` by string name, and the payload record). Leave
+`EventPage` out and the stream works in the binary while **catch-up alone** fails, which is the half
+nobody would be watching. The publishing pair (`EventEnvelope` and `CanonicalJson$QitsEventMixin`)
+is deliberately absent and joins the list in the commit that gives this component an event to
+publish.
+
 ## The partition, and the one rule that keeps it
 
 Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
@@ -57,9 +67,11 @@ Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
   `RollbackPins`, `DeploymentSpecParser`, `DeploymentIdentifiers` (what only reaches an argv),
   `ImageRefs`, `ContainerNames`, `PdProcess`, `ResourceProvisioning` and `BootResourceRegistration`,
   and the three seams `DeploymentDriver` / `SpecSource` / `ResourceProvisioner` plus the
-  announcement port `BuildAnnouncements`.
-- **`service/`** (`…api`, `…dockerhost`, `…githost`, `…pghost`) — the adapters. Identity is not a package here:
-  the forward-auth pair lives in the published `qits-auth-core`.
+  announcement port `BuildAnnouncements` and the ordering collapse `BuildTips` behind it.
+- **`service/`** (`…api`, `…bus`, `…dockerhost`, `…githost`, `…pghost`) — the adapters. `bus` is the
+  event-bus half: the durable `BuildSuccessful` subscriber and the native-image registration for
+  what the library's own `ObjectMapper` binds. Identity is not a package here: the forward-auth pair
+  lives in the published `qits-auth-core`.
 
 `eu.wohlben.qits.webui` sits outside that tree, holding `WebUiRedirect` and only that. It keeps the
 sibling services' spelling rather than a component-flavoured one, so the file is recognisable across
@@ -410,10 +422,26 @@ each is easy to undo by accident:
   reset deployer database and the role is rotated to a **fresh** one (nothing knew the old one).
   Never a `DROP`, in either direction.
 - **This component is adopter #1 and cannot provision itself from cold**, which is what
-  `BootResourceRegistration` exists for: the bootstrap creates its role and database over plain JDBC
-  before the process exists, and the row is written from the environment at every boot. Without it
-  the first self-deploy takes the reconcile arm and rotates the password its own connection pool is
-  holding open.
+  `BootResourceRegistration` exists for: the bootstrap creates its roles and databases over plain
+  JDBC before the process exists, and the rows are written from the environment at every boot.
+  Without them the first self-deploy takes the reconcile arm and rotates the passwords its own
+  connection pools are holding open.
+
+  **It declares TWO resources now** — `db` (this component's registry) and `eventstream` (the bus
+  client's claim ledger and outbox, a store of its own with its own Flyway lineage) — so
+  `BootResourceRegistration` records both, over `RESOURCES`. A third entry in
+  `.config/qits/deployments.yml` is a third line there and nothing else. **The resource NAMES are
+  load-bearing**: the variables follow the name (`QITS_RESOURCE_<NAME>_URL` and its two siblings)
+  and the jar that owns each store reads exactly those in its own shipped defaults, so renaming one
+  here silently stops matching.
+
+  **Self-provisioning works for everything after the first container**, and that is worth being
+  precise about because this component is its own deployer: the spec is read at the built sha, so
+  the *running* instance reads the new `resources:` line, creates the role and the database, and
+  injects the triple into the successor it starts. Only a cold bootstrap has no deployer to do it,
+  which is why the bootstrap's run-args carry both triples. A missing one is not a degraded boot —
+  the jars' expressions have no defaults, so the process dies at Flyway naming what is absent, and
+  the health gate leaves the predecessor serving.
 - **No transaction spans the seam call.** The registry read and the row upsert are two
   `requiringNew()` brackets with the DDL between them — a socket to another server must never sit
   inside this component's own transaction.
@@ -473,24 +501,65 @@ The segment is spelled in four places that move together: `quarkus.quinoa.ui-roo
 disagreed — the right assertion would have failed a build for something no change here could fix —
 and it is an ordinary open debt now that it agrees.
 
-## The event side: the direct intake now, the bus later
+## The event side: two doors, one seam
 
-`POST /platform-deployments/api/events/build-succeeded` is the door that ships, and its payload shape
-is the ancestor's unchanged — the bootstrap replays lost events through it by hand and qits-ci sends
-it today.
+`BuildAnnouncements` in `deployments/control` is the seam, and **wave 3 has landed**, so there are
+two ways in. Neither wins: both call `announce`, and everything after it — the spec read, derived
+registration, the queue, the health-gated cutover — cannot tell them apart.
 
-`BuildAnnouncements` in `deployments/control` is the seam. The target model is bus-driven: qits-ci
-already publishes `BuildSuccessful` and `SoftwareRelease` onto qits-events, and a deployment should
-follow from an event that can be retried and replayed rather than from a POST nobody retries. That
-is **wave 3**, and it deliberately takes no dependency yet — no eventstream on the classpath, no
-stub for a bus, no test double for a subscriber nobody has written. What lands then is one class in
-`service/` that decodes an event and calls `announce`; nothing in the interface changes.
+- **`POST /platform-deployments/api/events/build-succeeded`** (`api/PdEventController`), payload
+  shape the ancestor's, unchanged. It is the **manual and bootstrap** door: an operator replays a
+  lost event through it, and it is the only one that works before qits-events exists. Nobody retries
+  it.
+- **The bus** (`bus/PdBuildSuccessfulSubscriber`), a `QitsDurableEventListener` on qits-ci's
+  `BuildSuccessful`. The publisher retries it, the log replays it after a cutover, and the library
+  hands it over exactly once per event whichever channel delivered it.
+
+Three things about the subscriber that are the whole of what a durable consumer owes:
+
+- **`consumerId()` is `pd-build-succeeded`, and it is storage.** It keys `consumed_event` and
+  `consumer_watermark`. Changing it makes a brand-new consumer: the old claims are orphaned and the
+  new id initializes at the head of the log, silently skipping everything in between. It is a string
+  a person chose so it survives the class being renamed. `PdBusBuildIntakeTest` pins it.
+- **Ordering is ours and is not optional.** Catch-up delivers late, so a *different, older* build can
+  arrive after a newer one is deployed — a rollback nobody asked for. `BuildTips` collapses to the
+  tip and the class javadoc argues the two answers it takes: what THIS PROCESS announced (a build's
+  own finish time against a build's own finish time, exact, and what lets two builds seconds apart
+  both deploy), and, only when that knows nothing, the **newest deployment row** for the tiers
+  listening to that branch (the cross-restart floor). Combining them the other way round is the
+  mistake: a row is stamped when it is written, minutes after the build it describes, so comparing
+  an arriving build against one skips builds that are genuinely newer. Duplicates need nothing —
+  the library already makes the same event id impossible twice.
+- **A throw leaves the event owed forever.** It is offered again on every sweep and the watermark
+  stays behind it, so one poison event stops this consumer's catch-up. So the handler **swallows
+  what retrying cannot fix** — an unreadable payload, a payload with no triple, an identifier
+  `DeploymentIdentifiers` refuses — each with a WARN, and throws only what a next attempt could
+  succeed at.
+
+**Two facts about the transaction the handler runs in.** It is the library's claim transaction, on
+the `eventstream` datasource — so every read of *this* component's database inside it takes a
+`QuarkusTransaction.requiringNew()` of its own (two non-XA resources in one transaction is a thing
+Narayana refuses), which is what `BuildTips` does. And `announce` returns as soon as the event is
+queued, which it must: the handler is holding that transaction open while it runs.
+
+**qits-ci's direct POST is still live and is meant to be retired** once the subscriber is proven on
+a real platform (the superproject's `event-delivery-guarantees-plan.md`, work package 6). Until then
+both doors deliver every green build, which is two deployments of one commit — the same thing two
+POSTs always were, and the cutover absorbs it.
 
 ## Adding a dependency on another context
 
-Don't. This component has no compile-time dependency on any other qits module beyond the published
-`qits-auth-core`, and should not grow one. Things arrive as an HTTP payload on the intake, as a URL
-in config, or not at all. Never add a JPA relation to another context's entity.
+Don't. This component depends on exactly two published qits jars — `qits-auth-core` and
+`qits-eventstream` — and both are **platform libraries rather than contexts**: shared machinery, no
+domain, no entity of anyone else's. It has no dependency on another *context* and should not grow
+one. Things arrive as an HTTP payload on the intake, as an event on the bus, as a URL in config, or
+not at all. Never add a JPA relation to another context's entity.
+
+**The bus does not change that, and the subscriber is written to keep it true.** qits-ci's
+`BuildSuccessful` reaches this component as four strings decoded from a payload, against a signature
+spelled as the literal `"BuildSuccessful"` — there is no dependency on `qits-ci-events` and there
+must not be one. The cost is that a rename over there is silent here, which is the cost the intake
+path already carries.
 
 The rule reaches **inside this schema** too: `pd_deployment` names its service and its tier as plain
 `String` columns with **no FK**, even though the topology is two tables away. Deployment history
@@ -540,7 +609,20 @@ second row still claims to be ACTIVE.
 
 **The client is the only submodule.** `service/src/main/webui` is qits-spa-deployments; `git submodule update
 --init` is half of a clone here, and `.config/qits/ci-post-receive.yml` runs it for that reason.
-Shared auth comes from the platform Maven repository as `qits-auth-core`.
+Shared auth comes from the platform Maven repository as `qits-auth-core`, and the event bus client
+as `qits-eventstream` — ordinary Maven dependencies, never gitlinks.
+
+**Both are version-pinned by a property in the root pom, one line each**, because a release train
+step rewrites exactly that element: `.config/qits/ci-event-upstream-auth-core.yml` and
+`.config/qits/ci-event-upstream-eventstream.yml` each `sed` one `<…version>` and force-push the
+result onto a maintenance branch. A second spelling of either version anywhere would be left
+behind. A bump lands on a branch and not on main on purpose: a library release is not a decision to
+redeploy the deployer.
+
+**`qits-eventstream` brings two extensions new to this deployable** — `quarkus-scheduler` (the
+outbox and catch-up sweeps) and `quarkus-websockets-next` (the stream client, which registers no
+route, so `quarkus.quinoa.ignored-path-prefixes` is unchanged) — and one **mandatory deployment
+resource**, below.
 
 **`quarkus-undertow` must never be on the classpath.** Its presence breaks Quinoa's production static
 serving — the client 404s from a build that was green — and it arrives *transitively* from anything
@@ -568,6 +650,22 @@ against.
   time and cannot be written down. Testcontainers is not on this classpath and must not arrive.
   `EmbeddedPg` is **copied** into `deployments/` rather than shared: a test-jar dependency between
   two modules that have none is the higher price.
+- **That config source hands out SIX values, not three, and the second three are easy to think
+  unnecessary.** The bus is dark in `%test`, and **dark is not absent**: `qits.eventstream.enabled=false`
+  stops dialling, sweeping and claiming, not the datasource — Quarkus opens the connection and runs
+  Flyway at boot regardless. So the `eventstream` store gets a database of its own on the same
+  embedded instance, or the suite does not start. Only `clean-at-start` is written in the test
+  properties file; the locations and the persistence-unit wiring ship in the jar and a copy here
+  would drift.
+- **The bus darkness itself is asserted**, in `bus/PdEventstreamDarknessTest`, for the reason the
+  OTel keys are: the way a missing switch fails is not a failure but a suite that redials an
+  unresolvable host every thirty seconds and reads as slow. It also asserts the subscriber survives
+  ArC's unused-bean removal — nothing injects it by name, and a removed listener consumes nothing
+  and says nothing to admit it.
+- **The bus tests drive `onFrame` directly, not a stub qits-events.** What belongs here is this
+  component's half — the decode, the tip check, the call into the seam. The funnel, the claim ledger
+  and the catch-up sweep are the library's and are proved in its own repository; a stub here would
+  re-prove them and prove nothing about a deployment.
 - **Machine-token tests mint their own tokens.** `MachineTokens` signs RS256 with the key pair in
   `service/src/test/resources/machine-token-*.pem`, and `MachineGuardEnforcedProfile` hands
   quarkus-oidc the public half, so the enforced path is exercised end to end with no
@@ -592,9 +690,11 @@ against.
   `src/test` lands in the committed document unless it is hidden.
 - `PdPackagedSurfaceIT` runs the **packaged artifact** (fast-jar under `-DskipITs=false`, binary
   under `-Dnative`) and asserts what a native build can silently lose: the build-time route prefixes,
-  the shipped datasource *expression* (it hands the launched process `QITS_RESOURCE_DB_URL` and its
-  two siblings — the generic contract a deployment supplies — rather than restating the datasource
-  keys, so the jar's own `${…}` indirection is what is under test), Flyway's migration surviving as
+  the shipped datasource *expressions* — **both** of them now, since it hands the launched process
+  `QITS_RESOURCE_DB_*` and `QITS_RESOURCE_EVENTSTREAM_*`, the generic contract a deployment
+  supplies, rather than restating the datasource keys, so the jars' own `${…}` indirection is what
+  is under test and a packaged artifact missing either triple fails here rather than in a
+  deployment — Flyway's migration surviving as
   a resource, and — the claim the ancestors could not make —
   both domains round-tripping in one process against one database. Its embedded postgres reaches
   the profile through a **system property**, because a `QuarkusTestProfile` is instantiated in two

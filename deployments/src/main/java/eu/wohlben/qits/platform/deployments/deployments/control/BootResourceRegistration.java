@@ -9,23 +9,32 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.jboss.logging.Logger;
 
 /**
- * Writes this component's own {@code pd_resource} row from the credential it was handed to boot.
+ * Writes this component's own {@code pd_resource} rows from the credentials it was handed to boot.
  *
  * <p><b>Why it exists at all.</b> This component is adopter #1 of its own {@code resources:}
- * contract, and it is the one adopter whose database cannot have been provisioned by it: the
- * bootstrap creates the role and the database over plain JDBC before this process exists, and hands
- * them over as {@code QITS_RESOURCE_DB_URL} / {@code _USERNAME} / {@code _PASSWORD}. The registry
- * would therefore have no row for it, and the first self-deploy would read the empty registry, take
- * the <b>reconcile</b> arm of the idempotency matrix, and {@code ALTER ROLE} its own database
- * password to a fresh one — while the running instance still holds a pool of connections opened
- * with the old one. Recording what it was given makes that first self-deploy hit the <b>no-op</b>
- * arm instead.
+ * contract, and it is the one adopter whose databases cannot have been provisioned by it: the
+ * bootstrap creates the roles and the databases over plain JDBC before this process exists, and
+ * hands them over as {@code QITS_RESOURCE_<NAME>_URL} / {@code _USERNAME} / {@code _PASSWORD}. The
+ * registry would therefore have no row for them, and the first self-deploy would read the empty
+ * registry, take the <b>reconcile</b> arm of the idempotency matrix, and {@code ALTER ROLE} its own
+ * passwords to fresh ones — while the running instance still holds pools of connections opened with
+ * the old ones. Recording what it was given makes that first self-deploy hit the <b>no-op</b> arm
+ * instead.
+ *
+ * <p><b>Two resources, because the spec declares two.</b> {@code db} is this component's own
+ * registry; {@code eventstream} is the bus client's claim ledger and outbox, which arrives with the
+ * qits-eventstream jar and is a store of its own with its own Flyway lineage. Both are handed over
+ * by the bootstrap and both would be rotated by the first self-deploy, so both are recorded. A
+ * third entry in {@code .config/qits/deployments.yml} adds a third line to {@link #RESOURCES}, and
+ * that is the whole of the change.
  *
  * <p><b>And it survives everything.</b> The row is rewritten on every boot from the environment the
  * container was started with, so it is correct after all containers die, after the registry
@@ -55,11 +64,18 @@ public class BootResourceRegistration {
   /** What the spec line {@code resources: postgresql:db} calls it, and the env segment it becomes. */
   static final String RESOURCE_NAME = "db";
 
+  /** The qits-eventstream jar's store, the second entry of the same spec line. */
+  static final String EVENTSTREAM_RESOURCE_NAME = "eventstream";
+
   static final String RESOURCE_TYPE = "postgresql";
 
-  static final String URL_VARIABLE = "QITS_RESOURCE_DB_URL";
-  static final String USERNAME_VARIABLE = "QITS_RESOURCE_DB_USERNAME";
-  static final String PASSWORD_VARIABLE = "QITS_RESOURCE_DB_PASSWORD";
+  /**
+   * Every resource this component is handed at boot, in the spelling the spec uses. The variable
+   * names follow the NAME — {@code QITS_RESOURCE_<NAME>_URL} and its two siblings, upper-cased —
+   * which is the generic contract and the reason a resource cannot be renamed on one side alone.
+   */
+  static final List<String> RESOURCES = List.of(RESOURCE_NAME, EVENTSTREAM_RESOURCE_NAME);
+
   static final String ENVIRONMENT_VARIABLE = "QITS_ENVIRONMENT";
 
   @Inject PdResourceRepository resources;
@@ -68,42 +84,63 @@ public class BootResourceRegistration {
     if (LaunchMode.current() == LaunchMode.TEST) {
       return;
     }
-    try {
-      Optional<String> url = value(URL_VARIABLE);
-      Optional<String> username = value(USERNAME_VARIABLE);
-      Optional<String> password = value(PASSWORD_VARIABLE);
-      Optional<String> environmentName = value(ENVIRONMENT_VARIABLE);
-      if (url.isEmpty() || username.isEmpty() || password.isEmpty() || environmentName.isEmpty()) {
-        LOG.debugf(
-            "Not recording this instance's own resource: it was started without the full"
-                + " %s/%s/%s + %s set",
-            URL_VARIABLE, USERNAME_VARIABLE, PASSWORD_VARIABLE, ENVIRONMENT_VARIABLE);
-        return;
+    Optional<String> environmentName = value(ENVIRONMENT_VARIABLE);
+    if (environmentName.isEmpty()) {
+      LOG.debugf("Not recording this instance's own resources: no %s is set", ENVIRONMENT_VARIABLE);
+      return;
+    }
+    for (String resourceName : RESOURCES) {
+      try {
+        Optional<String> url = value(variable(resourceName, "URL"));
+        Optional<String> username = value(variable(resourceName, "USERNAME"));
+        Optional<String> password = value(variable(resourceName, "PASSWORD"));
+        if (url.isEmpty() || username.isEmpty() || password.isEmpty()) {
+          LOG.debugf(
+              "Not recording this instance's own %s resource: it was started without the full"
+                  + " %s triple",
+              resourceName, variable(resourceName, "*"));
+          continue;
+        }
+        // Per resource rather than around the loop: one missing triple must not cost the others
+        // their rows, for the same reason this whole observer is warn-only.
+        record(resourceName, url.get(), username.get(), password.get(), environmentName.get());
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "Could not record this instance's own %s resource row", resourceName);
       }
-      record(url.get(), username.get(), password.get(), environmentName.get());
-    } catch (RuntimeException e) {
-      LOG.warnf(e, "Could not record this instance's own resource row");
     }
   }
 
+  /** {@code QITS_RESOURCE_<NAME>_<SUFFIX>}, with the name's hyphens spelled as underscores. */
+  static String variable(String resourceName, String suffix) {
+    return "QITS_RESOURCE_"
+        + resourceName.toUpperCase(Locale.ROOT).replace('-', '_')
+        + "_"
+        + suffix;
+  }
+
   /**
-   * Upsert the row for {@code (this application, this tier, db)}. Package-private because the
-   * startup path is skipped under TEST and the suite drives this directly — the
+   * Upsert the row for {@code (this application, this tier, this resource)}. Package-private
+   * because the startup path is skipped under TEST and the suite drives this directly — the
    * {@code sweepInFlight()} arrangement.
    */
-  void record(String url, String username, String password, String environmentName) {
+  void record(
+      String resourceName,
+      String url,
+      String username,
+      String password,
+      String environmentName) {
     String database = databaseOf(url);
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               Optional<PdResource> existing =
-                  resources.findOne(APPLICATION, environmentName, RESOURCE_NAME);
+                  resources.findOne(APPLICATION, environmentName, resourceName);
               PdResource resource = existing.orElseGet(PdResource::new);
               if (existing.isEmpty()) {
                 resource.id = UUID.randomUUID().toString();
                 resource.applicationName = APPLICATION;
                 resource.environmentName = environmentName;
-                resource.resourceName = RESOURCE_NAME;
+                resource.resourceName = resourceName;
                 resource.createdAt = Instant.now();
               }
               resource.resourceType = RESOURCE_TYPE;
@@ -127,7 +164,7 @@ public class BootResourceRegistration {
             });
     LOG.infof(
         "Recorded this instance's own resource: %s/%s uses database %s as %s",
-        environmentName, RESOURCE_NAME, database, username);
+        environmentName, resourceName, database, username);
   }
 
   /**

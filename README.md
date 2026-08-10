@@ -116,7 +116,8 @@ never a guess, because a guessed topology is a container on the wrong networks u
 
 ## The deployment flow
 
-    green build ──▶ POST /platform-deployments/api/events/build-succeeded
+    green build ──┬─▶ BuildSuccessful on qits-events ─▶ the durable subscriber (the ordinary door)
+                  └─▶ POST /platform-deployments/api/events/build-succeeded (manual / bootstrap)
                         (runId, repoId, branch, commitSha)
                           │
                           ▼   one single-threaded worker; the intake returns 202 immediately
@@ -126,6 +127,14 @@ never a guess, because a guessed topology is a container on the wrong networks u
                           │
                           ▼   one recorded deployment per place it addresses
                     pull ▶ stop the predecessor ▶ run ▶ join networks ▶ health gate ▶ cut over
+
+**Two doors, one flow.** Both announcements meet at the same seam, and nothing below it can tell
+them apart. The bus is the ordinary one — the publisher retries it, qits-events' log replays it
+after a cutover, and the eventstream library delivers it exactly once whichever channel it came on;
+the POST is the manual one, and the only one that works before qits-events exists. Because a
+replayed event can be *older* than one already deployed, the subscriber deploys only if the build is
+still the newest for its `(repoId, branch)` and logs the skip otherwise. The POST is deliberately
+not guarded that way: posting a commit is choosing it.
 
 **The cutover invariant.** Whatever holds the application's alias is *stopped* — not removed —
 before the fresh container starts, and *removed* only after the new one passed its health gate. A
@@ -204,7 +213,7 @@ records the outcome. A successor that misses its gate leaves the predecessor ser
 | `GET /applications` | the client — one entry per (service, tier), both planes flat |
 | `GET /deployments?environmentId=` | the client — one tier's history, newest first |
 | `GET /pins` | qits-platform-artifacts' OCI garbage collector, fail-closed |
-| `POST /events/build-succeeded` | qits-ci, fire-and-forget |
+| `POST /events/build-succeeded` | qits-ci, fire-and-forget; the manual and bootstrap door |
 
 All under `/platform-deployments/api`. The client is served at `/platform-deployments`, health at
 `/platform-deployments/q/health/ready` — which is also what this component's own health-path
