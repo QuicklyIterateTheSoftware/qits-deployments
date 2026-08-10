@@ -4,7 +4,9 @@ import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
 import jakarta.enterprise.context.ApplicationScoped;
+import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Panache DAO for {@link PdDeployment}.
@@ -78,5 +80,33 @@ public class PdDeploymentRepository implements PanacheRepositoryBase<PdDeploymen
 
   public List<PdDeployment> listByStatus(PdDeploymentStatus status) {
     return list("status = ?1", status);
+  }
+
+  /**
+   * The newest deployment of one application among a set of places — the tiers named, plus the
+   * platform plane when {@code includePlatform}. Newest by {@code seq}, like every listing here.
+   *
+   * <p>What asks is {@link
+   * eu.wohlben.qits.platform.deployments.deployments.control.BuildTips}: a branch resolves to the
+   * tiers listening to it, and this is what those tiers have most recently been handed. An empty
+   * set of places is answered without a query — a {@code where … in ()} is not a question SQL
+   * agrees to be asked.
+   */
+  public Optional<PdDeployment> newestInPlaces(
+      String applicationName, Collection<String> environmentIds, boolean includePlatform) {
+    if (environmentIds.isEmpty()) {
+      return includePlatform
+          ? find(
+                  "applicationName = ?1 and environmentId is null order by seq desc",
+                  applicationName)
+              .firstResultOptional()
+          : Optional.empty();
+    }
+    String places =
+        includePlatform
+            ? "(environmentId in ?2 or environmentId is null)"
+            : "environmentId in ?2";
+    return find("applicationName = ?1 and " + places + " order by seq desc", applicationName, environmentIds)
+        .firstResultOptional();
   }
 }

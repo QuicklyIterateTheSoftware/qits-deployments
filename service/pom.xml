@@ -79,6 +79,27 @@
             <artifactId>qits-auth-core</artifactId>
         </dependency>
         <dependency>
+            <!-- The platform event bus client, and with it the second door a green build reaches
+                 this component through: bus/PdBuildSuccessfulSubscriber. Everything the durable
+                 consumer needs arrives with this jar — its own `eventstream` datasource, Flyway
+                 lineage, claim ledger, catch-up sweeper and stream subscriber — configured by the
+                 defaults it ships in its own META-INF/microprofile-config.properties. The only
+                 thing this module says about it is where it is dark; see application.properties.
+
+                 IT ADDS A MANDATORY DEPLOYMENT RESOURCE. `.config/qits/deployments.yml` declares
+                 `postgresql:eventstream:…` and this component provisions it for its own successor
+                 before the cutover; a container started without the QITS_RESOURCE_EVENTSTREAM_*
+                 triple refuses to boot at Flyway. That is the shipped stance, not a defect.
+
+                 Two extensions are NEW to this deployable and arrive with it: quarkus-scheduler
+                 (the outbox and catch-up sweeps) and quarkus-websockets-next (the stream client;
+                 it registers no route of its own, so quarkus.quinoa.ignored-path-prefixes is
+                 unchanged). quarkus-undertow stays absent, as Quinoa requires:
+                 `./mvnw -pl service -am dependency:tree | grep -i undertow` is still empty. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
             <!-- Bearer validation against qits-platform-idp. qits-auth-core deliberately does NOT
                  bring it: validating a token is each service's own choice of extension and config,
                  and the jar only reads the identity that validation leaves behind. Configured in

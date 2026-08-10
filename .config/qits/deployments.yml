@@ -16,17 +16,31 @@
 # a second place to keep it right. Where a green build deploys is the environment row's answer and
 # never this file's, so nothing here states it.
 #
-# ONE KEY, and it is the component describing itself with its own mechanism. This repo's
-# store is PostgreSQL, and the line below is what provisions it: a role and a database of its own on
-# the tier's postgres, created before the successor container starts, injected as
-# QITS_RESOURCE_DB_URL / _USERNAME / _PASSWORD — the generic contract, which the environments jar's
-# datasource defaults read verbatim.
+# TWO DATABASES, and this is the component describing itself with its own mechanism. Each entry is
+# a role and a database of its own on the tier's postgres, created before the successor container
+# starts and injected as QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD — the generic contract,
+# which the jar that owns each store reads verbatim in its own shipped defaults. THE NAMES ARE NOT
+# FREE: `db` is what the environments jar's datasource reads, `eventstream` is what the
+# qits-eventstream jar's reads, and renaming either here silently stops matching.
 #
-# ADOPTER #1, AND THE ONE THAT CANNOT PROVISION ITSELF FROM COLD. The bootstrap creates this role
-# and this database over plain JDBC before this process exists, and BootResourceRegistration records
-# what it was handed at every boot — so the first self-deploy after that finds a registry row, takes
-# the no-op arm, and is injected the credential it is already connected with. Without the row it
-# would rotate its own password out from under its own connection pool.
+# `db` takes the derived default database — `qits_` + the application name minus its `qits-` prefix,
+# so qits_deployments — and says so by omitting the third segment. `eventstream` cannot: the default
+# would be qits_deployments too, and one database cannot be two stores with two Flyway lineages, so
+# it is named. The name carries this repository, because every consumer of that jar declares a
+# resource called `eventstream` and they must not collide on one postgres.
+#
+# SELF-PROVISIONING WORKS HERE AND IS HOW THE SECOND ENTRY ARRIVES. This component is its own
+# deployer, and the spec is read at the BUILT sha — so the running instance reads this file, creates
+# both role/database pairs on the tier's postgres, and injects both triples into the successor it
+# starts. Nothing special happens because the successor is itself.
+#
+# ADOPTER #1, AND THE ONE THAT CANNOT PROVISION ITSELF FROM COLD. Only the very first container of a
+# fresh platform has no deployer to do it: the bootstrap creates BOTH roles and databases over plain
+# JDBC before this process exists and passes BOTH triples as run-args, and
+# BootResourceRegistration records what it was handed at every boot — so the first self-deploy after
+# that finds a registry row per resource, takes the no-op arm, and injects the credentials the
+# instance is already connected with. Without those rows it would rotate its own passwords out from
+# under its own connection pools.
 # The convention would derive the health path from the repository name, but the route path
 # deliberately did not move with the rename — the service still serves /platform-deployments.
 # Without this line the successor's probe curls /deployments/… into a 404 and every self-update
@@ -34,4 +48,4 @@
 # a row is not durable across a re-bootstrap — this line is.
 health_path: /platform-deployments/q/health/ready
 
-resources: postgresql:db
+resources: postgresql:db, postgresql:eventstream:qits_deployments_eventstream

@@ -55,6 +55,11 @@
     </modules>
 
     <properties>
+        <!-- The platform event bus client, published to the platform Maven repository. ONE LINE,
+             and it stays one line: the release train's follow-bump step
+             (.config/qits/ci-event-upstream-eventstream.yml) rewrites exactly this element with a
+             `sed`, so a second spelling of the version anywhere would be left behind. -->
+        <qits.eventstream.version>2026.810.103202</qits.eventstream.version>
         <qits.auth-core.version>2026.807.165756</qits.auth-core.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
@@ -170,6 +175,13 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-auth-core</artifactId>
                 <version>${qits.auth-core.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Published by qits-eventstream into the platform Maven repository. Declared in
+                     service/pom.xml, which is the only module that speaks to the bus. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-eventstream</artifactId>
+                <version>${qits.eventstream.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

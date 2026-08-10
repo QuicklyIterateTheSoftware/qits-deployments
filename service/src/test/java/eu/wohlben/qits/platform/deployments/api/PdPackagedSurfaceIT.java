@@ -60,41 +60,59 @@ public class PdPackagedSurfaceIT {
   private static final String SEGMENT = "/platform-deployments";
 
   /**
-   * Hands the launched artifact a database the way a deployment does — as the generic resource
-   * triple, not as the datasource keys. The environments jar ships {@code
-   * jdbc.url=${QITS_RESOURCE_DB_URL}} and its two siblings, so supplying the variables leaves the
-   * <b>shipped</b> expression itself under test (the AUTO_SERVER lesson from qits-ci, applied to
-   * what replaced that URL). Expression expansion reads the whole config, and these overrides reach
-   * the launched process as system properties, so the same three names resolve.
+   * Hands the launched artifact its databases the way a deployment does — as the generic resource
+   * triples, not as the datasource keys. The environments jar ships {@code
+   * jdbc.url=${QITS_RESOURCE_DB_URL}} and its two siblings and the qits-eventstream jar ships the
+   * same three over {@code QITS_RESOURCE_EVENTSTREAM_*}, so supplying the variables leaves the
+   * <b>shipped</b> expressions themselves under test (the AUTO_SERVER lesson from qits-ci, applied
+   * to what replaced that URL). Expression expansion reads the whole config, and these overrides
+   * reach the launched process as system properties, so the same six names resolve.
    *
-   * <p>The database is an embedded postgres this JVM starts. <b>Its url travels through a system
-   * property rather than a static field</b>: a test profile is instantiated in more than one
+   * <p><b>Both are mandatory, which is itself the claim.</b> Neither jar's expressions have a
+   * default behind them, so a packaged process missing either triple dies at Flyway naming what is
+   * absent rather than opening a store nobody meant — and this IT is the only place that boots the
+   * shipped artifact and would find out.
+   *
+   * <p>The databases are an embedded postgres this JVM starts. <b>Their urls travel through system
+   * properties rather than static fields</b>: a test profile is instantiated in more than one
    * classloader, so a field written by one copy is not the field the other reads, while the process
    * has exactly one property table.
    */
   public static class PackagedUnderTarget implements QuarkusTestProfile {
 
-    /** Where the url is parked for whichever copy of this class is asked second. */
+    /** Where the urls are parked for whichever copy of this class is asked second. */
     private static final String URL_PROPERTY = "qits.test.packaged-it.db-url";
+
+    private static final String EVENTSTREAM_URL_PROPERTY =
+        "qits.test.packaged-it.eventstream-url";
 
     @Override
     public Map<String, String> getConfigOverrides() {
       return Map.of(
-          "QITS_RESOURCE_DB_URL", databaseUrl(),
+          "QITS_RESOURCE_DB_URL", databaseUrl(URL_PROPERTY, "pd_packaged_it"),
           "QITS_RESOURCE_DB_USERNAME", EmbeddedPg.USER,
           "QITS_RESOURCE_DB_PASSWORD", EmbeddedPg.PASSWORD,
+          // The bus client's store, and this IT is where its shipped expressions are exercised
+          // too. It is not optional: the jar's three keys have no defaults, so a packaged process
+          // started without this triple dies at Flyway naming what is missing — which is the
+          // refuse-to-boot stance, and the reason .config/qits/deployments.yml declares the
+          // resource. Dark or not, the datasource opens and migrates.
+          "QITS_RESOURCE_EVENTSTREAM_URL",
+              databaseUrl(EVENTSTREAM_URL_PROPERTY, "pd_eventstream_packaged_it"),
+          "QITS_RESOURCE_EVENTSTREAM_USERNAME", EmbeddedPg.USER,
+          "QITS_RESOURCE_EVENTSTREAM_PASSWORD", EmbeddedPg.PASSWORD,
           // No docker on purpose: every driver call must degrade to a warning, never a failure.
           "qits.platform.deployments.container-runtime", "docker-absent-for-this-it");
     }
 
-    private static synchronized String databaseUrl() {
-      String recorded = System.getProperty(URL_PROPERTY);
+    private static synchronized String databaseUrl(String property, String database) {
+      String recorded = System.getProperty(property);
       if (recorded != null) {
         return recorded;
       }
       // localhost resolves for the launched process too — it is a child of this JVM on this host.
-      String url = EmbeddedPg.url("pd_packaged_it");
-      System.setProperty(URL_PROPERTY, url);
+      String url = EmbeddedPg.url(database);
+      System.setProperty(property, url);
       return url;
     }
   }
