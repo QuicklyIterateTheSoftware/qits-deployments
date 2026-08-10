@@ -1,5 +1,6 @@
 package eu.wohlben.qits.platform.deployments.deployments.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -29,9 +30,19 @@ import java.time.Instant;
  * <p>{@code databaseName} and {@code roleName} are one identity today: the role IS the database
  * name, one login per database. They are two columns so that the day a resource type separates them
  * the registry can say so without a migration.
+ *
+ * <p><b>{@code @Uncaused} by decision, and the reason is what this row is.</b> It is not a record
+ * of something that happened — it is the converging registry entry for a database that exists, read
+ * and rewritten by every later deployment. The causation column is insert-only on purpose, so it
+ * would pin this row forever to whichever deployment happened to be the first one, saying nothing
+ * about the credential the row holds today. Its two writers agree: {@code ResourceProvisioning}
+ * runs on {@code pd-deploy-worker}, where no scope stands and the deployment that owns the pass
+ * already records the cause; and {@code BootResourceRegistration} writes at startup from the
+ * environment variables a bootstrap set, with no event anywhere behind it.
  */
 @Entity
 @Table(name = "pd_resource")
+@Uncaused
 public class PdResource extends PanacheEntityBase {
 
   @Id public String id;

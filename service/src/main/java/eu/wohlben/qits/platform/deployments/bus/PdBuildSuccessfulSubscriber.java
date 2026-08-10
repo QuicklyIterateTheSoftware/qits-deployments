@@ -9,6 +9,7 @@ import eu.wohlben.qits.platform.deployments.environments.error.BadRequestExcepti
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.util.Set;
+import java.util.UUID;
 import org.jboss.logging.Logger;
 
 /**
@@ -139,13 +140,37 @@ public class PdBuildSuccessfulSubscriber implements QitsDurableEventListener {
     }
     try {
       announcements.announce(
-          build.runId(), build.repoId(), build.branch(), build.commitSha());
+          build.runId(), build.repoId(), build.branch(), build.commitSha(), causeOf(frame));
     } catch (BadRequestException e) {
       // An identifier this component refuses — a sha that could escape an argv, a branch that
       // overruns its column. Retrying refuses it again, so it is settled and said out loud.
       LOG.warnf(
           "%s %s was refused: %s (%s@%s)",
           frame.name(), frame.id(), e.getMessage(), build.repoId(), build.commitSha());
+    }
+  }
+
+  /**
+   * This frame as a cause, for the {@code causation_id} of every row the deployment writes.
+   *
+   * <p><b>It is read here and passed as data on purpose.</b> The dispatcher does establish a {@code
+   * CausationScope} of this id around {@link #onFrame}, but {@code announce} hands the whole event
+   * to {@code pd-deploy-worker} and returns — and a ThreadLocal does not follow work across an
+   * executor. So the far side is told rather than left to look, which is the same trade every other
+   * value on that call already makes.
+   *
+   * <p>Null for an id that is not a UUID: the deployment runs and loses its trace edge, never the
+   * other way round. Causation is advisory, and refusing a green build over it would be the one
+   * failure this whole mechanism must not be able to cause.
+   */
+  private static UUID causeOf(EventFrame frame) {
+    if (frame.id() == null) {
+      return null;
+    }
+    try {
+      return UUID.fromString(frame.id());
+    } catch (IllegalArgumentException e) {
+      return null;
     }
   }
 

@@ -60,7 +60,10 @@
              (.config/qits/ci-event-upstream-eventstream.yml) rewrites exactly this element with a
              `sed`, so a second spelling of the version anywhere would be left behind. -->
         <qits.eventstream.version>2026.810.191553</qits.eventstream.version>
-        <qits.auth-core.version>2026.807.165756</qits.auth-core.version>
+        <qits.auth-core.version>2026.810.184518</qits.auth-core.version>
+        <!-- The platform's shared ArchUnit rules, published by qits-integrations-quarkus beside
+             qits-auth-core. Test scope wherever entities live — see service/pom.xml. -->
+        <qits.arch-rules.version>2026.810.184518</qits.arch-rules.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -177,11 +180,20 @@
                 <version>${qits.auth-core.version}</version>
             </dependency>
             <dependency>
-                <!-- Published by qits-eventstream into the platform Maven repository. Declared in
-                     service/pom.xml, which is the only module that speaks to the bus. -->
+                <!-- Published by qits-eventstream into the platform Maven repository. `service/` is
+                     still the only module that speaks to the BUS; both domain modules declare it
+                     too, for the causation persistence trio alone (CausedRow, CausationStamp,
+                     @Uncaused) — see AGENTS.md, "free of the bus's SEAMS". -->
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-eventstream</artifactId>
                 <version>${qits.eventstream.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared ArchUnit rules. Test scope, in `service/` only: its
+                     classpath is the one that sees every entity of the component. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

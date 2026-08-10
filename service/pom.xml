@@ -143,6 +143,16 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- The platform's shared ArchUnit rules; ArchRulesTest points them at
+                 eu.wohlben.qits.platform.deployments. It sits HERE and not in a domain module
+                 because this is the one classpath that carries every entity of the component —
+                 both domain jars and anything this module ever adds. Forgetting a causation
+                 decision on a new @Entity fails this build naming the class. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-arch-rules</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <!-- Test-only token issuer. The gate-on suite signs its own RS256 tokens with the key
                  pair in src/test/resources and has quarkus-oidc verify them locally, so the
                  enforcement path is exercised end to end — signature, issuer, audience, guard —

@@ -1,6 +1,7 @@
 package eu.wohlben.qits.platform.deployments.api;
 
 import eu.wohlben.qits.auth.MachineAuth;
+import eu.wohlben.qits.eventstream.CausationScope;
 import eu.wohlben.qits.platform.deployments.deployments.control.BuildAnnouncements;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
@@ -73,7 +74,16 @@ public class PdEventController {
   @Operation(hidden = true)
   public Response buildSucceeded(@Valid BuildSucceededEvent event) {
     machineAuth.require();
-    announcements.announce(event.runId(), event.repoId(), event.branch(), event.commitSha());
+    // The cause is read HERE, on the request thread, because that is the only place it exists:
+    // CausationServerFilter restored it from the caller's X-Qits-Causation-Id before this method
+    // ran, and everything after announce() is on pd-deploy-worker, where the ThreadLocal is gone.
+    // Null for a hand-made bootstrap POST, which is a rootless deployment and not an error.
+    announcements.announce(
+        event.runId(),
+        event.repoId(),
+        event.branch(),
+        event.commitSha(),
+        CausationScope.current());
     return Response.accepted().build();
   }
 }

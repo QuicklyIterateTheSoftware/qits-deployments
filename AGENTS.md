@@ -547,12 +547,47 @@ a real platform (the superproject's `event-delivery-guarantees-plan.md`, work pa
 both doors deliver every green build, which is two deployments of one commit — the same thing two
 POSTs always were, and the cutover absorbs it.
 
+### The cause rides the seam, because the scope cannot (2026-08-10)
+
+**`announce` takes a fifth value now, `causationId`, and the domain modules hold the eventstream jar
+for the causation persistence trio.** `CausedRow`, `CausationStamp` and `@Uncaused` are three
+jakarta-persistence-shaped types with no publish, no subscribe and no wire in them, so the module
+boundary narrows from "the bus lives in `service/`" to **"the bus's SEAMS live in `service/`"**: no
+listener, no publisher, no `EventFrame`, no `QitsEventBus` and — deliberately — **no
+`CausationScope`** in `environments/` or `deployments/`.
+
+The scope is what forced the parameter. `CausationScope` is a plain ThreadLocal, and this whole
+component runs a build-succeeded event on `pd-deploy-worker`: the door's scope stands on the calling
+thread and is gone the instant the lambda runs elsewhere. Left to the `CausationStamp` listener,
+every row this component writes would record null — measured in qits-ci on the same day, a full
+trigger id beside an empty causation column. So each door reads the answer where it exists and
+states it:
+
+- `bus/PdBuildSuccessfulSubscriber` passes `frame.id()`, parsed leniently — an id that is not a UUID
+  costs the trace edge and nothing else. **Causation must never be able to refuse a green build.**
+- `api/PdEventController` passes `CausationScope.current()`, which `CausationServerFilter` restored
+  from the caller's `X-Qits-Causation-Id`. Null is a hand-made bootstrap POST: a rootless deployment,
+  which is a real answer rather than a gap.
+
+`ServiceCatalog.upsert` has the same pair for the same reason — `upsert(Upsert)` for the REST door,
+where the stamp works because nothing hops, and `upsert(Upsert, UUID)` that derived registration
+calls from the worker. **A new writer on a background thread states its cause as data or it records
+none**; `bus/PdCausationTest` drives `onFrame` from a scopeless thread precisely so a green
+assertion can only mean the explicit set happened.
+
+`ArchRulesTest` (qits-arch-rules, test scope) makes the decision mandatory: a new `@Entity` that
+neither implements `CausedRow` nor declares `@Uncaused` fails the build naming the class. It lives
+in `service/` because that is the only classpath carrying every entity of the component — both
+domain jars and anything this module adds. The domain modules pay no test cost for the jar: neither
+has a `@QuarkusTest`, so the eventstream persistence unit never boots there and only `service/`'s
+`EmbeddedPgConfigSource` owes it a database.
+
 ## Adding a dependency on another context
 
-Don't. This component depends on exactly two published qits jars — `qits-auth-core` and
-`qits-eventstream` — and both are **platform libraries rather than contexts**: shared machinery, no
-domain, no entity of anyone else's. It has no dependency on another *context* and should not grow
-one. Things arrive as an HTTP payload on the intake, as an event on the bus, as a URL in config, or
+Don't. This component depends on three published qits jars — `qits-auth-core`, `qits-eventstream`
+and `qits-arch-rules` (test scope) — and all three are **platform libraries rather than contexts**:
+shared machinery, no domain, no entity of anyone else's. It has no dependency on another *context*
+and should not grow one. Things arrive as an HTTP payload on the intake, as an event on the bus, as a URL in config, or
 not at all. Never add a JPA relation to another context's entity.
 
 **The bus does not change that, and the subscriber is written to keep it true.** qits-ci's
@@ -571,6 +606,20 @@ the catalogue says today.
 `environments/src/main/resources/db/platformdeployments/migration/`, hand-written, its own lineage on
 its own datasource — keep appending, never edit an applied migration. It lives in `environments/`
 because the component is one database; the module split is code, not storage.
+
+**`V2__causation.sql` is that rule being followed, and it is also what "one lineage" looks like in
+practice**: three `causation_id uuid` columns across two modules' tables in one file, because
+`pd_deployment` belongs to `deployments/` and its `create table` is already here. Nullable, no
+backfill, no index, and never a foreign key — the event it names lives in qits-events' store. The
+per-entity decisions, each argued in the entity's own javadoc and enforced by `ArchRulesTest`:
+
+| entity | decision | where the cause comes from |
+| --- | --- | --- |
+| `PdDeployment` | `CausedRow` | set explicitly in `DeployService.queue`/`recordRejection` — the whole feature, and the worker hop is why it is not stamped |
+| `PdEnvironment` | `CausedRow` | the stamp, from the REST filter's restored scope; a tier is created on the request thread with no hop |
+| `PdService` | `CausedRow` | explicit on the derived path, stamped on the operator's `PUT`. Created once and updated in place, which is what insert-only stamping is for |
+| `PdServiceLink` | `@Uncaused` | none. Every upsert deletes and re-inserts the row, so the column would record the last rewrite rather than a cause |
+| `PdResource` | `@Uncaused` | none. A converging registry entry rather than a record of an occurrence, and its other writer is boot self-registration with no event behind it |
 
 **The store is PostgreSQL, and the lineage restarted at V1 to say so.** The H2 lineage (V1 + V2) was
 deleted rather than continued, and that was a decision with one precondition: the migration onto
@@ -618,6 +667,12 @@ step rewrites exactly that element: `.config/qits/ci-event-upstream-auth-core.ym
 result onto a maintenance branch. A second spelling of either version anywhere would be left
 behind. A bump lands on a branch and not on main on purpose: a library release is not a decision to
 redeploy the deployer.
+
+**`qits-eventstream` sits in all three modules now**, and only `service/` uses it for the bus: the
+domain modules take it for the causation persistence trio, which is a narrowing of the boundary
+rather than a hole in it — see "The cause rides the seam". `qits-arch-rules` is a third published
+jar, test scope, in `service/` only; it is version-pinned by a property of its own and no release
+train step rewrites it.
 
 **`qits-eventstream` brings two extensions new to this deployable** — `quarkus-scheduler` (the
 outbox and catch-up sweeps) and `quarkus-websockets-next` (the stream client, which registers no

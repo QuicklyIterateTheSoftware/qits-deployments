@@ -324,9 +324,18 @@ public class DeployService implements BuildAnnouncements {
    * pointer from a deployment back to the build that caused it, and it is resolved against nothing
    * — a reader takes it to qits-ci. The triple that actually drives the deployment is (repoId,
    * branch, commitSha).
+   *
+   * <p><b>{@code causationId} is carried by value from here on, and that is the whole reason it is
+   * a parameter.</b> {@code CausationScope} is a ThreadLocal: the door's scope — the frame's for the
+   * bus, the request filter's restored one for the HTTP intake — stands on THIS thread and is gone
+   * the instant the lambda below runs somewhere else. So the cause travels the way {@code runId}
+   * always has, as data, and the rows this event writes set it explicitly rather than hoping a
+   * listener finds a scope that is not there. It is validated by nothing: an announcement is never
+   * refused over a trace column.
    */
   @Override
-  public void announce(String runId, String repoId, String branch, String commitSha) {
+  public void announce(
+      String runId, String repoId, String branch, String commitSha, UUID causationId) {
     DeploymentIdentifiers.requireRunId(runId);
     DeploymentIdentifiers.requireRepoId(repoId);
     PdIdentifiers.requireBranch(branch);
@@ -334,7 +343,7 @@ public class DeployService implements BuildAnnouncements {
     worker.submit(
         () -> {
           try {
-            deploy(runId, repoId, branch, commitSha);
+            deploy(runId, repoId, branch, commitSha, causationId);
           } catch (RuntimeException e) {
             LOG.errorf(
                 e, "The build-succeeded event for %s@%s could not be handled", repoId, commitSha);
@@ -374,7 +383,8 @@ public class DeployService implements BuildAnnouncements {
    * FAILED} deployment naming the cause, and a repository with nothing registered gets nothing,
    * exactly as an unknown repository always has.
    */
-  private void deploy(String runId, String repoId, String branch, String commitSha) {
+  private void deploy(
+      String runId, String repoId, String branch, String commitSha, UUID causationId) {
     DeploymentSpec spec = null;
     String failure = null;
     try {
@@ -390,7 +400,7 @@ public class DeployService implements BuildAnnouncements {
       targets = alreadyRegistered(repoId, branch);
     } else {
       try {
-        targets = register(runId, repoId, branch, commitSha, spec);
+        targets = register(runId, repoId, branch, commitSha, spec, causationId);
       } catch (RuntimeException e) {
         // Registration is a local transaction, so this is a bug rather than an outage — and a bug
         // here is exactly the shape that once cost an hour of silence: a fire-and-forget sender,
@@ -402,7 +412,7 @@ public class DeployService implements BuildAnnouncements {
       }
     }
 
-    List<String> queued = queue(runId, commitSha, targets);
+    List<String> queued = queue(runId, commitSha, targets, causationId);
     if (failure != null) {
       for (String deploymentId : queued) {
         finish(deploymentId, PdDeploymentStatus.FAILED, failure);
@@ -443,7 +453,12 @@ public class DeployService implements BuildAnnouncements {
    * The whole of derived registration.
    */
   private List<Target> register(
-      String runId, String repoId, String branch, String commitSha, DeploymentSpec spec) {
+      String runId,
+      String repoId,
+      String branch,
+      String commitSha,
+      DeploymentSpec spec,
+      UUID causationId) {
     if (!isDeployableName(repoId)) {
       // The application name is the image path segment and the network alias, so it has to be a
       // dns label. A repository whose id is not one cannot be deployed by convention at all, and
@@ -453,8 +468,8 @@ public class DeployService implements BuildAnnouncements {
     }
     Optional<LinkedService> known = findService(repoId);
     return spec.target() == PdDeploymentTarget.PLATFORM
-        ? registerPlatform(repoId, branch, spec, known)
-        : registerInEnvironments(runId, repoId, branch, commitSha, spec, known);
+        ? registerPlatform(repoId, branch, spec, known, causationId)
+        : registerInEnvironments(runId, repoId, branch, commitSha, spec, known, causationId);
   }
 
   /**
@@ -479,7 +494,8 @@ public class DeployService implements BuildAnnouncements {
       String branch,
       String commitSha,
       DeploymentSpec spec,
-      Optional<LinkedService> known) {
+      Optional<LinkedService> known,
+      UUID causationId) {
     if (known.filter(s -> s.service().deploymentTarget == PdDeploymentTarget.PLATFORM).isPresent()) {
       LOG.errorf(
           "%s is registered as a platform service and its deployments.yml now asks for"
@@ -496,7 +512,8 @@ public class DeployService implements BuildAnnouncements {
               + " An environment application converts into a platform service, never the reverse —"
               + " there is no one environment to inherit the history and the running platform"
               + " container would be removed by the first environment deployment. Retire the"
-              + " platform service deliberately, then push again.]");
+              + " platform service deliberately, then push again.]",
+          causationId);
       return List.of();
     }
 
@@ -525,7 +542,8 @@ public class DeployService implements BuildAnnouncements {
             null, // an environment application takes its branch from its tier
             spec.availableOnEnv(),
             healthPath,
-            List.copyOf(links)));
+            List.copyOf(links)),
+        causationId);
 
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : matching) {
@@ -576,7 +594,11 @@ public class DeployService implements BuildAnnouncements {
    * turn, and it is why a second environment is now an ordinary thing to create.
    */
   private List<Target> registerPlatform(
-      String repoId, String branch, DeploymentSpec spec, Optional<LinkedService> known) {
+      String repoId,
+      String branch,
+      DeploymentSpec spec,
+      Optional<LinkedService> known,
+      UUID causationId) {
     if (tiersOnBranch(branch).stream().noneMatch(environment -> environment.platform)) {
       return List.of();
     }
@@ -593,7 +615,8 @@ public class DeployService implements BuildAnnouncements {
             null, // the deploy refs are the environments' now — see PdService.branch
             false,
             healthPath,
-            List.of()));
+            List.of()),
+        causationId);
 
     QuarkusTransaction.requiringNew()
         .run(
@@ -674,12 +697,14 @@ public class DeployService implements BuildAnnouncements {
    * intake is fire-and-forget, so the row is the only surface a refusal can surface on.
    */
   private void recordRejection(
-      String applicationName, String runId, String commitSha, String detail) {
+      String applicationName, String runId, String commitSha, String detail, UUID causationId) {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
               PdDeployment rejected = new PdDeployment();
               rejected.id = UUID.randomUUID().toString();
+              // See queue(): the stamp finds no scope on this thread, so the cause is set here.
+              rejected.causationId = causationId;
               rejected.applicationName = applicationName;
               rejected.environmentId = null;
               rejected.commitSha = commitSha;
@@ -752,7 +777,8 @@ public class DeployService implements BuildAnnouncements {
    * AFTER a container is already running, where dropping the work leaves a live container with no
    * row that admits it.
    */
-  private List<String> queue(String runId, String commitSha, List<Target> targets) {
+  private List<String> queue(
+      String runId, String commitSha, List<Target> targets, UUID causationId) {
     if (targets.isEmpty()) {
       return List.of();
     }
@@ -763,6 +789,12 @@ public class DeployService implements BuildAnnouncements {
               for (Target target : targets) {
                 PdDeployment deployment = new PdDeployment();
                 deployment.id = UUID.randomUUID().toString();
+                // The generic causation column, set EXPLICITLY. This runs on pd-deploy-worker,
+                // behind the queue hop the intake made: CausationScope does not follow work, so
+                // CausationStamp would read null here and record a decision nobody made. An
+                // author-set value is what the stamp yields to. Every row of one event shares it —
+                // one build going green is one cause, however many tiers it fans out over.
+                deployment.causationId = causationId;
                 deployment.applicationName = target.applicationName();
                 deployment.environmentId = target.environmentId();
                 deployment.commitSha = commitSha;

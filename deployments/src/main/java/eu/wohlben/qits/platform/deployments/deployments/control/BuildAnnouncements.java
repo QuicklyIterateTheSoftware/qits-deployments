@@ -1,5 +1,7 @@
 package eu.wohlben.qits.platform.deployments.deployments.control;
 
+import java.util.UUID;
+
 /**
  * How a green build reaches the deploy orchestration. One method, implemented by {@link
  * DeployService}, called by whatever door the announcement came through.
@@ -31,6 +33,16 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
  *
  * <p>Whichever door delivers it, the triple that drives the deployment is {@code (repoId, branch,
  * commitSha)} and the run id is a pointer nothing resolves.
+ *
+ * <p><b>The one thing that has changed here, and why it had to.</b> The signature carries a fifth
+ * value now, {@code causationId} — the event this announcement is the effect of, recorded on every
+ * row it produces ({@code PdDeployment.causationId}). It is a parameter rather than something the
+ * far side reads off an ambient scope, because everything downstream runs on {@code
+ * pd-deploy-worker} and an executor hop is exactly where {@code CausationScope} — a plain
+ * ThreadLocal — dies. Each door knows the answer on its own thread and states it: the subscriber
+ * passes the frame's id, the HTTP intake passes the scope the causation filter restored from the
+ * caller's header. A plain {@code UUID} keeps the domain modules holding no bus type but the
+ * persistence trio.
  */
 public interface BuildAnnouncements {
 
@@ -41,8 +53,12 @@ public interface BuildAnnouncements {
    * from its handler rather than wait: it is holding the claim transaction open while it does.
    *
    * @param runId the qits-ci run that produced the image, optional and resolved against nothing
+   * @param causationId the event this announcement is the effect of, recorded on every row it
+   *     produces. Null is a rootless announcement — a bootstrap's hand-made POST — and never a
+   *     reason to refuse one: causation is advisory and a deployment must not fail over a column
+   *     only the trace graph reads.
    * @throws eu.wohlben.qits.platform.deployments.environments.error.BadRequestException if any of
    *     the identifiers could escape an argv or overrun its column
    */
-  void announce(String runId, String repoId, String branch, String commitSha);
+  void announce(String runId, String repoId, String branch, String commitSha, UUID causationId);
 }

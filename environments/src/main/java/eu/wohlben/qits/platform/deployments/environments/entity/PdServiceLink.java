@@ -1,5 +1,6 @@
 package eu.wohlben.qits.platform.deployments.environments.entity;
 
+import eu.wohlben.qits.eventstream.Uncaused;
 import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -27,8 +28,16 @@ import java.time.Instant;
  * <p>The link set of an environment service is <b>replaced</b> on every upsert, never merged. The
  * writer knows the whole set (it read the repository's own spec); a merge would keep a link to an
  * environment the repository has stopped naming, and nothing would ever remove it.
+ *
+ * <p><b>{@code @Uncaused} by decision, and the replace-never-merge rule above is the reason.</b>
+ * Every upsert deletes this row and inserts it again, so a causation column here would not record
+ * what caused the link to exist — it would record the most recent build that restated it, an
+ * update timestamp wearing a trace column's name. The two questions worth asking are answered next
+ * door: {@link PdService} carries the event that put the service in the catalogue, and each {@code
+ * PdDeployment} carries the event that rolled it out.
  */
 @Entity
+@Uncaused
 @Table(
     name = "pd_service_link",
     uniqueConstraints =

@@ -1,0 +1,31 @@
+-- The platform's generic causation column (qits-eventstream's CausedRow): the id of the event a row
+-- was written because of, so tracing walks from a table back into the chain.
+--
+-- ONE MIGRATION FOR THREE TABLES ACROSS TWO MODULES, and that is this repository's shape rather
+-- than a shortcut: the component is one database with ONE Flyway lineage, and `environments` owns
+-- it for both domains (see its pom.xml and V1's header). pd_deployment is the `deployments`
+-- module's table and its column is declared here for the same reason its `create table` is.
+--
+-- Nullable everywhere, never a foreign key, and part of no constraint. The event it names lives in
+-- qits-events' store — another service's database — which is the same reason application_name,
+-- environment_name and run_id are bare strings here. NO BACKFILL AND NO INDEX: every existing row
+-- predates the column and honestly has no cause to record, and nothing queries on it yet.
+--
+-- Which rows get one, and why the other two tables do not:
+--   * pd_deployment  — the point of the whole feature. A deployment exists because a build went
+--     green, so the row names the BuildSuccessful that caused it. The value is set EXPLICITLY in
+--     DeployService, not by the CausationStamp listener: the intake hands the event to
+--     pd-deploy-worker and an executor hop is where an ambient CausationScope dies.
+--   * pd_environment — a tier is created on the request thread with no hop in between, so the
+--     stamp fills it from the REST filter's restored scope. Null for an operator's bare curl,
+--     which is a rootless row and the right answer.
+--   * pd_service     — created once, by the green build that first registered the repository, and
+--     updated in place forever after. Set explicitly on the derived path (the worker again),
+--     stamped on the operator's PUT.
+--   * pd_service_link is @Uncaused: its rows are deleted and re-inserted on every upsert, so the
+--     column would record the last rewrite rather than a cause.
+--   * pd_resource is @Uncaused: a converging registry entry for a database that exists, whose other
+--     writer is boot self-registration with no event behind it at all.
+alter table pd_deployment add column causation_id uuid;
+alter table pd_environment add column causation_id uuid;
+alter table pd_service add column causation_id uuid;

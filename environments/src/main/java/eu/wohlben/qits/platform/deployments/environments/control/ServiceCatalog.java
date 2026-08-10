@@ -113,7 +113,23 @@ public class ServiceCatalog {
    * @throws NotFoundException if an environment id names no environment
    * @throws ConflictException on a platform → environment flip
    */
-  public synchronized UpsertResult upsert(Upsert request) {
+  public UpsertResult upsert(Upsert request) {
+    // The REST door. No hop stands between the request thread and the insert below, so the
+    // CausationStamp listener fills PdService.causationId from the scope CausationServerFilter
+    // restored — passing a value here would only overwrite a better one with nothing.
+    return upsert(request, null);
+  }
+
+  /**
+   * The same upsert, stating the cause as data.
+   *
+   * <p>For derived registration only, and it exists because that caller stands on {@code
+   * pd-deploy-worker}: the announcement crossed an executor hop to get there and {@code
+   * CausationScope} — a ThreadLocal — did not follow it, so the stamp would write null on the one
+   * row where the answer is actually known. {@code null} means "let the stamp decide", which is
+   * what the four-argument form above passes.
+   */
+  public synchronized UpsertResult upsert(Upsert request, UUID causationId) {
     String name = PdIdentifiers.requireName(request.name(), "service name");
     PdDeploymentTarget target = request.target();
     if (target == null) {
@@ -163,6 +179,11 @@ public class ServiceCatalog {
                 service = new PdService();
                 service.id = UUID.randomUUID().toString();
                 service.name = name;
+                // Only on the insert, and only ever the insert: the column answers "which event
+                // put this service in the catalogue", and every later upsert is an update of a row
+                // that already has its answer. Null leaves the stamp to fill it from the scope of
+                // whatever thread is calling — see the two entry points above.
+                service.causationId = causationId;
                 service.createdAt = Instant.now();
                 services.persist(service);
               } else if (service.deploymentTarget == PdDeploymentTarget.ENVIRONMENT

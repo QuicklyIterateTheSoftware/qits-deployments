@@ -71,6 +71,15 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
+            <!-- The causation persistence trio ONLY — CausedRow and CausationStamp on
+                 PdEnvironment and PdService, @Uncaused on PdServiceLink. Three
+                 jakarta-persistence-shaped types with no publish, no subscribe and no wire in
+                 them; the bus itself stays in `service/`. This module has no @QuarkusTest, so the
+                 jar's persistence unit never boots here and its suite owes it no database. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>

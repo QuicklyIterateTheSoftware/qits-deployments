@@ -59,6 +59,16 @@
             <artifactId>quarkus-hibernate-validator</artifactId>
         </dependency>
         <dependency>
+            <!-- The causation persistence trio ONLY — CausedRow and CausationStamp on
+                 PdDeployment, @Uncaused on PdResource. No listener, no publisher, no EventFrame
+                 and no CausationScope: the cause crosses the worker hop as a plain UUID on
+                 BuildAnnouncements.announce, because an executor hop is exactly where an ambient
+                 scope dies. This module has no @QuarkusTest, so the jar's persistence unit never
+                 boots here and its suite owes it no database. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>
