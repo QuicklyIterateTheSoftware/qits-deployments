@@ -1,5 +1,6 @@
 package eu.wohlben.qits.platform.deployments.environments.control;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdEnvironment;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdService;
@@ -13,6 +14,7 @@ import eu.wohlben.qits.platform.deployments.environments.persistence.PdServiceRe
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -53,6 +56,14 @@ public class ServiceCatalog {
   @Inject PdServiceRepository services;
   @Inject PdServiceLinkRepository links;
   @Inject PdEnvironmentRepository environments;
+
+  /**
+   * How long the REST door's upsert may be held while the database comes back — the request-path
+   * deadline the read surface spends, for the same caller. See {@link #upsert(Upsert)}, which is the
+   * only method here that spends it.
+   */
+  @ConfigProperty(name = "qits.platform.deployments.db-retry-deadline")
+  Duration writeDeadline;
 
   /**
    * What an upsert states. {@code branch} is <b>vestigial</b> — nothing decides a deployment on it
@@ -117,7 +128,26 @@ public class ServiceCatalog {
     // The REST door. No hop stands between the request thread and the insert below, so the
     // CausationStamp listener fills PdService.causationId from the scope CausationServerFilter
     // restored — passing a value here would only overwrite a better one with nothing.
-    return upsert(request, null);
+    //
+    // IT IS ALSO WHERE THE PATIENCE GOES, and this door is the only place it fits. The write below
+    // is `synchronized`, so a retry INSIDE it would sleep holding the catalogue's monitor — the one
+    // placement the platform's db-patience rules forbid. Wrapped here, each attempt takes the lock
+    // and releases it, and the pause between attempts holds nothing.
+    //
+    // `call` rather than `inNewTx`, and the difference is the transaction boundary. `inNewTx` is
+    // for a write whose safety comes from the retry OWNING that boundary; this write's boundary has
+    // to stay inside the monitor, because the lock is what makes "is there a row for this name yet,
+    // and if not make one" atomic — a commit outside it would let two callers both read "no row".
+    // What makes a second attempt safe here is the write's own shape instead: an upsert by name
+    // converges. Re-running it finds the row the lost attempt may have written and updates it to
+    // exactly the same values, so the effect is once whatever happened to the first attempt. That
+    // judgement belongs at a call site, and this is the call site.
+    //
+    // The worker's door below is deliberately NOT wrapped: derived registration runs before
+    // anything docker-side has happened, where losing an event leaves nothing half-done — the same
+    // rule that leaves `queue` and `recordRejection` bare. See DeployService.
+    return DbRetry.call(
+        "The registration of service " + request.name(), () -> upsert(request, null), writeDeadline);
   }
 
   /**

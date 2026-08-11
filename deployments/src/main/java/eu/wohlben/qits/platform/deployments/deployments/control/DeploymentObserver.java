@@ -6,7 +6,6 @@ import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
-import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Instant;
@@ -71,9 +70,10 @@ import org.jboss.logging.Logger;
  * DeployService}, which is the whole reason it can read these rows at all without racing a cutover —
  * see that class for the collapse rule. Its own shape follows the worker's: read the candidates in
  * one transaction, copy them out as plain values, ask docker outside any transaction, then write each
- * settled row in its own {@link DbRetry}-wrapped bracket. Retried for the same reason the cutover
- * bookkeeping is: this is bookkeeping that runs <i>after</i> a container is running, and one day it
- * will run during a postgres self-cutover.
+ * settled row in its own bracket. Every one of those brackets is a {@link DbRetry#inNewTx} — the
+ * retry owns the transaction, so it retries only attempts that certainly did not commit. Retried for
+ * the same reason the cutover bookkeeping is: this is bookkeeping that runs <i>after</i> a container
+ * is running, and one day it will run during a postgres self-cutover.
  */
 @ApplicationScoped
 public class DeploymentObserver {
@@ -117,10 +117,8 @@ public class DeploymentObserver {
    */
   void observeOnce() {
     List<Candidate> candidates =
-        DbRetry.call(
-            "The observation pass's candidate read",
-            () -> QuarkusTransaction.requiringNew().call(this::candidates),
-            CUTOVER_BUDGET);
+        DbRetry.inNewTx(
+            "The observation pass's candidate read", this::candidates, CUTOVER_BUDGET);
     Set<String> seen = new HashSet<>();
     for (Candidate candidate : candidates) {
       seen.add(candidate.deploymentId());
@@ -191,32 +189,34 @@ public class DeploymentObserver {
   private void recover(Candidate candidate, HealthGate.Poll observed) {
     Instant at = Instant.now();
     List<String> retired =
-        DbRetry.call(
+        DbRetry.inNewTx(
             "The observed recovery of deployment " + candidate.deploymentId(),
-            () ->
-                QuarkusTransaction.requiringNew()
-                    .call(
-                        () -> {
-                          PdDeployment row = deployments.findById(candidate.deploymentId());
-                          if (row == null || row.status != PdDeploymentStatus.FAILED) {
-                            return List.<String>of(); // deleted, or already settled by a deployment
-                          }
-                          List<String> stale = new ArrayList<>();
-                          for (PdDeployment previous :
-                              deployments.listActiveByApplication(
-                                  candidate.applicationName(), candidate.environmentId())) {
-                            if (previous.id.equals(row.id)) {
-                              continue;
-                            }
-                            previous.status = PdDeploymentStatus.DECOMMISSIONED;
-                            previous.finishedAt = at;
-                            stale.add(previous.id);
-                          }
-                          row.status = PdDeploymentStatus.ACTIVE;
-                          row.detail = recoveryDetail(candidate, observed, at);
-                          row.finishedAt = at;
-                          return List.copyOf(stale);
-                        }),
+            () -> {
+              PdDeployment row = deployments.findById(candidate.deploymentId());
+              if (row == null || row.status != PdDeploymentStatus.FAILED) {
+                return List.<String>of(); // deleted, or already settled by a deployment
+              }
+              List<String> stale = new ArrayList<>();
+              for (PdDeployment previous :
+                  deployments.listActiveByApplication(
+                      candidate.applicationName(), candidate.environmentId())) {
+                if (previous.id.equals(row.id)) {
+                  continue;
+                }
+                previous.status = PdDeploymentStatus.DECOMMISSIONED;
+                previous.finishedAt = at;
+                stale.add(previous.id);
+              }
+              row.status = PdDeploymentStatus.ACTIVE;
+              row.detail = recoveryDetail(candidate, observed, at);
+              row.finishedAt = at;
+              // Flushed rather than left to the commit: an ORM flushes at commit by default, which
+              // would put these statements on the far side of the one round trip nothing can place.
+              // Flushed, a lost connection is a body failure — certainly not committed, so safe to
+              // run again.
+              deployments.flush();
+              return List.copyOf(stale);
+            },
             CUTOVER_BUDGET);
     LOG.infof(
         "Recovered deployment %s by observation: %s is %s, so the row that said FAILED was wrong%s",
@@ -229,20 +229,18 @@ public class DeploymentObserver {
   /** An {@code ACTIVE} row whose container two passes agree is gone. */
   private void demote(Candidate candidate, HealthGate.Poll observed) {
     Instant at = Instant.now();
-    DbRetry.run(
+    DbRetry.runInNewTx(
         "The observed failure of deployment " + candidate.deploymentId(),
-        () ->
-            QuarkusTransaction.requiringNew()
-                .run(
-                    () -> {
-                      PdDeployment row = deployments.findById(candidate.deploymentId());
-                      if (row == null || row.status != PdDeploymentStatus.ACTIVE) {
-                        return; // deleted, or replaced by a deployment while this pass ran
-                      }
-                      row.status = PdDeploymentStatus.FAILED;
-                      row.detail = failureDetail(candidate, observed, at);
-                      row.finishedAt = at;
-                    }),
+        () -> {
+          PdDeployment row = deployments.findById(candidate.deploymentId());
+          if (row == null || row.status != PdDeploymentStatus.ACTIVE) {
+            return; // deleted, or replaced by a deployment while this pass ran
+          }
+          row.status = PdDeploymentStatus.FAILED;
+          row.detail = failureDetail(candidate, observed, at);
+          row.finishedAt = at;
+          deployments.flush(); // statement phase, so a lost connection is retriable — see recover()
+        },
         CUTOVER_BUDGET);
     LOG.warnf(
         "Deployment %s was ACTIVE, but %s is %s on %d consecutive observations — recorded FAILED."

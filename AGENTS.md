@@ -173,6 +173,24 @@ as `DeployService.CUTOVER_BUDGET` (package-private, because `DeploymentObserver`
 for the same reason and one budget spelled twice would drift). The lib's own suite pins every failure
 shape this component ever saw, which is why the local `DbRetryTest` went with the local class.
 
+**It has two spellings and the choice is not a style one — it is who owns the transaction.**
+`DbRetry.call` wraps a block; `DbRetry.inNewTx`/`runInNewTx` **is** the `requiringNew`. Owning the
+boundary is what lets the retry tell "the body threw it, so it certainly never committed" from
+"the transaction manager reported it", which is the one round trip nothing can place — Narayana
+spells a lost commit and a real rollback with the same `RollbackException`, measured. So:
+
+- a **read** bracketed by the callee (`catalog.find`, `environments.onBranch`) keeps `call`;
+- a **write** that used to read `DbRetry.call(…, () -> requiringNew().call(…))` is now `inNewTx`
+  with the `requiringNew` gone — the worker's cutover bookkeeping and `finish`, and all three of
+  `DeploymentObserver`'s brackets;
+- and each of those bodies ends with a `flush()`. An ORM flushes at commit by default, which would
+  put every statement on the far side of the undecidable round trip; flushed, a lost connection is a
+  body failure and is retried. Without the flush the wrap reports rather than helps.
+
+`DbRetry.call` around a write survives in exactly one place, `ServiceCatalog.upsert`, and its
+javadoc argues why: the boundary there has to stay inside a `synchronized`, so what makes a second
+attempt safe is the write's own converging shape rather than the retry's knowledge.
+
 **It is the second half of a pair, and the first half is the pool.** The datasource carries the
 platform's three-line baseline — `jdbc.driver=eu.wohlben.qits.db.PatientPgDriver`,
 `validate-on-borrow=true`, `acquisition-timeout=15S` — so a connection request is held while postgres
@@ -194,7 +212,7 @@ one visible failure turned into a slow one.
 spends `qits.platform.deployments.db-retry-deadline` — 15S shipped, not the worker's 30 — on every
 read of this surface: the service listing, the applications, the environment listing and aggregate,
 the link query, and the deployment listing's tier check. **A new read endpoint joins it in the
-commit that adds it; no write ever does.**
+commit that adds it; no write ever joins it** — a write's patience lives one layer down, below.
 
 It is a bean the controllers call rather than a wrap inside `ServiceCatalog`/`EnvironmentService`,
 and the reason is that those reads have callers that must not sleep. `ServiceCatalog.delete` calls
@@ -206,6 +224,24 @@ would nest one budget in the other. (`ServiceCatalog.upsert` is `synchronized` a
 write and no read shares its monitor.) `PdReadPatienceTest` holds both halves — recovered after one
 lost connection, still a 500 when the database stays gone — off a stand-in repository installed with
 `QuarkusMock`, under `DbPatienceShortProfile` so the deadline is reachable in a suite.
+
+**The request-path WRITES are patient too, and their wrap is in the SERVICE — because it has to be
+the transaction.** `inNewTx` only knows an attempt never committed if it owns the boundary, and the
+boundary is in `EnvironmentService`, not in a controller. So `create`, `update` and `delete` each
+*are* a `DbRetry.inNewTx` spending the same `db-retry-deadline` the reads do (a request thread, not
+the worker's 30S), with validation left outside it — a rejected name is not worth a second attempt —
+and a `flush()` as the body's last statement. `PdWritePatienceTest` holds both halves: an insert
+whose connection dies *after* it ran lands **exactly once** on the second attempt, and a failure
+that is not the connection is reported on the first.
+
+`ServiceCatalog.upsert` is the one write wrapped from outside instead, and the two reasons are worth
+keeping straight. It is `synchronized`, and a retry inside would sleep holding the catalogue's
+monitor; the monitor has to enclose the commit, because the lock is what makes "is there a row for
+this name yet" atomic. So the wrap sits on the REST door — the non-`synchronized` `upsert(Upsert)`
+that already exists for causation — and it is `DbRetry.call`, safe because an upsert by name
+converges rather than because the retry knows anything. **The worker's door `upsert(Upsert, UUID)`
+stays bare**, with `queue`, `recordRejection` and the rest of derived registration: all of it runs
+before anything docker-side has happened, where losing an event leaves nothing half-done.
 
 ## The observer: the second half of the eaa34fbc story
 

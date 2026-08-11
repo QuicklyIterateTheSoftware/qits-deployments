@@ -1,5 +1,6 @@
 package eu.wohlben.qits.platform.deployments.environments.control;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdEnvironment;
 import eu.wohlben.qits.platform.deployments.environments.error.ConflictException;
 import eu.wohlben.qits.platform.deployments.environments.error.NotFoundException;
@@ -8,10 +9,12 @@ import eu.wohlben.qits.platform.deployments.environments.persistence.PdServiceLi
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -29,9 +32,10 @@ import org.jboss.logging.Logger;
  * be reasoned about — and tested — without a docker seam in front of it, and it is why the
  * dependency runs one way.
  *
- * <p>Transactions are programmatic ({@link QuarkusTransaction#requiringNew()}, the platform's
- * stance) rather than {@code @Transactional}, because the bracket then cannot be lost to a
- * self-invocation that never crosses the interceptor.
+ * <p>Transactions are programmatic (the platform's stance) rather than {@code @Transactional},
+ * because the bracket then cannot be lost to a self-invocation that never crosses the interceptor.
+ * The reads take {@link QuarkusTransaction#joiningExisting()}; <b>the three writes take {@link
+ * DbRetry#inNewTx}, which IS their {@code requiringNew}</b> — see {@link #writeDeadline}.
  */
 @ApplicationScoped
 public class EnvironmentService {
@@ -52,10 +56,30 @@ public class EnvironmentService {
   @Inject PdServiceLinkRepository links;
 
   /**
+   * How long a tier write may be held while the database comes back — the same key the read surface
+   * spends ({@code PdReadPatience}, 15S shipped), because these three have the same caller: a person
+   * or a client holding an HTTP request open, on a thread inside no transaction and no monitor.
+   *
+   * <p>Not the deploy worker's thirty seconds. That budget belongs to a worker waiting out an
+   * outage it caused itself, and it is explicitly not for a request thread.
+   *
+   * <p>No {@code defaultValue}, for the reason {@code PdReadPatience} has none: the shipped value is
+   * one line in the deployable's {@code application.properties}, so there is one spelling of it.
+   */
+  @ConfigProperty(name = "qits.platform.deployments.db-retry-deadline")
+  Duration writeDeadline;
+
+  /**
    * {@code branch} and {@code network} are optional; each omitted one takes its convention.
    *
    * <p>{@code platform} designates this tier as the one the platform plane deploys from, and
    * designating is a <b>move</b> — see {@link #designate}.
+   *
+   * <p><b>Held through a short database outage</b> ({@link DbRetry#inNewTx}, {@link
+   * #writeDeadline}). The retry owns the transaction, so it repeats only an attempt that certainly
+   * did not commit — which is what makes retrying an insert safe at all, and it is why the body ends
+   * with a {@code flush()}. Validation runs outside it: a rejected name is not worth a second
+   * attempt, and a {@code ConflictException} is rethrown at once like every other business failure.
    */
   public PdEnvironment create(String name, String branch, String network, boolean platform) {
     PdIdentifiers.requireName(name, "environment name");
@@ -66,33 +90,38 @@ public class EnvironmentService {
             ? PdNetworks.bundle(name)
             : PdIdentifiers.requireName(network, "network name");
 
-    return QuarkusTransaction.requiringNew()
-        .call(
-            () -> {
-              if (environments.findByName(name).isPresent()) {
-                throw new ConflictException("Environment already exists: " + name);
-              }
-              PdEnvironment environment = new PdEnvironment();
-              environment.id = UUID.randomUUID().toString();
-              environment.name = name;
-              environment.branch = effectiveBranch;
-              environment.network = effectiveNetwork;
-              environment.platform = platform;
-              environment.createdAt = Instant.now();
-              environments.persist(environment);
-              if (platform) {
-                designate(environment);
-              } else if (environments.listPlatform().isEmpty()) {
-                // Silent otherwise, and the silence is the problem: a platform service's green
-                // build would register nothing and report no error, because "no tier is the
-                // platform one" and "this branch is not the platform tier's" are the same answer.
-                LOG.warnf(
-                    "Created environment %s and no environment is the platform one — until one is"
-                        + " designated, a green build of a platform service deploys nowhere",
-                    name);
-              }
-              return environment;
-            });
+    return DbRetry.inNewTx(
+        "The creation of environment " + name,
+        () -> {
+          if (environments.findByName(name).isPresent()) {
+            throw new ConflictException("Environment already exists: " + name);
+          }
+          PdEnvironment environment = new PdEnvironment();
+          environment.id = UUID.randomUUID().toString();
+          environment.name = name;
+          environment.branch = effectiveBranch;
+          environment.network = effectiveNetwork;
+          environment.platform = platform;
+          environment.createdAt = Instant.now();
+          environments.persist(environment);
+          if (platform) {
+            designate(environment);
+          } else if (environments.listPlatform().isEmpty()) {
+            // Silent otherwise, and the silence is the problem: a platform service's green
+            // build would register nothing and report no error, because "no tier is the
+            // platform one" and "this branch is not the platform tier's" are the same answer.
+            LOG.warnf(
+                "Created environment %s and no environment is the platform one — until one is"
+                    + " designated, a green build of a platform service deploys nowhere",
+                name);
+          }
+          // Last statement, and it is load-bearing: an ORM flushes at commit by default, which
+          // would put this insert on the far side of the one round trip nothing can place.
+          // Flushed, a lost connection here is certainly a no-commit and is retried.
+          environments.flush();
+          return environment;
+        },
+        writeDeadline);
   }
 
   /**
@@ -110,34 +139,38 @@ public class EnvironmentService {
    * history and stays so. What a rename does change is the names the <em>next</em> deployment
    * derives ({@code qits-env-<env>-<app>}); what runs now keeps the networks it is on until its own
    * next deploy moves it.
+   *
+   * <p>Held through a short database outage, exactly as {@link #create} is.
    */
   public PdEnvironment update(
       String environmentId, String name, String branch, Boolean platform) {
     String newName = isBlank(name) ? null : PdIdentifiers.requireName(name, "environment name");
     String newBranch = isBlank(branch) ? null : PdIdentifiers.requireBranch(branch);
-    return QuarkusTransaction.requiringNew()
-        .call(
-            () -> {
-              PdEnvironment environment = require(environmentId);
-              if (newName != null && !newName.equals(environment.name)) {
-                if (environments.findByName(newName).isPresent()) {
-                  throw new ConflictException("Environment already exists: " + newName);
-                }
-                environment.name = newName;
-              }
-              if (newBranch != null) {
-                environment.branch = newBranch;
-              }
-              if (Boolean.TRUE.equals(platform)) {
-                designate(environment);
-              } else if (Boolean.FALSE.equals(platform) && environment.platform) {
-                throw new ConflictException(
-                    "The platform environment cannot be cleared, only moved: designate another"
-                        + " environment instead of undesignating "
-                        + environment.name);
-              }
-              return environment;
-            });
+    return DbRetry.inNewTx(
+        "The update of environment " + environmentId,
+        () -> {
+          PdEnvironment environment = require(environmentId);
+          if (newName != null && !newName.equals(environment.name)) {
+            if (environments.findByName(newName).isPresent()) {
+              throw new ConflictException("Environment already exists: " + newName);
+            }
+            environment.name = newName;
+          }
+          if (newBranch != null) {
+            environment.branch = newBranch;
+          }
+          if (Boolean.TRUE.equals(platform)) {
+            designate(environment);
+          } else if (Boolean.FALSE.equals(platform) && environment.platform) {
+            throw new ConflictException(
+                "The platform environment cannot be cleared, only moved: designate another"
+                    + " environment instead of undesignating "
+                    + environment.name);
+          }
+          environments.flush(); // statement phase, so a lost connection is retriable
+          return environment;
+        },
+        writeDeadline);
   }
 
   /**
@@ -177,16 +210,18 @@ public class EnvironmentService {
    *
    * <p>The containers and the networks are torn down by the execution domain <em>before</em> this
    * is called — {@code EnvironmentOperations.delete} owns that order, and the order is the
-   * contract.
+   * contract. That is also why this one is worth holding through an outage: the docker half has
+   * already happened, so a lost row leaves a tier that exists in the topology and nowhere else.
    */
   public void delete(String environmentId) {
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              require(environmentId);
-              links.deleteByEnvironment(environmentId);
-              environments.deleteById(environmentId);
-            });
+    DbRetry.runInNewTx(
+        "The removal of environment " + environmentId,
+        () -> {
+          require(environmentId);
+          links.deleteByEnvironment(environmentId);
+          environments.deleteById(environmentId);
+        },
+        writeDeadline);
   }
 
   /**

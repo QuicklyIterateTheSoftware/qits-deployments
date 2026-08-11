@@ -73,6 +73,12 @@ import org.jboss.logging.Logger;
  * failures only, and {@link #CUTOVER_BUDGET} only — the rest of the brackets are deliberately left
  * alone, and {@link #queue} says why.
  *
+ * <p><b>Which of the two spellings each one takes is decided by who owns the transaction.</b> The
+ * catalogue read is a {@link DbRetry#call} around a read that brackets itself; the two writes are
+ * {@link DbRetry#inNewTx}, which <i>is</i> the {@code requiringNew} — the retry owning the boundary
+ * is what lets it retry only attempts that certainly did not commit, and leaves the one undecidable
+ * round trip (the commit acknowledgement) reported rather than repeated.
+ *
  * <p><b>The cutover invariant:</b> the previous container is only <i>stopped</i> during the gate and
  * is removed only after the new one passed it; a failed deployment — image missing, docker refused,
  * health gate expired — removes the fresh container and restarts what was stopped, so the previous
@@ -1097,28 +1103,35 @@ public class DeployService implements BuildAnnouncements {
     // the deployment that just performed it. The container was healthy; only the bookkeeping died,
     // and it recorded the whole deployment FAILED for it. Re-running the bracket is safe because it
     // re-reads its entities and writes them the same values.
+    //
+    // `inNewTx` rather than `call` around a `requiringNew`: the retry owns the transaction, so an
+    // attempt that fails is one it knows never committed. The two spelled separately would retry a
+    // lost commit acknowledgement as well, which is the one round trip nothing can place.
     List<String> oldContainers =
-        DbRetry.call(
+        DbRetry.inNewTx(
             "The cutover bookkeeping of " + deploymentId,
-            () ->
-                QuarkusTransaction.requiringNew()
-                    .call(
-                        () -> {
-                          List<String> old = new ArrayList<>();
-                          for (PdDeployment previous :
-                              deployments.listActiveByApplication(
-                                  plan.applicationName(), plan.environmentId())) {
-                            previous.status = PdDeploymentStatus.DECOMMISSIONED;
-                            previous.finishedAt = Instant.now();
-                            if (previous.containerName != null) {
-                              old.add(previous.containerName);
-                            }
-                          }
-                          PdDeployment deployment = deployments.findById(deploymentId);
-                          deployment.status = PdDeploymentStatus.ACTIVE;
-                          deployment.finishedAt = Instant.now();
-                          return old;
-                        }),
+            () -> {
+              List<String> old = new ArrayList<>();
+              for (PdDeployment previous :
+                  deployments.listActiveByApplication(
+                      plan.applicationName(), plan.environmentId())) {
+                previous.status = PdDeploymentStatus.DECOMMISSIONED;
+                previous.finishedAt = Instant.now();
+                if (previous.containerName != null) {
+                  old.add(previous.containerName);
+                }
+              }
+              PdDeployment deployment = deployments.findById(deploymentId);
+              deployment.status = PdDeploymentStatus.ACTIVE;
+              deployment.finishedAt = Instant.now();
+              // Flushed here rather than left to the commit, and that is what makes the retry
+              // above worth having: an ORM flushes at commit by default, which would put these
+              // statements on the far side of the one round trip nothing can place. Flushed, a
+              // lost connection is a body failure — certainly not committed, so certainly safe to
+              // run again.
+              deployments.flush();
+              return old;
+            },
             CUTOVER_BUDGET);
     Set<String> toRemove = new LinkedHashSet<>(oldContainers);
     for (DeploymentDriver.Holder predecessor : predecessors) {
@@ -1302,20 +1315,18 @@ public class DeployService implements BuildAnnouncements {
    * it writes to, and an outcome nobody could record is a row that says {@code STARTING} forever.
    */
   private void finish(String deploymentId, PdDeploymentStatus status, String detail) {
-    DbRetry.run(
+    DbRetry.runInNewTx(
         "Recording deployment " + deploymentId + " as " + status,
-        () ->
-            QuarkusTransaction.requiringNew()
-                .run(
-                    () -> {
-                      PdDeployment deployment = deployments.findById(deploymentId);
-                      if (deployment == null) {
-                        return; // environment torn down mid-deploy
-                      }
-                      deployment.status = status;
-                      deployment.detail = detail;
-                      deployment.finishedAt = Instant.now();
-                    }),
+        () -> {
+          PdDeployment deployment = deployments.findById(deploymentId);
+          if (deployment == null) {
+            return; // environment torn down mid-deploy
+          }
+          deployment.status = status;
+          deployment.detail = detail;
+          deployment.finishedAt = Instant.now();
+          deployments.flush(); // statement phase, so a lost connection is retriable — see cutover()
+        },
         CUTOVER_BUDGET);
     if (status != PdDeploymentStatus.ACTIVE) {
       LOG.warnf("Deployment %s ended %s: %s", deploymentId, status, firstLine(detail));
