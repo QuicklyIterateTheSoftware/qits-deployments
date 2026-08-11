@@ -46,6 +46,7 @@ public class PdServiceController {
   @Inject MachineAuth machineAuth;
   @Inject ServiceCatalog catalog;
   @Inject EnvironmentMapper mapper;
+  @Inject PdReadPatience reads;
 
   /**
    * The whole of a service.
@@ -120,13 +121,17 @@ public class PdServiceController {
    * <p>Flat because a platform service belongs to no environment: reading the catalogue through the
    * environments would leave qits-platform-idp and this component out of it, which are the two a
    * reader most wants to find.
+   *
+   * <p>Held through a short database outage rather than answering 500 — see {@link PdReadPatience}.
+   * The write above is deliberately not: a retried insert whose commit the connection died before
+   * reporting would be a second row.
    */
   @GET
   @Operation(summary = "Every service, with the environments each is linked into")
   @APIResponse(responseCode = "200", description = "The services")
   public ListServicesResponse list() {
     return new ListServicesResponse(
-        catalog.list().stream()
+        reads.call("The service catalogue listing", catalog::list).stream()
             .map(linked -> mapper.toDto(linked.service(), linked.environmentIds()))
             .toList());
   }

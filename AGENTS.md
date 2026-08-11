@@ -190,6 +190,23 @@ event with nothing half-done. Retry what comes *after* a container is running, w
 work leaves a live container with no row that admits it. Never a business failure: a 409 retried is
 one visible failure turned into a slow one.
 
+**The REST reads are patient too, and the wrap is in the CONTROLLERS.** `PdReadPatience` (in `api`)
+spends `qits.platform.deployments.db-retry-deadline` — 15S shipped, not the worker's 30 — on every
+read of this surface: the service listing, the applications, the environment listing and aggregate,
+the link query, and the deployment listing's tier check. **A new read endpoint joins it in the
+commit that adds it; no write ever does.**
+
+It is a bean the controllers call rather than a wrap inside `ServiceCatalog`/`EnvironmentService`,
+and the reason is that those reads have callers that must not sleep. `ServiceCatalog.delete` calls
+`require`, `allApplications` calls `list`, `EnvironmentService`'s `update`/`delete` call `require`,
+and `BuildTips` calls `onBranch` from inside two `requiringNew` brackets — one of them under
+`claim`'s `synchronized`. A retry inside the read would sleep holding a transaction, and there
+holding a monitor. The worker's own reads are already wrapped at `CUTOVER_BUDGET`, so a wrap inside
+would nest one budget in the other. (`ServiceCatalog.upsert` is `synchronized` as well, but it is a
+write and no read shares its monitor.) `PdReadPatienceTest` holds both halves — recovered after one
+lost connection, still a 500 when the database stays gone — off a stand-in repository installed with
+`QuarkusMock`, under `DbPatienceShortProfile` so the deadline is reachable in a suite.
+
 ## The observer: the second half of the eaa34fbc story
 
 `DbRetry` fixed the **cause** above. It did nothing for the row: eaa34fbc still says `FAILED` while

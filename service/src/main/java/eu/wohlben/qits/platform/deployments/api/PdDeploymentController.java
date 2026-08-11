@@ -38,6 +38,7 @@ public class PdDeploymentController {
   @Inject DeployService deployService;
   @Inject EnvironmentOperations environments;
   @Inject DeploymentMapper mapper;
+  @Inject PdReadPatience reads;
 
   public record ListDeploymentsResponse(List<PdDeploymentDto> deployments) {}
 
@@ -57,7 +58,10 @@ public class PdDeploymentController {
     } else {
       // Ordered: a tier that does not exist is a 404 rather than an empty list. The platform plane
       // takes no such check — it is not a row, so there is nothing that could be missing.
-      environments.require(environmentId);
+      //
+      // Held through a short database outage (PdReadPatience): a lost connection here would turn
+      // "which deployments does this tier have" into a 404 for a tier that exists.
+      reads.run("The tier check for " + environmentId, () -> environments.require(environmentId));
       rows = deployService.deploymentsFor(environmentId);
     }
     return new ListDeploymentsResponse(rows.stream().map(mapper::toDto).toList());

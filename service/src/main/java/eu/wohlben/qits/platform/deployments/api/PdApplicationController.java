@@ -35,14 +35,18 @@ public class PdApplicationController {
 
   @Inject ServiceCatalog catalog;
   @Inject EnvironmentMapper mapper;
+  @Inject PdReadPatience reads;
 
   public record ListApplicationsResponse(List<PdApplicationDto> applications) {}
 
+  /** Held through a short database outage rather than answering 500 — see {@link PdReadPatience}. */
   @GET
   @Operation(summary = "Every application deployed here — environment applications and platform services")
   @APIResponse(responseCode = "200", description = "The applications, one entry per tier")
   public ListApplicationsResponse list() {
     return new ListApplicationsResponse(
-        catalog.allApplications().stream().map(mapper::toDto).toList());
+        reads.call("The application listing", catalog::allApplications).stream()
+            .map(mapper::toDto)
+            .toList());
   }
 }

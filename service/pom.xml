@@ -100,6 +100,14 @@
             <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
+            <!-- DbRetry, which PdReadPatience spends this surface's read deadline through. Declared
+                 here as well as in the two domain modules because this one reads the class: it
+                 arrives transitively either way, and a compile-time use with no declared dependency
+                 breaks the day a module's own use of it goes. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <!-- Bearer validation against qits-platform-idp. qits-auth-core deliberately does NOT
                  bring it: validating a token is each service's own choice of extension and config,
                  and the jar only reads the identity that validation leaves behind. Configured in

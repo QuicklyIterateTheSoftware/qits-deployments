@@ -56,6 +56,7 @@ public class PdEnvironmentController {
   @Inject EnvironmentOperations environments;
   @Inject ServiceCatalog catalog;
   @Inject EnvironmentMapper mapper;
+  @Inject PdReadPatience reads;
 
   /**
    * One tracked application.
@@ -163,14 +164,22 @@ public class PdEnvironmentController {
     return toResponse(environment);
   }
 
-  /** All environments, newest-first, without their applications (fetch one for the full shape). */
+  /**
+   * All environments, newest-first, without their applications (fetch one for the full shape).
+   *
+   * <p>Held through a short database outage rather than answering 500 — see {@link PdReadPatience}.
+   * Every read on this surface is; no write is.
+   */
   @GET
   @Operation(summary = "List environments")
   // The 200 is spelled out because declaring ANY response suppresses the generated one, and this
   // operation had only the generated one — leaving it off would drop the schema from the document.
   @APIResponse(responseCode = "200", description = "The environments")
   public ListEnvironmentsResponse list() {
-    return new ListEnvironmentsResponse(environments.list().stream().map(mapper::toDto).toList());
+    return new ListEnvironmentsResponse(
+        reads.call("The environment listing", environments::list).stream()
+            .map(mapper::toDto)
+            .toList());
   }
 
   @GET
@@ -179,7 +188,11 @@ public class PdEnvironmentController {
   @APIResponse(responseCode = "200", description = "The environment")
   @APIResponse(responseCode = "404", description = "No such environment")
   public EnvironmentResponse get(@PathParam("environmentId") String environmentId) {
-    return toResponse(environments.require(environmentId));
+    // Both reads inside one bracket — the tier row and the applications it holds are one answer,
+    // and a cutover between them would fail the half that ran second.
+    return reads.call(
+        "The read of environment " + environmentId,
+        () -> toResponse(environments.require(environmentId)));
   }
 
   /**
@@ -199,7 +212,13 @@ public class PdEnvironmentController {
   @APIResponse(responseCode = "404", description = "No such environment")
   public ListLinksResponse links(@PathParam("environmentId") String environmentId) {
     return new ListLinksResponse(
-        catalog.linksOf(environmentId).stream().map(mapper::toLinkDto).toList());
+        reads
+            .call(
+                "The link query of environment " + environmentId,
+                () -> catalog.linksOf(environmentId))
+            .stream()
+            .map(mapper::toLinkDto)
+            .toList());
   }
 
   /**
