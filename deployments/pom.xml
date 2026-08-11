@@ -69,6 +69,13 @@
             <artifactId>qits-eventstream</artifactId>
         </dependency>
         <dependency>
+            <!-- DbRetry, which the worker's three brackets are wrapped in. Declared here as well
+                 as in `environments` because this module reads the class, not just the config
+                 line that names its driver sibling. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
         </dependency>

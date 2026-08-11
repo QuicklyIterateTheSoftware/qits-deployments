@@ -56,6 +56,13 @@
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
+            <!-- PatientPgDriver, which this component's datasource opens every connection
+                 through. It sits here because this module ships the config line that names the
+                 driver, and the class and the line must not be able to drift apart. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
         </dependency>

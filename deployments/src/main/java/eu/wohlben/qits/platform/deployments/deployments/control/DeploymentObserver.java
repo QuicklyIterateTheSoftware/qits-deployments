@@ -1,5 +1,8 @@
 package eu.wohlben.qits.platform.deployments.deployments.control;
 
+import static eu.wohlben.qits.platform.deployments.deployments.control.DeployService.CUTOVER_BUDGET;
+
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
@@ -116,7 +119,8 @@ public class DeploymentObserver {
     List<Candidate> candidates =
         DbRetry.call(
             "The observation pass's candidate read",
-            () -> QuarkusTransaction.requiringNew().call(this::candidates));
+            () -> QuarkusTransaction.requiringNew().call(this::candidates),
+            CUTOVER_BUDGET);
     Set<String> seen = new HashSet<>();
     for (Candidate candidate : candidates) {
       seen.add(candidate.deploymentId());
@@ -212,7 +216,8 @@ public class DeploymentObserver {
                           row.detail = recoveryDetail(candidate, observed, at);
                           row.finishedAt = at;
                           return List.copyOf(stale);
-                        }));
+                        }),
+            CUTOVER_BUDGET);
     LOG.infof(
         "Recovered deployment %s by observation: %s is %s, so the row that said FAILED was wrong%s",
         candidate.deploymentId(),
@@ -237,7 +242,8 @@ public class DeploymentObserver {
                       row.status = PdDeploymentStatus.FAILED;
                       row.detail = failureDetail(candidate, observed, at);
                       row.finishedAt = at;
-                    }));
+                    }),
+        CUTOVER_BUDGET);
     LOG.warnf(
         "Deployment %s was ACTIVE, but %s is %s on %d consecutive observations — recorded FAILED."
             + " No container was touched: whatever still holds the alias is the next deployment's"

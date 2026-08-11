@@ -1,5 +1,6 @@
 package eu.wohlben.qits.platform.deployments.deployments.control;
 
+import eu.wohlben.qits.db.DbRetry;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
@@ -65,11 +66,12 @@ import org.jboss.logging.Logger;
  * slow docker work never holds a transaction, and everything the docker calls need is copied into a
  * plain {@link Plan} first — the worker thread has no request context and no open session.
  *
- * <p><b>Three of those brackets are wrapped in {@link DbRetry}</b>, because this component deploys
- * the postgres its own registry lives in and a cutover of qits-oci-postgresql kills the connections
- * of the very deployment performing it: the catalogue read an event opens with, the post-gate
- * cutover bookkeeping, and {@link #finish}. Connection-class failures only, thirty seconds only —
- * the rest of the brackets are deliberately left alone, and {@link #queue} says why.
+ * <p><b>Three of those brackets are wrapped in {@link DbRetry}</b> — the platform's, from
+ * qits-db-core — because this component deploys the postgres its own registry lives in and a cutover
+ * of qits-oci-postgresql kills the connections of the very deployment performing it: the catalogue
+ * read an event opens with, the post-gate cutover bookkeeping, and {@link #finish}. Connection-class
+ * failures only, and {@link #CUTOVER_BUDGET} only — the rest of the brackets are deliberately left
+ * alone, and {@link #queue} says why.
  *
  * <p><b>The cutover invariant:</b> the previous container is only <i>stopped</i> during the gate and
  * is removed only after the new one passed it; a failed deployment — image missing, docker refused,
@@ -94,6 +96,19 @@ public class DeployService implements BuildAnnouncements {
 
   /** Every platform repository carries it, and no path segment does. */
   private static final String NAME_PREFIX = "qits-";
+
+  /**
+   * How long a self-inflicted blip may last before it is a failure worth recording — longer than
+   * {@link DbRetry#DEFAULT_DEADLINE}, and stated at every call site here rather than taken from the
+   * library, because this worker's outage is one it caused itself: it deploys the postgres its own
+   * registry lives in, and the container has to come all the way back before the bracket can
+   * succeed. Safe to sleep for, because the worker is single-threaded — nothing is queued behind a
+   * lock and the next event simply waits. Do not lift it onto a request thread.
+   *
+   * <p>Package-private because {@link DeploymentObserver} runs on the same worker and wraps its
+   * brackets for the same reason, and one budget spelled twice would drift.
+   */
+  static final Duration CUTOVER_BUDGET = Duration.ofSeconds(30);
 
   @Inject PdDeploymentRepository deployments;
   @Inject DeploymentDriver driver;
@@ -440,12 +455,14 @@ public class DeployService implements BuildAnnouncements {
    * what the read was on the way to creating.
    */
   private Optional<LinkedService> findService(String repoId) {
-    return DbRetry.call("The catalogue lookup of " + repoId, () -> catalog.find(repoId));
+    return DbRetry.call(
+        "The catalogue lookup of " + repoId, () -> catalog.find(repoId), CUTOVER_BUDGET);
   }
 
   /** The tiers listening to a branch — the topology half of the same read. See {@link #findService}. */
   private List<PdEnvironment> tiersOnBranch(String branch) {
-    return DbRetry.call("The tier lookup for " + branch, () -> environments.onBranch(branch));
+    return DbRetry.call(
+        "The tier lookup for " + branch, () -> environments.onBranch(branch), CUTOVER_BUDGET);
   }
 
   /**
@@ -1101,7 +1118,8 @@ public class DeployService implements BuildAnnouncements {
                           deployment.status = PdDeploymentStatus.ACTIVE;
                           deployment.finishedAt = Instant.now();
                           return old;
-                        }));
+                        }),
+            CUTOVER_BUDGET);
     Set<String> toRemove = new LinkedHashSet<>(oldContainers);
     for (DeploymentDriver.Holder predecessor : predecessors) {
       toRemove.add(predecessor.name());
@@ -1297,7 +1315,8 @@ public class DeployService implements BuildAnnouncements {
                       deployment.status = status;
                       deployment.detail = detail;
                       deployment.finishedAt = Instant.now();
-                    }));
+                    }),
+        CUTOVER_BUDGET);
     if (status != PdDeploymentStatus.ACTIVE) {
       LOG.warnf("Deployment %s ended %s: %s", deploymentId, status, firstLine(detail));
     }

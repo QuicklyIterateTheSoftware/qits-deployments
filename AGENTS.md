@@ -166,6 +166,22 @@ own catch. `DbRetry` wraps the catalogue read an event opens with, the cutover b
 timeout, Hibernate's `JDBCConnectionException`), thirty seconds of half-second sleeps, safe because
 the worker is single-threaded and those three brackets re-read what they write.
 
+**`DbRetry` is the platform's now** — `eu.wohlben.qits.db.DbRetry` from `qits-db-core`, published by
+qits-integrations-quarkus. It was a private class here first, and the lib's is that class with the
+budget moved from a constant to a per-call argument; the thirty seconds are stated at each call site
+as `DeployService.CUTOVER_BUDGET` (package-private, because `DeploymentObserver` wraps its brackets
+for the same reason and one budget spelled twice would drift). The lib's own suite pins every failure
+shape this component ever saw, which is why the local `DbRetryTest` went with the local class.
+
+**It is the second half of a pair, and the first half is the pool.** The datasource carries the
+platform's three-line baseline — `jdbc.driver=eu.wohlben.qits.db.PatientPgDriver`,
+`validate-on-borrow=true`, `acquisition-timeout=15S` — so a connection request is held while postgres
+comes back rather than failing at once. `DatasourceBaselineTest` (qits-arch-rules, beside
+`ArchRulesTest` and in `service/` for the same reason) fails the build naming any postgresql
+datasource missing a line. That includes the `eventstream` one, which the pinned qits-eventstream
+release ships bare: `service/`'s `application.properties` states the three lines for it, and that
+block is marked to delete when a release of that jar carries them itself.
+
 **What is deliberately NOT retried, and it is a rule rather than an omission:** `queue`,
 `recordRejection`, the `STARTING` transition and the platform conversion. They insert or move rows,
 so a commit whose outcome the connection died before reporting would be duplicated by a second

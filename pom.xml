@@ -60,10 +60,13 @@
              (.config/qits/ci-event-upstream-eventstream.yml) rewrites exactly this element with a
              `sed`, so a second spelling of the version anywhere would be left behind. -->
         <qits.eventstream.version>2026.810.191553</qits.eventstream.version>
-        <qits.auth-core.version>2026.810.184518</qits.auth-core.version>
+        <qits.auth-core.version>2026.811.152803</qits.auth-core.version>
         <!-- The platform's shared ArchUnit rules, published by qits-integrations-quarkus beside
              qits-auth-core. Test scope wherever entities live — see service/pom.xml. -->
-        <qits.arch-rules.version>2026.810.184518</qits.arch-rules.version>
+        <qits.arch-rules.version>2026.811.152803</qits.arch-rules.version>
+        <!-- The platform's database patience, published beside the two above: PatientPgDriver (the
+             datasource's driver line) and DbRetry (the worker's brackets). -->
+        <qits.db-core.version>2026.811.152803</qits.db-core.version>
         <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -194,6 +197,13 @@
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-arch-rules</artifactId>
                 <version>${qits.arch-rules.version}</version>
+            </dependency>
+            <dependency>
+                <!-- PatientPgDriver + DbRetry, the two halves of the datasource resilience
+                     baseline. Published by qits-integrations-quarkus like the three above. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-db-core</artifactId>
+                <version>${qits.db-core.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
