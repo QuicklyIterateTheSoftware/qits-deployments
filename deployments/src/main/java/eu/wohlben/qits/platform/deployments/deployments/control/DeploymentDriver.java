@@ -3,6 +3,7 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * The seam between this component's orchestration and whatever runs the containers — the {@code
@@ -14,8 +15,7 @@ import java.util.List;
  * qits.platform.deployments.orchestrator} ({@code docker} — the default — or {@code swarm}).</b>
  * That is what reshaped this interface. It used to be docker's own vocabulary written out: {@code
  * start} one container, {@code stop} and {@code restart} the predecessors, {@code connect} each
- * network after the fact, {@code handoff} to a referee, and a caller in {@link DeployService} that
- * sequenced all of it. Every one of those verbs is a statement about how <i>docker</i> replaces a
+ * network after the fact, and a caller in {@link DeployService} that sequenced all of it. Every one of those verbs is a statement about how <i>docker</i> replaces a
  * container, and swarm replaces one by updating a service in place — so keeping them here would
  * have made one orchestrator's model look like the contract, and left the other implementing verbs
  * it has no use for.
@@ -215,14 +215,28 @@ public interface DeploymentDriver {
   void reap(List<String> names);
 
   /**
-   * Whether the named service is <b>this very process</b> — what tells a self-update handoff that
-   * succeeded apart from a deployment a restart interrupted.
+   * What the named service runs <b>now</b>, and what the orchestrator says about the update that
+   * put it there. Empty when the runtime has no such service at all.
    *
-   * <p>The startup sweep is its only caller. It replaces the {@code selfContainerId} / {@code
-   * containerId} pair, which was two docker questions asked to answer one: whose container am I,
-   * and is that the container this row names.
+   * <p><b>The startup sweep is its only caller, and this is the half of a self-update no
+   * orchestrator does for us.</b> The instance that issues the update on its own service dies
+   * before it can record the outcome, so the row it left {@code STARTING} is settled by whichever
+   * instance boots next — and the only honest evidence is what is running: an image carrying the
+   * row's own sha says this deployment is serving, any other image says something else is.
+   *
+   * <p>It replaces the {@code isSelf} question, which was "am I the container this row names". That
+   * one cannot tell a completed succession from a rolled-back one — under swarm the service keeps
+   * its name across both — and it made the sweep a statement about the deployer rather than about
+   * the deployment.
+   *
+   * <p><b>The image is the check; {@code detail} is only wording.</b> Swarm's {@code UpdateStatus}
+   * holds the most recent update alone, so a later deployment overwrites the verdict of the one a
+   * row is about. Null on the docker path, which has no such field.
    */
-  boolean isSelf(String name);
+  Optional<RunningImage> runningImage(String name);
+
+  /** What a service runs, as the sweep reads it. {@code detail} is the orchestrator's own words. */
+  record RunningImage(String imageRef, String detail) {}
 
   /**
    * Everything one deployed service is described by. Plain values, resolved before anything
@@ -356,10 +370,10 @@ public interface DeploymentDriver {
      * whichever instance is alive to record it — the row stays {@code STARTING} on purpose.
      *
      * <p>Neither instance can arbitrate its own succession: the old is about to stop and the new
-     * cannot boot until it has. Docker answers that with a detached referee container; swarm
-     * answers it with the manager, which lives in the daemon rather than in a container this
-     * process owns. Either way the caller returns without a verdict, and the next boot's sweep
-     * settles the row.
+     * cannot boot until it has, so it takes a third party. Swarm has one — the manager lives in the
+     * daemon rather than in a container this process owns — and the docker path has none, which is
+     * why it {@link #REFUSED refuses} a self-update instead. The caller returns without a verdict,
+     * and the next boot's sweep settles the row from what is running ({@link #runningImage}).
      */
     HANDED_OFF,
     /** Nothing runs that did not run before, and {@code detail} says why. */

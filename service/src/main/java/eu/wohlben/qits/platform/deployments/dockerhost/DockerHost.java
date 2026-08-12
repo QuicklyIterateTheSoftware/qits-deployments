@@ -22,9 +22,10 @@ import java.util.List;
  * <p><b>It is also what keeps the suite docker-free.</b> {@link DockerDeploymentDriver} is the
  * whole replace choreography and is worth testing; it is testable because this interface is where
  * the child processes are, and the suite installs a scripted fake of it. So the {@code @QuarkusTest}
- * flow tests drive the real cutover — the stop, the run, the joins, the reconcile, the rollback,
- * the referee — against a fake host, which is the same arrangement that was there before, one layer
- * further down.
+ * flow tests drive the real cutover — the stop, the run, the joins, the reconcile, the rollback —
+ * against a fake host, which is the same arrangement that was there before, one layer further down.
+ * The self-update referee was in that list and is gone: a deployment of this component is refused
+ * on this path.
  *
  * <p>The labels and the {@code Network} shape stay on {@link DeploymentDriver}: both orchestrators
  * label what they make with the same keys, and a network is a network.
@@ -125,26 +126,16 @@ public interface DockerHost {
 
   /**
    * This process's own container id ({@code /etc/hostname} in a container), blank when unknown —
-   * what routes a deployment of this component onto the handoff path: it must never stop the
-   * instance performing the deployment.
+   * what lets a deployment of this component be refused: it must never stop the instance performing
+   * it.
    */
   String selfContainerId();
 
-  /** The full docker id of the named container, blank when it does not exist. */
-  String containerId(String containerName);
-
   /**
-   * Launch the detached self-update referee: stop the old container (freeing the published port
-   * and the socket the successor is retrying on), await the successor's health gate, then remove
-   * the old container — or, on a missed gate, remove the successor and restart the old. Detached
-   * because neither instance can referee its own succession: the old is about to be stopped and the
-   * new cannot boot until it is.
+   * What the named container is running ({@code .Config.Image}), blank when docker has no such
+   * container — the startup sweep's evidence. See {@link DeploymentDriver#runningImage}.
    */
-  void handoff(HandoffSpec spec);
-
-  /** Everything the referee needs: who retires, who succeeds, and how long the gate may take. */
-  record HandoffSpec(
-      String imageRef, String oldContainerId, String newContainerName, long timeoutSeconds) {}
+  String runningImage(String containerName);
 
   /** Start the container, detached, on its primary network. The image's entrypoint runs. */
   StartResult start(StartSpec spec);

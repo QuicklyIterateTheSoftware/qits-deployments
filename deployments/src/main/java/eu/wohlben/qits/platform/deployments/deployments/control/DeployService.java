@@ -89,9 +89,9 @@ import org.jboss.logging.Logger;
  * two orchestrators.</b> What is left here is one path with no branches in it: resolve the target,
  * provision what the repository declared, pull so a missing image is its own outcome, {@link
  * DeploymentDriver#apply} the spec, {@link DeploymentDriver#awaitConverged wait for the verdict},
- * record it. The predecessor search, the alias union, the stop-before-start, the rollback of a
- * failed gate and the self-update referee all moved into {@code dockerhost}, because every one of
- * them is a statement about how <i>docker</i> replaces a container — swarm replaces one by updating
+ * record it. The predecessor search, the alias union, the stop-before-start and the rollback of a
+ * failed gate all moved into {@code dockerhost}, because every one of them is a statement about how
+ * <i>docker</i> replaces a container — swarm replaces one by updating
  * a service in place and needs none of it. Nothing about the sequence above is orchestrator-shaped,
  * which is the test that it is in the right place.
  *
@@ -104,8 +104,9 @@ import org.jboss.logging.Logger;
  * <p><b>One outcome is neither success nor failure and is worth knowing about here</b>: a
  * deployment that replaces THIS process comes back {@link DeploymentDriver.ApplyOutcome#HANDED_OFF
  * HANDED_OFF}, and the row is deliberately left {@code STARTING}. Neither instance can arbitrate
- * its own succession, so the outcome is recorded by whichever survives — the successor's startup
- * sweep adopts the row, a rolled-back predecessor's sweep fails it.
+ * its own succession, so the outcome is recorded by whichever survives: the next boot's {@link
+ * #sweepInFlight() sweep} settles the row from the image the service is running. Only the swarm
+ * path answers this way — the docker path has no third party to finish the job and refuses.
  */
 @ApplicationScoped
 public class DeployService implements BuildAnnouncements {
@@ -114,6 +115,9 @@ public class DeployService implements BuildAnnouncements {
 
   /** Every platform repository carries it, and no path segment does. */
   private static final String NAME_PREFIX = "qits-";
+
+  /** What an in-flight row says when nothing is running under its name — see {@link #sweepInFlight()}. */
+  private static final String INTERRUPTED = "[interrupted by a qits-platform-deployments restart]";
 
   /**
    * How long a self-inflicted blip may last before it is a failure worth recording — longer than
@@ -212,12 +216,9 @@ public class DeployService implements BuildAnnouncements {
   /**
    * A deployment left {@code QUEUED} or {@code STARTING} by a crash can never make progress — the
    * worker queue does not survive the JVM — so it would show as forever-deploying. Fail those once
-   * at startup, with one exception: a {@code STARTING} row whose container is <b>this very
-   * process</b> is a self-update handoff that succeeded — the predecessor recorded the row, the
-   * referee retired it, and this instance is the successor booting for the first time. That row is
-   * ADOPTED (ACTIVE, prior ACTIVE rows decommissioned): the instance that survived the handoff
-   * records its outcome. The containers are deliberately NOT reaped: a deployed application
-   * outlives its deployer, and whatever was {@code ACTIVE} before the restart is still serving.
+   * at startup, except where the runtime says otherwise: see {@link #sweepInFlight()}. The
+   * containers are deliberately NOT reaped: a deployed application outlives its deployer, and
+   * whatever was {@code ACTIVE} before the restart is still serving.
    */
   void onStart(@Observes StartupEvent event) {
     if (LaunchMode.current() == LaunchMode.TEST) {
@@ -296,55 +297,134 @@ public class DeployService implements BuildAnnouncements {
         });
   }
 
-  /** Package-private so the suite drives the sweep without a real StartupEvent. */
+  /**
+   * Settle every row a previous process left in flight, from what the runtime is running now.
+   * Package-private so the suite drives the sweep without a real StartupEvent.
+   *
+   * <p><b>This is the self-update bookkeeping, and it is the only part of it left.</b> An instance
+   * deploying itself hands the succession to the orchestrator and dies with the row {@code
+   * STARTING}; whichever instance boots next has to say what became of it. The question is asked of
+   * the deployment rather than of the deployer — {@link DeploymentDriver#runningImage} on the name
+   * the row itself carries — which is why it is one arm for both orchestrators and for every
+   * application, not a special case for this one.
+   *
+   * <table>
+   *   <caption>What settles a row, and on what evidence</caption>
+   *   <tr><th>row</th><th>the runtime says</th><th>verdict</th></tr>
+   *   <tr><td>{@code QUEUED}, or {@code STARTING} with no name</td><td>nothing was asked</td>
+   *       <td>{@code FAILED}: nothing ever ran, and the queue did not survive</td></tr>
+   *   <tr><td>{@code STARTING}</td><td>no such service</td>
+   *       <td>{@code FAILED}: it was interrupted, or the orchestrator took it away</td></tr>
+   *   <tr><td>{@code STARTING}</td><td>an image carrying this row's sha</td>
+   *       <td>{@code ACTIVE}, prior actives of the place decommissioned</td></tr>
+   *   <tr><td>{@code STARTING}</td><td>an image carrying another sha</td>
+   *       <td>{@code FAILED}: superseded — a rollback, or a later deployment</td></tr>
+   * </table>
+   *
+   * <p><b>An adopted row is not a claim that the gate passed</b>, and it does not need to be: on
+   * both paths what carries the row's image is what is serving under the row's name, and a
+   * container that is in fact dying is demoted by {@link DeploymentObserver} on the next two
+   * passes. The prior actives are matched with an explicit null test for the platform plane
+   * ({@code environment_id = ?} would silently match nothing, and a self-updated instance would
+   * come back having failed its own deployment).
+   *
+   * <p>The shape is the observation pass's: read the rows in one transaction, ask the runtime
+   * outside every one of them — a driver call is a child process, and no bracket of this
+   * component's own may span one — then write each row in a bracket of its own.
+   */
   void sweepInFlight() {
-    int swept =
-        QuarkusTransaction.requiringNew()
-            .call(
-                () -> {
-                  List<PdDeployment> orphans =
-                      new ArrayList<>(deployments.listByStatus(PdDeploymentStatus.QUEUED));
-                  orphans.addAll(deployments.listByStatus(PdDeploymentStatus.STARTING));
-                  int failed = 0;
-                  for (PdDeployment orphan : orphans) {
-                    if (orphan.status == PdDeploymentStatus.STARTING
-                        && orphan.containerName != null) {
-                      // Whose process this is, asked of the runtime rather than assembled from two
-                      // docker questions here: the docker path compares /etc/hostname with the
-                      // named container's id, and swarm asks the task container which service it
-                      // belongs to.
-                      if (driver.isSelf(orphan.containerName)) {
-                        // The prior actives of the same (application, tier). The pair is matched
-                        // with an explicit null test for the platform plane — `environment_id = ?`
-                        // would silently match nothing, and this instance would come back having
-                        // failed its own deployment.
-                        for (PdDeployment previous :
-                            deployments.listActiveByApplication(
-                                orphan.applicationName, orphan.environmentId)) {
-                          previous.status = PdDeploymentStatus.DECOMMISSIONED;
-                          previous.finishedAt = Instant.now();
-                        }
-                        orphan.status = PdDeploymentStatus.ACTIVE;
-                        orphan.detail =
-                            "[adopted at startup: this instance is the successor of a self-update"
-                                + " handoff]";
-                        orphan.finishedAt = Instant.now();
-                        LOG.infof(
-                            "Adopted deployment %s: this instance (%s) is its container",
-                            orphan.id, orphan.containerName);
-                        continue;
-                      }
-                    }
-                    orphan.status = PdDeploymentStatus.FAILED;
-                    orphan.detail = "[interrupted by a qits-platform-deployments restart]";
-                    orphan.finishedAt = Instant.now();
-                    failed++;
-                  }
-                  return failed;
-                });
-    if (swept > 0) {
-      LOG.infof("Marked %d deployment(s) left in flight by a previous shutdown as FAILED", swept);
+    List<InFlight> rows = QuarkusTransaction.requiringNew().call(this::inFlight);
+    int adopted = 0;
+    int failed = 0;
+    for (InFlight row : rows) {
+      Verdict verdict = verdictOn(row);
+      QuarkusTransaction.requiringNew().run(() -> record(row, verdict));
+      if (verdict.adopt()) {
+        adopted++;
+        LOG.infof(
+            "Adopted deployment %s at startup: %s is running its image",
+            row.deploymentId(), row.containerName());
+      } else {
+        failed++;
+      }
     }
+    if (failed > 0) {
+      LOG.infof("Marked %d deployment(s) left in flight by a previous shutdown as FAILED", failed);
+    }
+    if (adopted > 0) {
+      LOG.infof("Adopted %d deployment(s) the previous instance could not record", adopted);
+    }
+  }
+
+  /** One in-flight row as plain values — nothing carries an entity across a driver call. */
+  private record InFlight(
+      String deploymentId,
+      String applicationName,
+      String environmentId,
+      PdDeploymentStatus status,
+      String containerName,
+      String commitSha) {}
+
+  /** Adopt this row, or fail it with this detail. */
+  private record Verdict(boolean adopt, String detail) {}
+
+  private List<InFlight> inFlight() {
+    List<PdDeployment> rows = new ArrayList<>(deployments.listByStatus(PdDeploymentStatus.QUEUED));
+    rows.addAll(deployments.listByStatus(PdDeploymentStatus.STARTING));
+    return rows.stream()
+        .map(
+            row ->
+                new InFlight(
+                    row.id,
+                    row.applicationName,
+                    row.environmentId,
+                    row.status,
+                    row.containerName,
+                    row.commitSha))
+        .toList();
+  }
+
+  /** The decision table above, asked of the runtime. */
+  private Verdict verdictOn(InFlight row) {
+    if (row.status() != PdDeploymentStatus.STARTING || row.containerName() == null) {
+      return new Verdict(false, INTERRUPTED);
+    }
+    DeploymentDriver.RunningImage running = driver.runningImage(row.containerName()).orElse(null);
+    if (running == null) {
+      return new Verdict(false, INTERRUPTED);
+    }
+    if (ImageRefs.carries(running.imageRef(), row.commitSha())) {
+      return new Verdict(
+          true, "[adopted at startup: " + row.containerName() + " is running this deployment]");
+    }
+    return new Verdict(
+        false,
+        "[superseded: "
+            + row.containerName()
+            + " runs "
+            + running.imageRef()
+            + ", which is another deployment"
+            + (running.detail() == null || running.detail().isBlank()
+                ? ""
+                : "; " + firstLine(running.detail()))
+            + "]");
+  }
+
+  private void record(InFlight row, Verdict verdict) {
+    PdDeployment deployment = deployments.findById(row.deploymentId());
+    if (deployment == null) {
+      return; // the environment was torn down between the read and this write
+    }
+    if (verdict.adopt()) {
+      for (PdDeployment previous :
+          deployments.listActiveByApplication(row.applicationName(), row.environmentId())) {
+        previous.status = PdDeploymentStatus.DECOMMISSIONED;
+        previous.finishedAt = Instant.now();
+      }
+    }
+    deployment.status = verdict.adopt() ? PdDeploymentStatus.ACTIVE : PdDeploymentStatus.FAILED;
+    deployment.detail = verdict.detail();
+    deployment.finishedAt = Instant.now();
   }
 
   /**
@@ -1065,8 +1145,8 @@ public class DeployService implements BuildAnnouncements {
             });
 
     // The replace, whole, in one call. What it costs — a predecessor stopped and restartable, a
-    // hand-rolled rollback, a detached referee — is the docker driver's business; under swarm it is
-    // one `service update` and the orchestrator's own update policy.
+    // hand-rolled rollback — is the docker driver's business; under swarm it is one `service
+    // update` and the orchestrator's own update policy.
     DeploymentDriver.ApplyResult applied = driver.apply(spec);
     switch (applied.outcome()) {
       case REFUSED -> {

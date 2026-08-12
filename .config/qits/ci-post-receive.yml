@@ -17,11 +17,11 @@
 # (docker: true). A failed push is a failed step is a FAILED run, so the CD announcement (SUCCESS
 # only) keeps implying "the image exists".
 #
-# THIS REPO IS ALSO THE DEPLOYER: a green run here announces qits-deployments to itself,
-# and it deploys ITSELF through the handoff README calls "Self-update is a handoff" — successor
-# started, detached referee arbitrates, the surviving instance's sweep records the outcome. Nothing
-# in this file changes for that; it is worth knowing because the /platform-deployments surface blips
-# mid-cutover, and a successor that misses its health gate leaves the predecessor serving.
+# THIS REPO IS ALSO THE DEPLOYER: a green run here announces qits-deployments to itself, and under
+# swarm it deploys ITSELF — the manager arbitrates the succession and the surviving instance's sweep
+# records the outcome (README, "Self-update takes an orchestrator"). Nothing in this file changes
+# for that; it is worth knowing because the /platform-deployments surface blips mid-cutover, and a
+# successor that misses its health gate leaves the predecessor serving.
 #
 # This repo deploys as an ENVIRONMENT service (.config/qits/deployments.yml): one instance per
 # environment, deploying that environment. The deploy refs are `environment/<name>` and nothing

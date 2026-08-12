@@ -10,8 +10,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 /**
@@ -20,11 +20,19 @@ import org.jboss.logging.Logger;
  *
  * <p><b>Every line of it used to live in {@code DeployService}</b>, and moving it here is the
  * change that made a second orchestrator possible. The reason is one sentence: the predecessor
- * search, the alias union, the stop-before-start, the join loop, the reconciliation, the rollback
- * and the self-update referee are not "how a deployment works" — they are how <i>docker</i> is made
- * to behave like an orchestrator. Swarm has all seven built in, so a state machine written around
- * them could only be told to skip them. Now the state machine says {@code apply} and asks whether
- * it converged, and both drivers answer in their own vocabulary.
+ * search, the alias union, the stop-before-start, the join loop, the reconciliation and the
+ * rollback are not "how a deployment works" — they are how <i>docker</i> is made to behave like an
+ * orchestrator. Swarm has all six built in, so a state machine written around them could only be
+ * told to skip them. Now the state machine says {@code apply} and asks whether it converged, and
+ * both drivers answer in their own vocabulary.
+ *
+ * <p><b>A self-update is REFUSED here, and that is the honest answer rather than a gap.</b> This
+ * path used to launch a detached referee container to arbitrate its own succession — start the
+ * successor, stop this instance, await the gate, remove whichever side lost. The referee is gone:
+ * swarm supplies one that lives in the daemon, and keeping a second, hand-rolled arbiter alive for
+ * a path that is about to be deleted would be maintaining the hardest code in this component for
+ * one release. So a deployment that would replace the running instance changes nothing and says
+ * what to do about it, and this component updates itself under swarm.
  *
  * <p><b>What that costs is one piece of state, and it is worth naming.</b> The cutover spans two
  * calls — the predecessors are stopped in {@link #apply} and are either removed or restarted in
@@ -57,15 +65,6 @@ public class DockerDeploymentDriver implements DeploymentDriver {
 
   @Inject DockerHost docker;
 
-  /**
-   * How long the referee gives the successor's health gate. The same key the state machine spends
-   * on {@link #awaitConverged}, read here because the referee is launched from {@link #apply},
-   * before anybody has asked about convergence — it IS the convergence, arbitrated by a third
-   * process.
-   */
-  @ConfigProperty(name = "qits.platform.deployments.health-timeout-seconds")
-  long healthTimeoutSeconds;
-
   /** What each in-flight cutover stopped, by the container name the successor was given. */
   private final Map<String, List<String>> stopped = new ConcurrentHashMap<>();
 
@@ -89,39 +88,30 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     // something the predecessor, not a row.
     List<DockerHost.Holder> predecessors =
         predecessorsOf(docker.aliasHolders(spec.networks(), searchAliases(spec)), spec);
-    DockerHost.Holder selfHolder = selfAmong(predecessors);
-    DockerHost.StartSpec start = startSpec(spec, primary);
+    DockerHost.Holder self = selfAmong(predecessors);
 
-    if (selfHolder != null) {
-      // The self-update handoff. This process cannot stop itself and then finish the cutover, so
-      // the roles split three ways: this instance starts the successor, and launches a detached
-      // referee; the referee stops this container — freeing the published port and the socket the
-      // successor is retrying on — awaits the successor's health gate, and removes whichever side
-      // lost; the successor's startup sweep adopts the row it finds itself named on.
-      DockerHost.StartResult successor = docker.start(start);
-      if (!successor.started()) {
-        docker.remove(container);
-        return new ApplyResult(ApplyOutcome.REFUSED, successor.detail());
-      }
-      String unjoined = join(container, spec.wireAlias(), joins);
-      if (unjoined != null) {
-        // No handoff: the referee would promote a successor no caller can address, and it would do
-        // it by removing the instance that still works. Nothing was stopped yet, so dropping the
-        // successor puts everything back.
-        docker.remove(container);
-        return new ApplyResult(ApplyOutcome.REFUSED, unjoined);
-      }
-      reconcile(spec, primary);
-      docker.handoff(
-          new DockerHost.HandoffSpec(
-              spec.imageRef(), selfHolder.id(), container, healthTimeoutSeconds));
-      LOG.infof(
-          "Self-update handoff initiated: %s succeeds this instance (%s); the referee arbitrates",
-          container, selfHolder.name());
+    if (self != null) {
+      // A self-update, and this path cannot do one: the process that would stop the predecessor IS
+      // the predecessor, and there is nothing left afterwards to await the successor's gate or put
+      // the loser back. It used to launch a detached referee container for exactly that; the
+      // referee is gone, because swarm supplies one that lives in the daemon.
+      //
+      // Refused BEFORE anything is stopped or started, so the running instance keeps serving and
+      // the row records why.
+      LOG.warnf(
+          "Refusing to deploy %s: it would replace this very instance (%s)",
+          spec.applicationName(), self.name());
       return new ApplyResult(
-          ApplyOutcome.HANDED_OFF, "the referee arbitrates; " + selfHolder.name() + " retires");
+          ApplyOutcome.REFUSED,
+          "this deployment replaces the instance performing it, and the docker path has no third"
+              + " party to finish that. Deploy it under swarm ("
+              + ORCHESTRATOR_KEY
+              + "=swarm), where the manager arbitrates the succession. "
+              + self.name()
+              + " keeps serving.");
     }
 
+    DockerHost.StartSpec start = startSpec(spec, primary);
     for (DockerHost.Holder predecessor : predecessors) {
       docker.stop(predecessor.name());
     }
@@ -184,20 +174,13 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     }
   }
 
-  /**
-   * Whose container this is, asked as the two docker questions it takes: what is this process's own
-   * container id, and what is the id of the container that name refers to. The prefix comparison
-   * goes both ways because {@code /etc/hostname} carries the short id and {@code inspect} the full
-   * one.
-   */
+  /** What the container is running, straight off {@code .Config.Image} — see the seam. */
   @Override
-  public boolean isSelf(String name) {
-    String self = docker.selfContainerId();
-    if (self.isBlank()) {
-      return false;
-    }
-    String id = docker.containerId(name);
-    return !id.isBlank() && (id.startsWith(self) || self.startsWith(id));
+  public Optional<RunningImage> runningImage(String name) {
+    String image = docker.runningImage(name);
+    // No UpdateStatus to quote: docker has no orchestrator keeping one, so the image is the whole
+    // of the evidence and the sweep says "superseded" in its own words.
+    return image.isBlank() ? Optional.empty() : Optional.of(new RunningImage(image, null));
   }
 
   @Override
@@ -290,7 +273,10 @@ public class DockerDeploymentDriver implements DeploymentDriver {
     return List.copyOf(mine);
   }
 
-  /** The one predecessor this process must never stop: itself. */
+  /**
+   * The one predecessor this process must never stop: itself. Finding it is what makes a
+   * self-update refusable rather than a deployment that kills the deployer half way through.
+   */
   private DockerHost.Holder selfAmong(List<DockerHost.Holder> predecessors) {
     String self = docker.selfContainerId();
     if (self.isBlank()) {

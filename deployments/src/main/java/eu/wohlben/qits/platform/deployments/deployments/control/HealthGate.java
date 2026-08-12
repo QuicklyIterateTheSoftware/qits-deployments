@@ -30,8 +30,8 @@ import java.util.function.Supplier;
  * network connect} for every join → {@code docker start} would put the container on all its
  * networks before its first boot, so the race would not happen at all. It is a restructure across
  * the driver seam — the argv stops being a {@code run}, {@code StartSpec} grows the join set, and
- * the self-update handoff and the cutover's call-order assertions all move with it — and a patient
- * gate makes the race self-heal without any of that. Recorded, not done.
+ * the cutover's call-order assertions move with it — and a patient gate makes the race self-heal
+ * without any of that. Recorded, not done, and the docker path it belongs to is being retired.
  */
 public final class HealthGate {
 

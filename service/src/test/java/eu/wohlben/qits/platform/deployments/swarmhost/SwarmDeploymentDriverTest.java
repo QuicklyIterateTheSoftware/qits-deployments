@@ -2,6 +2,7 @@ package eu.wohlben.qits.platform.deployments.swarmhost;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -590,7 +591,7 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void aSelfUpdateIsHandedToTheManagerRatherThanAwaited() {
-    // Swarm is the referee the docker path has to launch: the manager lives in the daemon, so it
+    // Swarm arbitrates a succession the docker path cannot: the manager lives in the daemon, so it
     // can stop this task, start the successor and revert the spec if the successor never goes
     // healthy. Nothing here waits for that — this process is what is being replaced.
     SwarmDeploymentDriver driver = driver();
@@ -604,6 +605,53 @@ class SwarmDeploymentDriverTest {
 
     assertEquals(DeploymentDriver.ApplyOutcome.HANDED_OFF, applied.outcome());
     assertFalse(cli.matching("service update").isEmpty(), "the update was still issued");
+  }
+
+  @Test
+  void theRunningImageIsReadWithSwarmsUpdateStatusBesideIt() {
+    // The startup sweep's evidence, in one inspect: what the service runs, and swarm's account of
+    // the update that put it there. The image is the verdict — UpdateStatus holds the most recent
+    // update alone, so a later deployment overwrites what it said about this row.
+    SwarmDeploymentDriver driver = driver();
+    cli.script(
+        "Spec.TaskTemplate.ContainerSpec.Image",
+        result(0, IMAGE + "|rollback_completed|rollback completed\n"));
+
+    DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
+
+    assertEquals(IMAGE, running.imageRef());
+    assertEquals("rollback_completed: rollback completed", running.detail());
+    List<String> argv = cli.matching("service inspect");
+    assertEquals(
+        List.of(
+            "docker",
+            "service",
+            "inspect",
+            "--format",
+            SwarmDeploymentDriver.RUNNING_IMAGE_FORMAT,
+            "dev-qits-gateway"),
+        argv);
+  }
+
+  @Test
+  void aServiceSwarmDoesNotHaveIsNoEvidenceAtAll() {
+    // "No such service" is not a rollback and not a success; the sweep fails the row as interrupted
+    // rather than reading a verdict out of an error message.
+    SwarmDeploymentDriver driver = driver();
+    cli.script("service inspect", result(1, "Error: no such service: dev-qits-gone"));
+
+    assertTrue(driver.runningImage("dev-qits-gone").isEmpty());
+  }
+
+  @Test
+  void aServiceNothingHasUpdatedYetCarriesItsImageAndNoWords() {
+    SwarmDeploymentDriver driver = driver();
+    cli.script("Spec.TaskTemplate.ContainerSpec.Image", result(0, IMAGE + "||\n"));
+
+    DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
+
+    assertEquals(IMAGE, running.imageRef());
+    assertNull(running.detail(), "a service created and never updated has no UpdateStatus");
   }
 
   @Test

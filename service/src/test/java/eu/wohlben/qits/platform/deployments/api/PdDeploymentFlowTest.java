@@ -339,90 +339,48 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void aSelfUpdateStartsTheSuccessorAndHandsArbitrationToTheReferee() {
-    // Deploying the application whose alias this very instance holds: the worker must not stop
-    // its own process. It starts the successor, launches the detached referee, and leaves the row
-    // STARTING — the surviving instance's sweep records the outcome, not this one.
+  public void aSelfUpdateIsRefusedOnTheDockerPathAndTheRunningInstanceKeepsServing() {
+    // Deploying the application whose alias this very instance holds. The docker path cannot do it:
+    // the process that would stop the predecessor IS the predecessor, and nothing would be left to
+    // await the successor's gate or put the loser back. It used to launch a detached referee
+    // container for exactly that; the referee is retired, so this is a refusal — recorded on the
+    // row, with nothing stopped, started or removed.
     String environmentId = createEnvironment("flow-self");
     String selfId = "abcdef123456";
-    String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(List.of(new DockerHost.Holder(selfFullId, "qits-platform-deployments", null)));
+    driver.scriptAliasHolders(
+        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
     postBuildSucceeded("repo-self", "environment/flow-self", SHA_A);
 
-    long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.handoffs().isEmpty() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(50);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
-    assertEquals(1, driver.handoffs().size(), "the referee was launched");
-    DockerHost.HandoffSpec handoff = driver.handoffs().get(0);
-    assertEquals(selfFullId, handoff.oldContainerId());
-    assertEquals(driver.started().get(0).containerName(), handoff.newContainerName());
-    // The successor is started through the same StartSpec as any other deployment, so it carries
-    // the same identity into the same argv builder: deploying cd itself is not a second code path
-    // that could miss the OTel resource attributes.
-    assertEquals(SHA_A, driver.started().get(0).commitSha());
-    assertEquals("flow-self", driver.started().get(0).environmentName());
-    // Nothing stopped, nothing removed by THIS process — the referee owns retirement.
-    assertEquals(List.of(), driver.stoppedContainers());
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+
+    assertEquals("FAILED", deployments.get(0).get("status"));
+    String detail = (String) deployments.get(0).get("detail");
+    assertTrue(detail.contains("swarm"), "the row says where a self-update belongs: " + detail);
+    assertEquals(List.of(), driver.started(), "nothing ran");
+    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
     assertEquals(List.of(), driver.removedContainers());
-    // The row stays STARTING: adoption (successor) or the restart sweep (rollback) finishes it.
-    Map<String, Object> row =
-        given()
-            .when()
-            .get("/platform-deployments/api/deployments?environmentId=" + environmentId)
-            .then()
-            .statusCode(200)
-            .extract()
-            .jsonPath()
-            .<Map<String, Object>>getList("deployments")
-            .get(0);
-    assertEquals("STARTING", row.get("status"));
   }
 
   @Test
-  public void aPlatformSelfUpdateStillHandsArbitrationToTheReferee() {
-    // A platform service updating itself, so the handoff path has to work with the platform naming
-    // and networks — a predecessor found on the legacy network, a successor named without any tier
-    // segment, and still no container stopped by this process.
+  public void aPlatformSelfUpdateIsRefusedTheSameWay() {
+    // The platform plane finds itself through the legacy network and the bare alias, so the
+    // refusal has to hold there too — this is the deployment this component actually takes.
     createPlatformEnvironment("flow-selfplane");
     specs.script(
         "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     String selfId = "abcdef123456";
-    String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(List.of(new DockerHost.Holder(selfFullId, "qits-platform-deployments", null)));
+    driver.scriptAliasHolders(
+        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
     postBuildSucceeded("qits-platform-deployments", "environment/flow-selfplane", SHA_A);
+    awaitWorkerIdle();
 
-    long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.handoffs().isEmpty() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(50);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
-    assertEquals(1, driver.handoffs().size(), "the referee was launched");
-    DockerHost.HandoffSpec handoff = driver.handoffs().get(0);
-    assertEquals(selfFullId, handoff.oldContainerId());
-    String successor = driver.started().get(0).containerName();
-    assertEquals(successor, handoff.newContainerName());
-    assertTrue(successor.startsWith("qits-pd-qits-platform-deployments-"), successor);
-    assertEquals("qits-platform", driver.started().get(0).network());
-    // The successor is on its networks BEFORE the referee stops the predecessor — it has to be
-    // reachable the moment it passes its gate.
-    List<String> calls = driver.calls();
-    assertTrue(
-        calls.indexOf("connect:qits-net:" + successor + ":qits-platform-deployments")
-            < calls.indexOf("handoff:" + successor),
-        "joined before the handoff: " + calls);
-    // Nothing stopped, nothing removed by THIS process — the referee owns retirement.
-    assertEquals(List.of(), driver.stoppedContainers());
-    assertEquals(List.of(), driver.removedContainers());
+    PdDeployment row = deploymentOf("qits-platform-deployments", null, SHA_A);
+    assertEquals("FAILED", row.status.name());
+    assertTrue(row.detail.contains("swarm"), row.detail);
+    assertEquals(List.of(), driver.started(), "nothing ran");
+    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
   }
 
   @Test

@@ -240,7 +240,7 @@ public class PdDeploymentObservationTest {
   @Test
   public void aQueuedOrStartingRowIsNeverTouched() {
     // Those two belong to the worker's own state machine and to the startup sweep. A self-update
-    // handoff sits in STARTING with a healthy successor on purpose, and an observation that promoted
+    // self-update sits in STARTING with a healthy successor on purpose, and an observation that promoted
     // it would take the surviving instance's decision away.
     String queued =
         deployment(
@@ -258,7 +258,7 @@ public class PdDeploymentObservationTest {
     observer.observeOnce();
 
     assertEquals("QUEUED", statusOf(queued));
-    assertEquals("STARTING", statusOf(starting), "the handoff's outcome is the survivor's to record");
+    assertEquals("STARTING", statusOf(starting), "a succession's outcome is the survivor's to record");
   }
 
   @Test

@@ -26,6 +26,8 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private final List<String> reaped = Collections.synchronizedList(new ArrayList<>());
   private final List<String> pulled = Collections.synchronizedList(new ArrayList<>());
   private final List<Network> ensured = Collections.synchronizedList(new ArrayList<>());
+  private final java.util.Map<String, String> runningImages =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   private volatile PullResult nextPull = new PullResult(PullOutcome.OK, null);
   private volatile ApplyResult nextApply = new ApplyResult(ApplyOutcome.APPLIED, null);
@@ -90,9 +92,17 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     reaped.addAll(names);
   }
 
+  /** What the startup sweep is told is running, per name. Nothing scripted means no such service. */
+  public void scriptRunningImage(String name, String imageRef) {
+    runningImages.put(name, imageRef);
+  }
+
   @Override
-  public boolean isSelf(String name) {
-    return false;
+  public java.util.Optional<RunningImage> runningImage(String name) {
+    String image = runningImages.get(name);
+    return image == null
+        ? java.util.Optional.empty()
+        : java.util.Optional.of(new RunningImage(image, null));
   }
 
   @Override

@@ -181,7 +181,7 @@ public class PdSwarmDeployFlowTest {
 
   @Test
   public void aSelfUpdateLeavesTheRowStartingForWhoeverSurvives() {
-    // Under swarm the manager IS the referee: it stops this task, starts the successor and reverts
+    // Under swarm the manager arbitrates: it stops this task, starts the successor and reverts
     // the spec if the successor never goes healthy. So the driver hands the deployment over, and
     // this component records nothing — the row is settled by the instance that boots next.
     QuarkusMock.installMockForType(fake, DeploymentDriver.class);
@@ -253,7 +253,7 @@ public class PdSwarmDeployFlowTest {
     return fail("the deployments of " + environmentId + " did not settle to " + count);
   }
 
-  /** The handoff's own end state: a row that stays STARTING because nobody here may settle it. */
+  /** A self-update's own end state: a row that stays STARTING because nobody here may settle it. */
   private void awaitStarting(String environmentId) {
     long deadline = System.currentTimeMillis() + 15_000;
     while (System.currentTimeMillis() < deadline) {

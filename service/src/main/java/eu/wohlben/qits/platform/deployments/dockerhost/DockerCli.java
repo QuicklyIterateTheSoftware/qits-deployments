@@ -40,7 +40,7 @@ import org.jboss.logging.Logger;
  * ends at lifecycle.
  *
  * <p><b>It performs, it does not decide.</b> Which container to stop, whether a refused join fails
- * a deployment and who arbitrates a self-update are {@link DockerDeploymentDriver}'s, one layer up;
+ * a deployment and what a self-update does are {@link DockerDeploymentDriver}'s, one layer up;
  * this class was that whole file until there was a second orchestrator to keep docker's model out
  * of. The argv assembly and the output parsing stayed here, which is also where their tests are.
  *
@@ -86,9 +86,6 @@ public class DockerCli implements DockerHost {
    */
   static final String APP_NAME_LABEL = DeploymentDriver.APP_NAME_LABEL;
 
-  /** The referee container's name prefix — one per handoff, removed when it finishes. */
-  private static final String HANDOFF_PREFIX = "qits-pd-handoff-";
-
   /**
    * What docker says when the registry answered "no such image". Matched case-insensitively over
    * the pull's combined output to tell {@code IMAGE_MISSING} from a docker that is down — brittle
@@ -132,10 +129,6 @@ public class DockerCli implements DockerHost {
 
   /** Looked up per key rather than {@code @ConfigProperty}: the key carries the application name. */
   @Inject Config config;
-
-  /** Mounted into the handoff referee, which drives docker exactly like this process does. */
-  @ConfigProperty(name = "qits.platform.deployments.docker-socket-path")
-  String dockerSocketPath;
 
   @Override
   public boolean ensureNetwork(Network spec) {
@@ -504,83 +497,22 @@ public class DockerCli implements DockerHost {
   }
 
   @Override
-  public String containerId(String containerName) {
+  public String runningImage(String containerName) {
     PdProcess.Result result =
-        PdProcess.run(
-            null,
-            List.of(runtime, "inspect", "--format", "{{.Id}}", containerName),
-            INSPECT_TIMEOUT,
-            8192);
+        PdProcess.run(null, buildRunningImageArgv(containerName), INSPECT_TIMEOUT, 8192);
     if (result.exitCode() != 0 || result.output() == null) {
-      return "";
+      return ""; // no such container: docker cannot inspect it at all
     }
     return result.output().strip();
   }
 
-  @Override
-  public void handoff(HandoffSpec spec) {
-    // Everything interpolated into this script is cd's own: the old id came from docker, the new
-    // name from containerName() (dns-label charset), the timeout from config. The referee runs
-    // the deployment's own image — just pulled, guaranteed present — with its entrypoint swapped
-    // for the shell, and --rm so a finished referee leaves nothing behind.
-    String script =
-        String.join(
-            "\n",
-            "docker stop " + spec.oldContainerId(),
-            "t=0",
-            "while [ \"$t\" -lt " + spec.timeoutSeconds() + " ]; do",
-            "  s=$(docker inspect --format"
-                + " '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'"
-                + " " + spec.newContainerName() + " 2>/dev/null || echo gone)",
-            "  case \"$s\" in running/healthy) docker rm -f " + spec.oldContainerId() + "; exit 0;; esac",
-            "  sleep 2",
-            "  t=$((t+2))",
-            "done",
-            "docker rm -f " + spec.newContainerName(),
-            "docker start " + spec.oldContainerId());
-    PdProcess.Result result =
-        PdProcess.run(null, buildHandoffArgv(spec, script), RUN_TIMEOUT, outputMaxChars);
-    if (result.exitCode() != 0) {
-      LOG.errorf("Could not launch the handoff referee: %s", result.output());
-    }
-  }
-
-  /** Package-private for the argv test. */
-  List<String> buildHandoffArgv(HandoffSpec spec, String script) {
-    String suffix =
-        spec.newContainerName().length() > 8
-            ? spec.newContainerName().substring(spec.newContainerName().length() - 8)
-            : spec.newContainerName();
-    List<String> argv = new ArrayList<>();
-    argv.add(runtime);
-    argv.add("run");
-    argv.add("-d");
-    argv.add("--rm");
-    argv.add("--name");
-    argv.add(HANDOFF_PREFIX + suffix);
-    argv.add("-v");
-    argv.add(dockerSocketPath + ":" + dockerSocketPath);
-    socketGid().ifPresent(gid -> {
-      argv.add("--group-add");
-      argv.add(gid);
-    });
-    argv.add("--entrypoint");
-    argv.add("/bin/sh");
-    argv.add(spec.imageRef());
-    argv.add("-c");
-    argv.add(script);
-    return List.copyOf(argv);
-  }
-
-  /** The socket's owning group, so the referee (uid 1001 in the image) may use it. */
-  private java.util.Optional<String> socketGid() {
-    try {
-      Object gid =
-          java.nio.file.Files.getAttribute(java.nio.file.Path.of(dockerSocketPath), "unix:gid");
-      return java.util.Optional.of(String.valueOf(gid));
-    } catch (Exception e) {
-      return java.util.Optional.empty();
-    }
+  /**
+   * Package-private for the argv test. {@code .Config.Image} is the reference the container was
+   * <b>run</b> with, tag and all — {@code .Image} would be the resolved image id, which carries no
+   * sha the deployment row could be compared against.
+   */
+  List<String> buildRunningImageArgv(String containerName) {
+    return List.of(runtime, "inspect", "--format", "{{.Config.Image}}", containerName);
   }
 
   @Override

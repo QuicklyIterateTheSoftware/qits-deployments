@@ -53,12 +53,12 @@ resources: postgresql:db, postgresql:eventstream:qits_deployments_eventstream
 # STOP-FIRST, AND THIS COMPONENT IS THE REASON THE KEY EXISTS. The default is `start-first`: the
 # successor starts beside the predecessor, which is what makes an orchestrator's rollback lossless.
 # This deployer cannot be two processes at once — it holds the deployments config volume, it binds
-# the surface an operator is watching, and its own succession is already arbitrated by a third party
-# (the referee on the docker path, the swarm manager under swarm). So it takes the gap in service it
-# has today and says so, rather than being the one application an overlap surprises.
+# the surface an operator is watching, and its own succession is arbitrated by the swarm manager
+# rather than by either instance. So it takes the gap in service it has today and says so, rather
+# than being the one application an overlap surprises.
 #
-# It is read by the SWARM path (--update-order) and read-and-ignored by the docker one, whose
-# cutover is stop-first by construction.
+# It is read by the SWARM path (--update-order), which is the only path that deploys this component
+# at all: the docker one has no arbiter for a self-update and refuses it.
 #
 # THE KEY MUST SHIP BEFORE THIS LINE DOES. A spec is fetched at the BUILT sha and an unknown key
 # fails a deployment, so a deployer that predates the parser reads this file and refuses the build

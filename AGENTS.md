@@ -162,9 +162,10 @@ Transactions are programmatic everywhere in `control`, never `@Transactional` �
 worker, partly because a `this.`-invocation never crosses the interceptor and a lost bracket fails
 quietly.
 
-The startup sweep (`DeployService.onStart`) fails rows left `QUEUED`/`STARTING` by a crash and
-**deliberately reaps no containers** — a deployed application outlives its deployer, and whatever
-was ACTIVE before the restart is still serving. Do not "complete" the sweep with a reap.
+The startup sweep (`DeployService.onStart`) settles rows left `QUEUED`/`STARTING` by a crash — see
+"Two orchestrators, one seam" for what settles them — and **deliberately reaps no containers**: a
+deployed application outlives its deployer, and whatever was ACTIVE before the restart is still
+serving. Do not "complete" the sweep with a reap.
 
 **The worker survives losing its own datasource, in exactly three brackets.** This component deploys
 qits-oci-postgresql — the postgres its own registry lives in — so cutting that container over kills
@@ -273,7 +274,7 @@ whose container died an hour after the gate passed, with nothing ever noticing.
 - **It settles the LATEST row per (application, tier) only**, latest by `seq`. History stays history:
   an older `FAILED` row describes an attempt that really did fail, and today's healthy container says
   nothing about it. `QUEUED`/`STARTING` belong to the worker's state machine and to the startup sweep
-  — a self-update handoff sits in `STARTING` with a healthy successor **on purpose** —
+  — a self-update sits in `STARTING` with a healthy successor **on purpose** —
   and `DECOMMISSIONED` is another deployment's decision.
 - **`FAILED` → `ACTIVE`** when the container **the row itself names** is healthy by
   `HealthGate.healthy` (the gate's own verdict, extracted so there is one spelling of it). Only the
@@ -306,19 +307,22 @@ claim, off the fake's call log: the pass's `observe:` calls land after the deplo
 ## Two orchestrators, one seam
 
 `qits.platform.deployments.orchestrator` is `docker` (shipped) or `swarm`, and it picks which
-`DeploymentDriver` the whole component runs on. Both paths work; deleting the docker one is a later
-phase, because the handoff referee is what makes this component able to update itself today.
+`DeploymentDriver` the whole component runs on. Both paths work, with one asymmetry that is the
+migration itself: **only swarm can deploy this component**. A self-update takes a third party, the
+docker path's was a detached referee container and it is retired, so that path refuses a deployment
+of this component and names swarm on the row. Flipping the default and deleting the docker path is
+the next phase.
 
 **The seam is two verbs now**: `apply(ServiceSpec)` makes the described service exist at the
 described image, `awaitConverged(name, timeout)` says whether it took. `start`, `stop`, `restart`,
-`connect`, `disconnect`, `aliasHolders`, `handoff`, `selfContainerId` and `containerId` are gone
+`connect`, `disconnect`, `aliasHolders`, `handoff`, `isSelf` and `containerId` are gone
 from it — every one of them is a statement about how *docker* replaces a container, and keeping
 them would have made one orchestrator's model look like the contract.
 
 **So `DeployService.execute` has no branches in it**: resolve → provision → pull (for the
 `IMAGE_MISSING` classification, on both paths) → `apply` → `awaitConverged` → record. The
-predecessor search, the alias union, the stop-before-start, the join loop, the reconciliation, the
-rollback and the referee all moved into `dockerhost/DockerDeploymentDriver`. What stayed is the
+predecessor search, the alias union, the stop-before-start, the join loop, the reconciliation and
+the rollback all moved into `dockerhost/DockerDeploymentDriver`. What stayed is the
 bookkeeping, because it is the same on both paths: the row per place, the four announcements, the
 cutover bracket, and the reap **after** the rows (`Convergence.retired()` comes back as data for
 exactly that reason).
@@ -330,11 +334,12 @@ Three things about the shape, each easy to undo by accident:
   address so it is the wire alias, and the row records whichever it is. A name-based check that
   assumes the first shape breaks the swarm path silently.
 - **`ApplyOutcome.HANDED_OFF` is neither success nor failure.** A deployment that replaces this very
-  process leaves its row `STARTING` on purpose; the instance that survives records it. Docker
-  answers succession with a detached referee, swarm with the manager in the daemon.
+  process leaves its row `STARTING` on purpose; the instance that survives records it, from
+  `runningImage`. Only the swarm path answers this way — the docker one has no arbiter and returns
+  `REFUSED` before it stops anything.
 - **`DockerHost` is the docker CLI as its own seam**, and the suite's `@Mock` fake sits there rather
   than at `DeploymentDriver`. That is what keeps every flow test driving the REAL cutover
-  choreography — the stop, the joins, the reconcile, the rollback, the referee — with no docker.
+  choreography — the stop, the joins, the reconcile, the rollback — with no docker.
   `FakeDeploymentDriver` still exists for the state-machine tests and is installed per test with
   `QuarkusMock`; making it a `@Mock` would take the choreography out of the suite.
 
@@ -351,10 +356,14 @@ repository, and only the repository knows: a published host port, a single-write
 config volume each make the overlap impossible. This repo says `stop-first`. The docker path reads
 it and ignores it — its cutover is stop-first by construction.
 
-**Phase 6 is not done and is named where it bites.** The startup sweep's adoption arm is still "is
-this row's name me" (`DeploymentDriver.isSelf`); under swarm the better question is whether the
-service's running image carries the row's sha, which is what tells a completed self-update from a
-rolled-back one. Until then a swarm self-update adopts its row the way the docker one does.
+**The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
+one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
+the prior actives of that place decommissioned, another sha is `FAILED` as superseded (swarm's
+`UpdateStatus` supplies the wording), and no such service is the interrupted-by-a-restart failure
+every other in-flight row takes. The **image** is the check and `UpdateStatus` is only wording: that
+field holds the most recent update, so a later deployment overwrites the verdict of the one a row is
+about. It replaced "is this row's name me", which cannot tell a completed succession from a
+rolled-back one — under swarm the service keeps its name across both.
 
 ## The health gate is patient, and that is not a tuning choice
 
@@ -375,8 +384,8 @@ why the instant fail survived this long.
 
 **The follow-up this makes optional:** `docker create` → connects → `docker start` would remove the
 race outright. It moves the argv off `run`, grows `StartSpec` with the join set, and drags the
-self-update handoff and the cutover's call-order assertions with it. Recorded, not done — a patient
-gate is the fix, and it is the one that also covers every other slow first boot.
+cutover's call-order assertions with it. Recorded, not done — a patient gate is the fix, it covers
+every other slow first boot too, and the docker path it belongs to is being retired anyway.
 
 The gate lives in the domain module rather than in `dockerhost/` so the suite's fake gate IS the
 shipped gate: `FakeDeploymentDriver.scriptRestartingUntilHealthy` feeds it states and nothing else.
@@ -987,9 +996,10 @@ lockfile keeps the developer-host origin, which is correct locally.
 **This repo is its own deployer**, and it is an **environment service** — one instance per
 environment, deploying that environment. Its `.config/qits/deployments.yml` takes the default
 target and names no branch at all: a push to the branch an environment listens to is a deployment.
-A green run announces this component to itself and it takes the self-update handoff; the
-`/platform-deployments` surface blips mid-cutover, and a successor that misses its health gate
-leaves the predecessor serving.
+A green run announces this component to itself, and **under swarm** it deploys itself: the manager
+arbitrates the succession, the `/platform-deployments` surface blips mid-cutover (this repo's spec
+says `update_order: stop-first`), and a successor that misses its health gate leaves the predecessor
+serving. Under the docker path that deployment is refused.
 
 **`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
 *environment* listens to its branch, and what comes out on the platform plane is still

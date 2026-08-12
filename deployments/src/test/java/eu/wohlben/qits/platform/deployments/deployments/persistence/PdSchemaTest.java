@@ -89,7 +89,7 @@ public class PdSchemaTest {
   public void thePredecessorLookupMatchesAcrossANullTier() throws Exception {
     // The sweep's adoption, as SQL. A platform deployment's environment_id is null on both rows,
     // and `p.environment_id = o.environment_id` matches NOTHING when both are null — so the query
-    // tests for null explicitly. Getting this wrong is silent: the successor of a handoff comes up,
+    // tests for null explicitly. Getting this wrong is silent: the successor of a self-update comes up,
     // finds no predecessor to decommission, and two rows claim to be ACTIVE.
     try (Connection connection = migrated();
         Statement sql = connection.createStatement()) {

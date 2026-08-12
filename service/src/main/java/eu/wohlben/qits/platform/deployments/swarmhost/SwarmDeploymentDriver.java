@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -69,10 +70,11 @@ import org.jboss.logging.Logger;
  * Nothing translates a {@code docker run} argv any more: config states the intent, and the one
  * intent swarm cannot express — a publish bound to an ip — is refused rather than widened.
  *
- * <p><b>What this phase deliberately does NOT do</b>: it does not rewrite the startup sweep's
- * adoption arm — that is where the self-update bookkeeping will eventually compare the service's
- * running image with the row's sha. That is a later phase, and it is named where it bites: {@link
- * #isSelf}.
+ * <p><b>The one piece of a self-update swarm does not do for us is the row.</b> The instance that
+ * issues the update on its own service dies before the outcome exists, so the deployment stays
+ * {@code STARTING} until an instance boots that can settle it — from {@link #runningImage}, the
+ * image the service is running, which is the only reading that tells a completed succession from a
+ * rolled-back one.
  */
 @ApplicationScoped
 @Orchestrated(Orchestrated.Kind.SWARM)
@@ -105,6 +107,13 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    */
   static final String UPDATE_STATUS_FORMAT =
       "{{if .UpdateStatus}}{{.UpdateStatus.State}}|{{.UpdateStatus.Message}}{{else}}|{{end}}";
+
+  /**
+   * The startup sweep's evidence: what the service runs, then the same update status as wording.
+   * One format because both fields sit on the object one {@code service inspect} returns.
+   */
+  static final String RUNNING_IMAGE_FORMAT =
+      "{{.Spec.TaskTemplate.ContainerSpec.Image}}|" + UPDATE_STATUS_FORMAT;
 
   /** The label swarm itself puts on a task container, naming the service it belongs to. */
   private static final String SWARM_SERVICE_LABEL = "com.docker.swarm.service.name";
@@ -204,10 +213,10 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       return new ApplyResult(ApplyOutcome.REFUSED, result.output());
     }
     if (self) {
-      // The self-update, and swarm is the referee the docker path has to launch: the manager lives
-      // in the daemon rather than in a container this process owns, so it can stop this task, start
-      // the successor and revert the spec if the successor never goes healthy. Nothing here waits
-      // for that — this process is what is being replaced.
+      // The self-update, and this is the arbiter the docker path never had: the manager lives in
+      // the daemon rather than in a container this process owns, so it can stop this task, start the
+      // successor and revert the spec if the successor never goes healthy. Nothing here waits for
+      // that — this process is what is being replaced.
       LOG.infof(
           "Self-update issued on service %s: the swarm manager finishes it, and the row stays"
               + " STARTING until the instance that survives records it",
@@ -375,18 +384,44 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
+   * What the service runs now, and swarm's own account of the update that put it there — one
+   * inspect, because the two fields sit on one object.
+   *
+   * <p><b>The image is the verdict and {@code UpdateStatus} is only the wording</b>, which is the
+   * whole reason the sweep asks this rather than reading the status alone: that field holds the
+   * most recent update, so a later deployment overwrites what it said about the one a row is about.
+   * The image a service is running cannot be out of date in that way.
+   */
+  @Override
+  public Optional<RunningImage> runningImage(String name) {
+    PdProcess.Result inspected =
+        run(
+            List.of(runtime, "service", "inspect", "--format", RUNNING_IMAGE_FORMAT, name),
+            INSPECT_TIMEOUT);
+    if (inspected.exitCode() != 0) {
+      return Optional.empty(); // swarm has no such service
+    }
+    String[] parts = safe(inspected.output()).strip().split("\\|", 3);
+    String image = parts[0].strip();
+    if (image.isEmpty()) {
+      return Optional.empty();
+    }
+    String state = parts.length > 1 ? parts[1].strip() : "";
+    String message = parts.length > 2 ? parts[2].strip() : "";
+    return Optional.of(
+        new RunningImage(image, state.isEmpty() ? null : (state + ": " + message).strip()));
+  }
+
+  /**
    * Whether the named service is the one this task belongs to — read off the label swarm puts on
    * every task container ({@value #SWARM_SERVICE_LABEL}), via this container's own id.
    *
-   * <p><b>The startup sweep's adoption arm is still the docker-era one, and this is the seam it
-   * hangs on.</b> Comparing the service's RUNNING IMAGE with the row's sha is the better question
-   * under swarm — it tells a successful self-update from a rollback, which "am I this service"
-   * cannot — and it is a later phase's work. Until then a self-update under swarm adopts the row
-   * the same way the docker path does, which is right whenever the update completed and wrong
-   * exactly when swarm rolled it back.
+   * <p>Asked by {@link #apply} alone, and it answers one question: may this process wait for the
+   * verdict, or is it what is being replaced. Whether the succession then WORKED is a different
+   * question, asked of the image by the next instance to boot ({@link #runningImage}) — "am I this
+   * service" is true of the successor and of a predecessor swarm rolled back to, alike.
    */
-  @Override
-  public boolean isSelf(String name) {
+  private boolean isSelf(String name) {
     String hostname = selfContainerId();
     if (hostname.isBlank()) {
       return false;
@@ -694,7 +729,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    *
    * <p>{@code --update-failure-action rollback} is not configurable and is not meant to be: a
    * successor that never goes healthy must leave the platform running whatever it replaced, which
-   * is the invariant the docker path spends a stop, a restart and a referee on.
+   * is the invariant the docker path spends a stop and a restart on.
    */
   private void updateFlags(List<String> argv, ServiceSpec spec, String orderFlag) {
     argv.add(orderFlag);

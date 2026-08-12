@@ -19,7 +19,7 @@ import java.util.Set;
  *
  * <p><b>It faked the whole {@code DeploymentDriver} until there were two orchestrators</b>, and
  * moving it one layer down is what kept every claim the flow tests make. The cutover choreography
- * — the stop before the start, the joins, the reconciliation, the rollback, the referee — is
+ * — the stop before the start, the joins, the reconciliation, the rollback — is
  * {@link DockerDeploymentDriver}'s now, and it is real in those tests; what is faked is the child
  * processes underneath it. A fake at the driver level would have taken the choreography out of the
  * suite along with docker.
@@ -55,8 +55,9 @@ public class FakeDockerHost implements DockerHost {
 
   private final List<String> disconnections = Collections.synchronizedList(new ArrayList<>());
 
-  private final List<HandoffSpec> handoffs = Collections.synchronizedList(new ArrayList<>());
-  private final java.util.Map<String, String> containerIds = new java.util.concurrent.ConcurrentHashMap<>();
+  /** What {@link #runningImage} answers per container name — the startup sweep's evidence. */
+  private final java.util.Map<String, String> runningImages =
+      new java.util.concurrent.ConcurrentHashMap<>();
 
   private volatile DeploymentDriver.PullResult nextPull =
       new DeploymentDriver.PullResult(DeploymentDriver.PullOutcome.OK, null);
@@ -112,8 +113,7 @@ public class FakeDockerHost implements DockerHost {
     calls.clear();
     connections.clear();
     disconnections.clear();
-    handoffs.clear();
-    containerIds.clear();
+    runningImages.clear();
     containerStates.clear();
     nextPull = new DeploymentDriver.PullResult(DeploymentDriver.PullOutcome.OK, null);
     nextStart = new StartResult(true, null);
@@ -171,8 +171,12 @@ public class FakeDockerHost implements DockerHost {
     return List.copyOf(ensuredNetworkSpecs);
   }
 
-  public void scriptContainerId(String containerName, String id) {
-    containerIds.put(containerName, id);
+  /**
+   * The image docker reports for this container. A name nothing scripted answers blank, which is
+   * what "docker has no such container" looks like to the sweep.
+   */
+  public void scriptRunningImage(String containerName, String imageRef) {
+    runningImages.put(containerName, imageRef);
   }
 
   /**
@@ -188,10 +192,6 @@ public class FakeDockerHost implements DockerHost {
   /** The container docker cannot inspect at all — removed underneath a row that still names it. */
   public void scriptContainerGone(String containerName, String detail) {
     containerStates.put(containerName, HealthGate.Poll.gone(detail));
-  }
-
-  public List<HandoffSpec> handoffs() {
-    return List.copyOf(handoffs);
   }
 
   public void scriptAliasHolders(List<Holder> holders) {
@@ -356,14 +356,9 @@ public class FakeDockerHost implements DockerHost {
   }
 
   @Override
-  public String containerId(String containerName) {
-    return containerIds.getOrDefault(containerName, "");
-  }
-
-  @Override
-  public void handoff(HandoffSpec spec) {
-    handoffs.add(spec);
-    calls.add("handoff:" + spec.newContainerName());
+  public String runningImage(String containerName) {
+    calls.add("runningImage:" + containerName);
+    return runningImages.getOrDefault(containerName, "");
   }
 
   @Override

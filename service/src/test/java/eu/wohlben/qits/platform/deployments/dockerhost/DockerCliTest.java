@@ -347,27 +347,12 @@ class DockerCliTest {
   }
 
   @Test
-  void theRefereeArgvSwapsTheEntrypointMountsTheSocketAndCarriesTheArbitrationScript() {
-    DockerCli driver = driver();
-    driver.dockerSocketPath = "/var/run/docker.sock";
-    DockerHost.HandoffSpec spec =
-        new DockerHost.HandoffSpec(
-            "qits-artifacts:8080/qits/qits-platform-deployments:abc",
-            "old-full-id",
-            "qits-pd-prod-qits-platform-deployments-12345678",
-            120);
-    String script = "docker stop old-full-id\n...";
-
-    List<String> argv = driver.buildHandoffArgv(spec, script);
-
-    assertEquals(List.of("docker", "run", "-d", "--rm"), argv.subList(0, 4));
-    assertTrue(argv.containsAll(List.of("--name", "qits-pd-handoff-12345678")));
-    assertTrue(argv.containsAll(List.of("-v", "/var/run/docker.sock:/var/run/docker.sock")));
-    assertTrue(argv.containsAll(List.of("--entrypoint", "/bin/sh")));
-    // The image is the deployment's own — just pulled, guaranteed present — then -c <script>.
-    int image = argv.indexOf("qits-artifacts:8080/qits/qits-platform-deployments:abc");
-    assertEquals("-c", argv.get(image + 1));
-    assertEquals(script, argv.get(image + 2));
+  void theRunningImageArgvAsksForTheReferenceTheContainerWasRunWith() {
+    // The startup sweep compares this answer with the row's sha, so it has to be the REFERENCE:
+    // `.Image` would be the resolved image id, which carries no tag to compare with.
+    assertEquals(
+        List.of("docker", "inspect", "--format", "{{.Config.Image}}", "qits-pd-dev-qits-gateway-dep"),
+        driver().buildRunningImageArgv("qits-pd-dev-qits-gateway-dep"));
   }
 
   @Test
