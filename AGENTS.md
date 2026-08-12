@@ -303,6 +303,59 @@ its shipped default in the suite and `PdDeploymentObservationTest` drives `obser
 `enqueueObservation()` directly, the `PdSweepAdoptionTest` shape. That test also holds the serialization
 claim, off the fake's call log: the pass's `observe:` calls land after the deployment's last one.
 
+## Two orchestrators, one seam
+
+`qits.platform.deployments.orchestrator` is `docker` (shipped) or `swarm`, and it picks which
+`DeploymentDriver` the whole component runs on. Both paths work; deleting the docker one is a later
+phase, because the handoff referee is what makes this component able to update itself today.
+
+**The seam is two verbs now**: `apply(ServiceSpec)` makes the described service exist at the
+described image, `awaitConverged(name, timeout)` says whether it took. `start`, `stop`, `restart`,
+`connect`, `disconnect`, `aliasHolders`, `handoff`, `selfContainerId` and `containerId` are gone
+from it — every one of them is a statement about how *docker* replaces a container, and keeping
+them would have made one orchestrator's model look like the contract.
+
+**So `DeployService.execute` has no branches in it**: resolve → provision → pull (for the
+`IMAGE_MISSING` classification, on both paths) → `apply` → `awaitConverged` → record. The
+predecessor search, the alias union, the stop-before-start, the join loop, the reconciliation, the
+rollback and the referee all moved into `dockerhost/DockerDeploymentDriver`. What stayed is the
+bookkeeping, because it is the same on both paths: the row per place, the four announcements, the
+cutover bracket, and the reap **after** the rows (`Convergence.retired()` comes back as data for
+exactly that reason).
+
+Three things about the shape, each easy to undo by accident:
+
+- **`nameOf(spec)` is asked before `apply`**, and it is the whole of the naming difference: docker
+  names a container per deployment (`qits-pd-<env>-<app>-<id8>`), a swarm service's name IS its
+  address so it is the wire alias, and the row records whichever it is. A name-based check that
+  assumes the first shape breaks the swarm path silently.
+- **`ApplyOutcome.HANDED_OFF` is neither success nor failure.** A deployment that replaces this very
+  process leaves its row `STARTING` on purpose; the instance that survives records it. Docker
+  answers succession with a detached referee, swarm with the manager in the daemon.
+- **`DockerHost` is the docker CLI as its own seam**, and the suite's `@Mock` fake sits there rather
+  than at `DeploymentDriver`. That is what keeps every flow test driving the REAL cutover
+  choreography — the stop, the joins, the reconcile, the rollback, the referee — with no docker.
+  `FakeDeploymentDriver` still exists for the state-machine tests and is installed per test with
+  `QuarkusMock`; making it a `@Mock` would take the choreography out of the suite.
+
+**Under swarm the topology is flat and that is a decision, not a simplification**: every
+`--network-add` recreates the task, so a service declares its whole membership at create time —
+`qits.platform.deployments.swarm.flat-network` (an *attachable* overlay, which is what keeps CI
+step, workspace and agent containers working on it) plus `qits-platform` for the plane. The
+per-application networks the state machine still computes are dropped by the swarm driver, out
+loud. A service update keeps the mounts, networks and ports it was created with: changing the shape
+of a service is a `service rm` and a redeploy, not a deployment.
+
+**`update_order` in `.config/qits/deployments.yml`** is `start-first` (default) or `stop-first`, per
+repository, and only the repository knows: a published host port, a single-writer store or a held
+config volume each make the overlap impossible. This repo says `stop-first`. The docker path reads
+it and ignores it — its cutover is stop-first by construction.
+
+**Phase 6 is not done and is named where it bites.** The startup sweep's adoption arm is still "is
+this row's name me" (`DeploymentDriver.isSelf`); under swarm the better question is whether the
+service's running image carries the row's sha, which is what tells a completed self-update from a
+rolled-back one. Until then a swarm self-update adopts its row the way the docker one does.
+
 ## The health gate is patient, and that is not a tuning choice
 
 `HealthGate` (in `deployments/control`, polled by the driver) ends early on exactly two verdicts:
