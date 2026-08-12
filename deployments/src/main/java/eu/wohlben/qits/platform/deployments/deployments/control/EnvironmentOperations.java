@@ -91,9 +91,11 @@ public class EnvironmentOperations {
    * <p>The order between the container reap and the network removal is load-bearing too. Platform
    * services live on this environment's per-application networks without belonging to the
    * environment, so they survive the reap and would then hold every network open — docker refuses
-   * to remove a network with an endpoint on it. They are disconnected first, and only the networks
-   * THIS environment owns (its bundle plus everything labelled with its id) are removed, so a
-   * platform service keeps every other environment it serves.
+   * to remove a network with an endpoint on it. The plane is detached first ({@link
+   * DeploymentDriver#detachPlatformPlane}, which is a disconnect per container on the docker path
+   * and nothing at all under swarm), and only the networks THIS environment owns (its bundle plus
+   * everything labelled with its id) are removed, so a platform service keeps every other
+   * environment it serves.
    *
    * <p><b>The legacy network is never one of them.</b> An environment may have been created with
    * {@code qits.platform.deployments.legacy-network} as its bundle — the dev tier IS that case, its
@@ -137,11 +139,7 @@ public class EnvironmentOperations {
     if (removed > 0) {
       LOG.infof("Removed %d container(s) of environment %s", removed, environmentId);
     }
-    for (DeploymentDriver.Endpoint platform : driver.platformContainers()) {
-      for (String network : networks) {
-        driver.disconnect(network, platform.id());
-      }
-    }
+    driver.detachPlatformPlane(List.copyOf(networks));
     for (String network : networks) {
       driver.removeNetwork(network);
     }

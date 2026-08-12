@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -40,7 +40,7 @@ public class PdBusBuildIntakeTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
   @Inject PdBuildSuccessfulSubscriber subscriber;

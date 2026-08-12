@@ -10,7 +10,8 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -22,7 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The environment surface end to end, against {@link FakeDeploymentDriver} (no docker).
+ * The environment surface end to end, against {@link FakeDockerHost} (no docker).
  *
  * <p>Both ancestors had a suite here and they merged into this one. qits-serviceregistry's proved
  * the rows and the validation; qits-cd's proved the docker side effects and, after the extraction,
@@ -41,7 +42,7 @@ public class PdEnvironmentApiTest {
   private static final String ENVIRONMENTS = "/platform-deployments/api/environments";
   private static final String SERVICES = "/platform-deployments/api/services";
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
 
   @BeforeEach
   void reset() {
@@ -407,7 +408,7 @@ public class PdEnvironmentApiTest {
             environmentId,
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-x"));
-    driver.scriptPlatformContainers(List.of(new DeploymentDriver.Endpoint("idp-id", "qits-idp")));
+    driver.scriptPlatformContainers(List.of(new DockerHost.Endpoint("idp-id", "qits-idp")));
 
     given().when().delete(ENVIRONMENTS + "/" + environmentId).then().statusCode(204);
 
@@ -437,7 +438,7 @@ public class PdEnvironmentApiTest {
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-y"));
     driver.scriptPlatformContainers(
-        List.of(new DeploymentDriver.Endpoint("pd-id", "qits-platform-deployments")));
+        List.of(new DockerHost.Endpoint("pd-id", "qits-platform-deployments")));
 
     given().when().delete(ENVIRONMENTS + "/" + environmentId).then().statusCode(204);
 

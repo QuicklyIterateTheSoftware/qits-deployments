@@ -85,21 +85,27 @@ import org.jboss.logging.Logger;
  * is what lets it retry only attempts that certainly did not commit, and leaves the one undecidable
  * round trip (the commit acknowledgement) reported rather than repeated.
  *
- * <p><b>The cutover invariant:</b> the previous container is only <i>stopped</i> during the gate and
- * is removed only after the new one passed it; a failed deployment — image missing, docker refused,
- * health gate expired — removes the fresh container and restarts what was stopped, so the previous
- * deployment stays {@code ACTIVE} and serving. Stop-before-start (rather than an overlapping
- * cutover) is what makes stateful applications deployable at all: one binder per published host
- * port, one process per single-writer store. The pull still happens before the stop, so replacing the OCI
- * registry's own application does not depend on it being up mid-cutover. The predecessor is
- * whatever holds the application's alias on any of the networks the fresh container is about to be
- * on — including containers this component did not start (a bootstrap's seeded originals, or the
- * retired qits-cd's) and containers still living on the legacy network alone, which is how the
- * platform migrates onto per-application networks without ever running two copies. The one
- * predecessor never stopped in-process is this process's own container: deploying this component
- * takes the handoff path — start the successor, launch the detached referee that stops this
- * instance and arbitrates the gate, and let the surviving instance record the outcome (the
- * successor's sweep adopts the row; a rolled-back predecessor's sweep fails it).
+ * <p><b>The cutover is the DRIVER's, and that is the shape this class settled into once there were
+ * two orchestrators.</b> What is left here is one path with no branches in it: resolve the target,
+ * provision what the repository declared, pull so a missing image is its own outcome, {@link
+ * DeploymentDriver#apply} the spec, {@link DeploymentDriver#awaitConverged wait for the verdict},
+ * record it. The predecessor search, the alias union, the stop-before-start, the rollback of a
+ * failed gate and the self-update referee all moved into {@code dockerhost}, because every one of
+ * them is a statement about how <i>docker</i> replaces a container — swarm replaces one by updating
+ * a service in place and needs none of it. Nothing about the sequence above is orchestrator-shaped,
+ * which is the test that it is in the right place.
+ *
+ * <p><b>What did not move is the bookkeeping</b>, because it is the same on both paths: the row per
+ * place, the four announcements, the cutover bracket that decommissions the prior {@code ACTIVE}
+ * rows of an (application, tier) and marks this one live, and the reap that follows it — rows
+ * first, containers after, so a bracket that has to retry for thirty seconds has not already
+ * removed the predecessor.
+ *
+ * <p><b>One outcome is neither success nor failure and is worth knowing about here</b>: a
+ * deployment that replaces THIS process comes back {@link DeploymentDriver.ApplyOutcome#HANDED_OFF
+ * HANDED_OFF}, and the row is deliberately left {@code STARTING}. Neither instance can arbitrate
+ * its own succession, so the outcome is recorded by whichever survives — the successor's startup
+ * sweep adopts the row, a rolled-back predecessor's sweep fails it.
  */
 @ApplicationScoped
 public class DeployService implements BuildAnnouncements {
@@ -292,7 +298,6 @@ public class DeployService implements BuildAnnouncements {
 
   /** Package-private so the suite drives the sweep without a real StartupEvent. */
   void sweepInFlight() {
-    String self = driver.selfContainerId();
     int swept =
         QuarkusTransaction.requiringNew()
             .call(
@@ -303,10 +308,12 @@ public class DeployService implements BuildAnnouncements {
                   int failed = 0;
                   for (PdDeployment orphan : orphans) {
                     if (orphan.status == PdDeploymentStatus.STARTING
-                        && orphan.containerName != null
-                        && !self.isBlank()) {
-                      String id = driver.containerId(orphan.containerName);
-                      if (!id.isBlank() && (id.startsWith(self) || self.startsWith(id))) {
+                        && orphan.containerName != null) {
+                      // Whose process this is, asked of the runtime rather than assembled from two
+                      // docker questions here: the docker path compares /etc/hostname with the
+                      // named container's id, and swarm asks the task container which service it
+                      // belongs to.
+                      if (driver.isSelf(orphan.containerName)) {
                         // The prior actives of the same (application, tier). The pair is matched
                         // with an explicit null test for the platform plane — `environment_id = ?`
                         // would silently match nothing, and this instance would come back having
@@ -390,11 +397,12 @@ public class DeployService implements BuildAnnouncements {
    * before anything is queued and carried by value from there on — the docker work must not need a
    * second query to know where it is going.
    *
-   * <p>{@code healthCmd} and {@code resources} are the spec's, and are <b>the only fields here no
-   * row holds</b>. They need none: the spec is read fresh from the repository before every
-   * deployment, and the one path that resolves targets from the catalogue instead ({@link
-   * #alreadyRegistered}) records a failure and deploys nothing. Null is the HTTP probe over {@code
-   * healthPath}; an empty resource list is every application that stores nothing.
+   * <p>{@code healthCmd}, {@code resources} and {@code updateOrder} are the spec's, and are <b>the
+   * only fields here no row holds</b>. They need none: the spec is read fresh from the repository
+   * before every deployment, and the one path that resolves targets from the catalogue instead
+   * ({@link #alreadyRegistered}) records a failure and deploys nothing. Null is the HTTP probe over
+   * {@code healthPath}; an empty resource list is every application that stores nothing; the
+   * default order is {@code start-first}.
    */
   record Target(
       String applicationName,
@@ -405,7 +413,8 @@ public class DeployService implements BuildAnnouncements {
       boolean availableOnEnv,
       String healthPath,
       String healthCmd,
-      List<ResourceProvisioning.Resolved> resources) {}
+      List<ResourceProvisioning.Resolved> resources,
+      DeploymentDriver.UpdateOrder updateOrder) {}
 
   /**
    * One build-succeeded event, start to finish, on the worker thread: read what the repository
@@ -596,7 +605,8 @@ public class DeployService implements BuildAnnouncements {
               spec.availableOnEnv(),
               healthPath,
               spec.healthCmd(),
-              resources));
+              resources,
+              spec.updateOrder()));
     }
     return List.copyOf(targets);
   }
@@ -681,7 +691,8 @@ public class DeployService implements BuildAnnouncements {
             false,
             healthPath,
             spec.healthCmd(),
-            resources));
+            resources,
+            spec.updateOrder()));
   }
 
   /**
@@ -781,7 +792,8 @@ public class DeployService implements BuildAnnouncements {
                   false,
                   linked.service().healthPath,
                   null,
-                  List.of()));
+                  List.of(),
+                  null));
     }
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : tiersOnBranch(branch)) {
@@ -796,7 +808,8 @@ public class DeployService implements BuildAnnouncements {
                 linked.service().availableOnEnv,
                 linked.service().healthPath,
                 null,
-                List.of()));
+                List.of(),
+                null));
       }
     }
     return List.copyOf(targets);
@@ -916,31 +929,19 @@ public class DeployService implements BuildAnnouncements {
           : PdNetworks.application(environmentName(), applicationName());
     }
 
-    /**
-     * The address peers dial this container by, on every network it is on: {@code
-     * <environment>-<application>} for a tier's copy, the bare application name for a platform
-     * service. The run's {@code --network-alias}, every later join's {@code --alias} and the
-     * predecessor search all take this one value.
-     */
-    String wireAlias() {
-      return PdNetworks.alias(environmentName(), applicationName());
+    DeploymentDriver.UpdateOrder updateOrder() {
+      return target.updateOrder();
     }
 
     /**
-     * What the predecessor search asks about — the wire alias, plus the bare application name while
-     * anything started before the tier qualifier existed is still running.
-     *
-     * <p>Without the second the first deployment of every application would run a second copy
-     * beside the one serving: today's containers hold the bare name and nothing else, and the
-     * cutover finds a predecessor by the alias alone. It costs nothing to keep asking — a holder of
-     * the bare name that belongs to another tier is filtered out by its environment label like any
-     * other, and an unlabelled one is adoptable, which is the whole of how this platform migrates.
+     * The address peers dial this by, on every network it is on: {@code
+     * <environment>-<application>} for a tier's copy, the bare application name for a platform
+     * service. It is derived in one place because everything that has to agree on it takes it from
+     * here — docker's {@code --network-alias} and every join after it, swarm's service NAME, and
+     * the predecessor search underneath both.
      */
-    List<String> searchAliases() {
-      String qualified = wireAlias();
-      return qualified.equals(applicationName())
-          ? List.of(qualified)
-          : List.of(qualified, applicationName());
+    String wireAlias() {
+      return PdNetworks.alias(environmentName(), applicationName());
     }
   }
 
@@ -1023,17 +1024,11 @@ public class DeployService implements BuildAnnouncements {
     }
 
     // Named after the deployment, not the sha: re-deploying the same commit must never collide
-    // with the container it is about to replace.
-    String containerName =
+    // with what it is about to replace. Whether that name is what the runtime uses is the driver's
+    // answer, below: docker names one container per deployment, a swarm service's name IS its
+    // address and a replace updates it in place.
+    String deploymentName =
         ContainerNames.of(plan.environmentName(), plan.applicationName(), deploymentId);
-    QuarkusTransaction.requiringNew()
-        .run(
-            () -> {
-              PdDeployment deployment = deployments.findById(deploymentId);
-              if (deployment != null) {
-                deployment.containerName = containerName;
-              }
-            });
 
     // Networks are re-ensured on every deployment rather than trusted from creation time — an
     // environment created while docker was down must heal, not stay broken.
@@ -1047,108 +1042,65 @@ public class DeployService implements BuildAnnouncements {
               DeploymentDriver.NetworkKind.BUNDLE,
               null));
     }
-    List<String> joins = desiredJoins(plan, primaryNetwork);
+    // The FULL membership, primary first, handed over in one piece. It is a list rather than a
+    // primary plus a join set because an orchestrator that cannot join after the fact has to
+    // declare all of it at create time — every swarm `--network-add` recreates the task — and the
+    // docker driver still starts on the first and joins the rest.
+    List<String> networks = new ArrayList<>();
+    networks.add(primaryNetwork);
+    networks.addAll(desiredJoins(plan, primaryNetwork));
 
-    // The replace cutover: whatever currently answers to the application's alias is STOPPED — not
-    // removed — before the fresh container starts. Stopping first is what makes stateful
-    // applications deployable at all (one binder per published host port, one process per
-    // single-writer store); keeping the stopped containers around is what preserves the rollback: a failed gate
-    // restarts them. The search covers every network the fresh container will be on, so it also
-    // absorbs predecessors this component did not start (the bootstrap's seeded originals, the
-    // retired qits-cd's) and predecessors still living on the legacy network alone — holding the
-    // alias is what makes something the predecessor, not a row here.
-    List<String> searchNetworks = new ArrayList<>();
-    searchNetworks.add(primaryNetwork);
-    searchNetworks.addAll(joins);
-    List<DeploymentDriver.Holder> predecessors =
-        predecessorsOf(
-            driver.aliasHolders(List.copyOf(searchNetworks), plan.searchAliases()), plan);
-    String self = driver.selfContainerId();
-    DeploymentDriver.Holder selfHolder =
-        self.isBlank()
-            ? null
-            : predecessors.stream()
-                .filter(p -> p.id().startsWith(self) || self.startsWith(p.id()))
-                .findFirst()
-                .orElse(null);
-    if (selfHolder != null) {
-      // The self-update handoff. This process cannot stop itself and then finish the cutover, so
-      // the roles split three ways: this instance starts the successor (which retries on the H2
-      // lock under its restart policy) and launches a detached referee; the referee stops this
-      // container — freeing the lock — awaits the successor's health gate, and removes whichever
-      // side lost; the successor's startup sweep adopts the row it finds itself named on. The row
-      // is left STARTING on purpose: adoption marks it ACTIVE, and after a referee rollback this
-      // instance's own sweep marks it FAILED — each outcome recorded by the instance that survived
-      // it.
-      DeploymentDriver.StartResult successor =
-          driver.start(startSpec(plan, primaryNetwork, imageRef, containerName, bindings));
-      if (!successor.started()) {
-        driver.remove(containerName);
-        finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(successor.detail()));
+    DeploymentDriver.ServiceSpec spec =
+        serviceSpec(plan, List.copyOf(networks), imageRef, deploymentName, bindings);
+    // What the runtime will call it, and therefore what the row records: asked BEFORE anything is
+    // applied, so a crash in the middle leaves a STARTING row the startup sweep can still identify.
+    String name = driver.nameOf(spec);
+    QuarkusTransaction.requiringNew()
+        .run(
+            () -> {
+              PdDeployment deployment = deployments.findById(deploymentId);
+              if (deployment != null) {
+                deployment.containerName = name;
+              }
+            });
+
+    // The replace, whole, in one call. What it costs — a predecessor stopped and restartable, a
+    // hand-rolled rollback, a detached referee — is the docker driver's business; under swarm it is
+    // one `service update` and the orchestrator's own update policy.
+    DeploymentDriver.ApplyResult applied = driver.apply(spec);
+    switch (applied.outcome()) {
+      case REFUSED -> {
+        finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(applied.detail()));
         return;
       }
-      String unjoined = join(containerName, plan.wireAlias(), joins);
-      if (unjoined != null) {
-        // No handoff: the referee would promote a successor no caller can address, and it would do
-        // it by removing the instance that still works. Nothing was stopped yet, so dropping the
-        // successor puts everything back.
-        driver.remove(containerName);
-        finish(deploymentId, target, PdDeploymentStatus.FAILED, unjoined);
+      case HANDED_OFF -> {
+        // Deploying this component itself. The row stays STARTING on purpose: whichever instance
+        // survives the succession records the outcome — the successor's sweep adopts it, a
+        // rolled-back predecessor's sweep fails it.
+        LOG.infof(
+            "Self-update handed over: %s succeeds this instance, and the row stays STARTING until"
+                + " whoever survives records it (%s)",
+            name, safe(applied.detail()));
         return;
       }
-      reconcile(plan, primaryNetwork);
-      driver.handoff(
-          new DeploymentDriver.HandoffSpec(
-              imageRef, selfHolder.id(), containerName, healthTimeoutSeconds));
-      LOG.infof(
-          "Self-update handoff initiated: %s succeeds this instance (%s); the referee arbitrates",
-          containerName, selfHolder.name());
-      return;
-    }
-    for (DeploymentDriver.Holder predecessor : predecessors) {
-      driver.stop(predecessor.name());
+      case APPLIED -> {
+        /* fall through to the verdict */
+      }
     }
 
-    DeploymentDriver.StartResult started =
-        driver.start(startSpec(plan, primaryNetwork, imageRef, containerName, bindings));
-    if (!started.started()) {
-      driver.remove(containerName); // in case docker created it and then failed
-      rollback(predecessors);
-      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(started.detail()));
-      return;
-    }
-    // Docker takes one network at `run`; everything else is a join, and the set is recomputed from
-    // docker on every deployment rather than remembered — which makes this the self-heal too: a
-    // membership lost to a manual `network disconnect` or to a network that did not exist last
-    // time is simply back on the replacement.
-    //
-    // A membership the deployment asked for and did not get is a FAILED deployment, not a warning.
-    // The health gate cannot catch it — it curls localhost inside the container, which answers
-    // perfectly well from a network nobody else is on — so an unreachable container would go ACTIVE
-    // and the predecessor would be removed under it. This is the same rollback a failed gate takes.
-    String unjoined = join(containerName, plan.wireAlias(), joins);
-    if (unjoined != null) {
-      driver.remove(containerName);
-      rollback(predecessors);
-      finish(deploymentId, target, PdDeploymentStatus.FAILED, unjoined);
-      return;
-    }
-    reconcile(plan, primaryNetwork);
-
-    DeploymentDriver.HealthResult health =
-        driver.awaitHealthy(containerName, Duration.ofSeconds(healthTimeoutSeconds));
-    if (!health.healthy()) {
-      // The fresh container failed the gate: remove IT and restart what the cutover stopped —
-      // the previous deployment goes back to serving.
-      driver.remove(containerName);
-      rollback(predecessors);
-      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(health.detail()));
+    DeploymentDriver.Convergence converged =
+        driver.awaitConverged(name, Duration.ofSeconds(healthTimeoutSeconds));
+    if (!converged.converged()) {
+      // Nothing runs that did not run before: the driver removed the successor and put the
+      // predecessor back (docker), or the orchestrator reverted the spec itself (swarm).
+      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(converged.detail()));
       return;
     }
 
     // Cutover: the new deployment is the application's ACTIVE one, whatever was ACTIVE before is
-    // decommissioned — rows first, then the stopped containers (rows' and alias-holders' alike;
-    // a set, since the healthy path sees most containers from both angles).
+    // decommissioned — rows first, then whatever is left to reap (the rows' own names and the
+    // predecessors the driver retired alike; a set, since the healthy path usually sees the same
+    // ones from both angles).
     //
     // THE RETRY IS NOT DECORATION HERE. This component deploys the platform's postgres, and a
     // cutover of qits-oci-postgresql kills every connection this process holds — in the middle of
@@ -1189,22 +1141,20 @@ public class DeployService implements BuildAnnouncements {
             },
             CUTOVER_BUDGET);
     Set<String> toRemove = new LinkedHashSet<>(cutover.oldContainers());
-    for (DeploymentDriver.Holder predecessor : predecessors) {
-      toRemove.add(predecessor.name());
-    }
-    toRemove.remove(containerName);
-    for (String oldContainer : toRemove) {
-      driver.remove(oldContainer);
-    }
+    toRemove.addAll(converged.retired());
+    // Never the thing that just went live. Under swarm that removes the whole set by itself: a
+    // replace is in place, so the predecessor row names the same service this deployment applied.
+    toRemove.remove(name);
+    driver.reap(List.copyOf(toRemove));
     LOG.infof(
         "Deployed %s@%s into %s (%s)",
         plan.applicationName(),
         plan.sha(),
         plan.platform() ? "the platform" : plan.environmentName(),
-        containerName);
+        name);
     // Last, so an unreachable qits-events delays nothing this deployment still has to do. The
     // timestamp is the row's, so announcing late does not make the event late.
-    announceActive(plan, containerName, cutover.finishedAt());
+    announceActive(plan, name, cutover.finishedAt());
   }
 
   /** What the cutover bracket carries out: the containers to reap, and when it happened. */
@@ -1221,31 +1171,38 @@ public class DeployService implements BuildAnnouncements {
             plan.applicationName());
   }
 
-  private DeploymentDriver.StartSpec startSpec(
+  /**
+   * Everything the driver needs, as plain values — the {@link Plan} stance carried one step
+   * further, since a driver may run the spec on a thread and in a process this one does not own.
+   */
+  private DeploymentDriver.ServiceSpec serviceSpec(
       Plan plan,
-      String primaryNetwork,
+      List<String> networks,
       String imageRef,
-      String containerName,
+      String deploymentName,
       List<DeploymentDriver.ResourceBinding> bindings) {
-    return new DeploymentDriver.StartSpec(
+    return new DeploymentDriver.ServiceSpec(
         plan.environmentId(),
         plan.environmentName(),
         ApplicationKeys.of(plan.environmentId(), plan.applicationName()),
         plan.applicationName(),
         plan.deploymentId(),
         plan.sha(),
-        primaryNetwork,
+        deploymentName,
+        plan.wireAlias(),
+        networks,
         imageRef,
-        containerName,
         plan.healthPath(),
         plan.healthCmd(),
         plan.target().target(),
         plan.availableOnEnv(),
+        plan.updateOrder(),
         bindings);
   }
 
   /**
-   * Every network the fresh container joins after it started, primary excluded.
+   * Every network this deployment belongs on beyond its primary one — a membership the driver
+   * declares at create time or joins after the start, whichever its orchestrator can do.
    *
    * <ul>
    *   <li>the legacy network, while {@code qits.platform.deployments.legacy-network} names one —
@@ -1278,96 +1235,6 @@ public class DeployService implements BuildAnnouncements {
     }
     joins.remove(primaryNetwork);
     return List.copyOf(joins);
-  }
-
-  /**
-   * Put the fresh container on every network it needs beyond its primary one.
-   *
-   * @return null when it is on all of them, or the failure to record on the deployment row — these
-   *     joins are what makes the container addressable, so a refused one is not a warning
-   */
-  private String join(String containerName, String alias, List<String> networks) {
-    for (String network : networks) {
-      DeploymentDriver.ConnectResult joined = driver.connect(network, containerName, alias);
-      if (!joined.joined()) {
-        return "could not join " + containerName + " to '" + network + "'\n" + safe(joined.detail());
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Which of the containers answering to this alias this deployment may replace.
-   *
-   * <p>The alias search is a union that includes the legacy network, and the legacy network is
-   * shared by every tier — so it also returns another environment's copy of the same application,
-   * holding the same alias, perfectly healthy. Stopping that one would be a deployment of one tier
-   * silently taking a container out of another, which is what the environment label prevents:
-   *
-   * <ul>
-   *   <li>a holder labelled with <b>this</b> environment is this deployment's own predecessor;
-   *   <li>a holder labelled with <b>another</b> environment belongs to that tier and is left alone;
-   *   <li>a holder with <b>no</b> label is unclaimed — a compose original, a container the retired
-   *       qits-cd started, or a platform service — and stays adoptable, because that is the whole
-   *       of how this platform migrates onto per-application networks.
-   * </ul>
-   *
-   * <p>A platform deployment keeps only the unlabelled ones, which by the same rule means platform
-   * containers and unclaimed originals: a container that carries an environment id belongs to a
-   * tier, and no tier's container is the platform plane's predecessor.
-   */
-  private static List<DeploymentDriver.Holder> predecessorsOf(
-      List<DeploymentDriver.Holder> holders, Plan plan) {
-    List<DeploymentDriver.Holder> mine = new ArrayList<>();
-    for (DeploymentDriver.Holder holder : holders) {
-      if (holder.environmentId() == null || holder.environmentId().equals(plan.environmentId())) {
-        mine.add(holder);
-      } else {
-        LOG.debugf(
-            "%s holds the alias %s for environment %s — not this deployment's predecessor",
-            holder.name(), plan.applicationName(), holder.environmentId());
-      }
-    }
-    return List.copyOf(mine);
-  }
-
-  /**
-   * Put the environment's public nodes and every platform container on this application's network,
-   * both found by their container labels — docker is the membership bookkeeping, so this asks the
-   * runtime rather than a table.
-   *
-   * <p>It runs on <b>every</b> deployment, not only on the one that made the network, for the same
-   * reason the container's own joins are recomputed: the network outlives the deployment that
-   * created it. A deployment that made the network and then failed to start leaves it behind with
-   * nobody on it, and the application would stay unreachable from the gateway and from every
-   * platform service until some hub happened to redeploy. Joining is idempotent — docker refuses an
-   * already-joined container and changes nothing — so recomputing it is the self-heal.
-   *
-   * <p>Each of them is joined under <b>its own</b> wire alias, not this application's. A hub is one
-   * of this environment's containers, so it takes this environment's qualifier; a platform service
-   * is on no tier and keeps its bare name. The label carries the application name alone, which is
-   * why the qualifier is put back here rather than read.
-   */
-  private void reconcile(Plan plan, String primaryNetwork) {
-    if (plan.platform()) {
-      return;
-    }
-    for (DeploymentDriver.Endpoint hub : driver.hubContainers(plan.environmentId())) {
-      driver.connect(
-          primaryNetwork,
-          hub.id(),
-          PdNetworks.alias(plan.environmentName(), hub.applicationName()));
-    }
-    for (DeploymentDriver.Endpoint platform : driver.platformContainers()) {
-      driver.connect(primaryNetwork, platform.id(), PdNetworks.alias(null, platform.applicationName()));
-    }
-  }
-
-  /** A failed cutover restarts every container it stopped — the previous deployment serves again. */
-  private void rollback(List<DeploymentDriver.Holder> predecessors) {
-    for (DeploymentDriver.Holder predecessor : predecessors) {
-      driver.restart(predecessor.name());
-    }
   }
 
   /**

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -28,7 +29,7 @@ import org.junit.jupiter.api.Test;
 public class PdSweepAdoptionTest {
 
   @Inject DeployService deployService;
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject PdDeploymentRepository deployments;
 
   @BeforeEach

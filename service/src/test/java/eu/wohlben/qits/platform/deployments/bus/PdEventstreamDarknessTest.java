@@ -8,7 +8,7 @@ import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.control.DurableFunnel;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.eventstream.control.EventStreamSubscriber;
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
@@ -52,7 +52,7 @@ public class PdEventstreamDarknessTest {
 
   @Inject DurableFunnel funnel;
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
 
   @Inject @Any Instance<QitsDurableEventListener> durableListeners;
 

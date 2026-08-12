@@ -45,6 +45,12 @@ public interface SpecSource {
    * starts — a database of its own, whose credential arrives as {@code QITS_RESOURCE_<NAME>_*}. An
    * empty list is every application that stores nothing, which is most of them.
    *
+   * <p>{@code updateOrder} is how a replacement may overlap what it replaces — {@code start-first}
+   * unless the repository says otherwise. It is a repository's answer rather than a platform-wide
+   * one because only the repository knows whether two of its processes may run at once: a public
+   * host port, a single-writer store or a held config volume each make the overlap impossible. See
+   * {@link DeploymentDriver.UpdateOrder}.
+   *
    * <p><b>{@code deployBranches} is read and not used here</b>, and that is deliberate — see {@link
    * #deployBranches()}.
    */
@@ -54,12 +60,25 @@ public interface SpecSource {
       List<String> deployBranches,
       String healthPath,
       String healthCmd,
-      List<ResourceSpec> resources) {
+      List<ResourceSpec> resources,
+      DeploymentDriver.UpdateOrder updateOrder) {
 
     /** A null list and an empty one are the same statement: the file named none. */
     public DeploymentSpec {
       deployBranches = deployBranches == null ? List.of() : List.copyOf(deployBranches);
       resources = resources == null ? List.of() : List.copyOf(resources);
+      updateOrder = updateOrder == null ? DeploymentDriver.UpdateOrder.START_FIRST : updateOrder;
+    }
+
+    /** A spec that says nothing about the order takes the default, which is most of them. */
+    public DeploymentSpec(
+        PdDeploymentTarget target,
+        boolean availableOnEnv,
+        List<String> deployBranches,
+        String healthPath,
+        String healthCmd,
+        List<ResourceSpec> resources) {
+      this(target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, null);
     }
 
     /**

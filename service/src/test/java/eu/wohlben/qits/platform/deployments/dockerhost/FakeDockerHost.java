@@ -1,4 +1,7 @@
-package eu.wohlben.qits.platform.deployments.deployments.control;
+package eu.wohlben.qits.platform.deployments.dockerhost;
+
+import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 
 import io.quarkus.test.Mock;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -9,10 +12,17 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * The suite's stand-in for the docker seam — a scripted fake, not an honest one: it performs
+ * The suite's stand-in for the docker CLI — a scripted fake, not an honest one: it performs
  * nothing, records every call, and answers what the test told it to. {@code @Mock} makes it the
- * {@link DeploymentDriver} for every {@code @QuarkusTest} in this module, which is what keeps a
- * clone's {@code mvn verify} docker-free (the FakeCiStepRunner stance).
+ * {@link DockerHost} for every {@code @QuarkusTest} in this module, which is what keeps a clone's
+ * {@code mvn verify} docker-free (the FakeCiStepRunner stance).
+ *
+ * <p><b>It faked the whole {@code DeploymentDriver} until there were two orchestrators</b>, and
+ * moving it one layer down is what kept every claim the flow tests make. The cutover choreography
+ * — the stop before the start, the joins, the reconciliation, the rollback, the referee — is
+ * {@link DockerDeploymentDriver}'s now, and it is real in those tests; what is faked is the child
+ * processes underneath it. A fake at the driver level would have taken the choreography out of the
+ * suite along with docker.
  *
  * <p>It is one of TWO fakes the suite installs, down from three: the topology used to need a stub
  * HTTP server on a real socket, and is a repository query now.
@@ -24,10 +34,10 @@ import java.util.Set;
  */
 @Mock
 @ApplicationScoped
-public class FakeDeploymentDriver implements DeploymentDriver {
+public class FakeDockerHost implements DockerHost {
 
   private final List<String> ensuredNetworks = Collections.synchronizedList(new ArrayList<>());
-  private final List<Network> ensuredNetworkSpecs = Collections.synchronizedList(new ArrayList<>());
+  private final List<DeploymentDriver.Network> ensuredNetworkSpecs = Collections.synchronizedList(new ArrayList<>());
   private final List<String> removedNetworks = Collections.synchronizedList(new ArrayList<>());
   private final List<String> pulledRefs = Collections.synchronizedList(new ArrayList<>());
   private final List<StartSpec> started = Collections.synchronizedList(new ArrayList<>());
@@ -48,9 +58,10 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private final List<HandoffSpec> handoffs = Collections.synchronizedList(new ArrayList<>());
   private final java.util.Map<String, String> containerIds = new java.util.concurrent.ConcurrentHashMap<>();
 
-  private volatile PullResult nextPull = new PullResult(PullOutcome.OK, null);
+  private volatile DeploymentDriver.PullResult nextPull =
+      new DeploymentDriver.PullResult(DeploymentDriver.PullOutcome.OK, null);
   private volatile StartResult nextStart = new StartResult(true, null);
-  private volatile HealthResult nextHealth = new HealthResult(true, null);
+  private volatile HealthGate.Result nextHealth = new HealthGate.Result(true, null);
 
   /**
    * How many polls the container spends restarting before it comes up healthy. Zero — the default —
@@ -68,7 +79,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
 
   private volatile List<Holder> nextHolders = List.of();
   private volatile String selfId = "";
-  private final List<Network> existingNetworks = Collections.synchronizedList(new ArrayList<>());
+  private final List<DeploymentDriver.Network> existingNetworks = Collections.synchronizedList(new ArrayList<>());
   private final Set<String> createdNetworks = Collections.synchronizedSet(new java.util.HashSet<>());
   private final List<Endpoint> hubs = Collections.synchronizedList(new ArrayList<>());
   private final List<Endpoint> platformServices = Collections.synchronizedList(new ArrayList<>());
@@ -104,9 +115,9 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     handoffs.clear();
     containerIds.clear();
     containerStates.clear();
-    nextPull = new PullResult(PullOutcome.OK, null);
+    nextPull = new DeploymentDriver.PullResult(DeploymentDriver.PullOutcome.OK, null);
     nextStart = new StartResult(true, null);
-    nextHealth = new HealthResult(true, null);
+    nextHealth = new HealthGate.Result(true, null);
     restartingPolls = 0;
     nextHolders = List.of();
     selfId = "";
@@ -132,7 +143,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   /** Networks docker already has when the test starts — ensureNetwork answers "not created". */
-  public void scriptExistingNetwork(Network network) {
+  public void scriptExistingNetwork(DeploymentDriver.Network network) {
     existingNetworks.add(network);
   }
 
@@ -156,7 +167,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     return List.copyOf(searchedAliases);
   }
 
-  public List<Network> ensuredNetworkSpecs() {
+  public List<DeploymentDriver.Network> ensuredNetworkSpecs() {
     return List.copyOf(ensuredNetworkSpecs);
   }
 
@@ -211,7 +222,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     return List.copyOf(disconnections);
   }
 
-  public void scriptPull(PullResult result) {
+  public void scriptPull(DeploymentDriver.PullResult result) {
     nextPull = result;
   }
 
@@ -219,7 +230,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     nextStart = result;
   }
 
-  public void scriptHealth(HealthResult result) {
+  public void scriptHealth(HealthGate.Result result) {
     nextHealth = result;
   }
 
@@ -266,7 +277,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public boolean ensureNetwork(Network spec) {
+  public boolean ensureNetwork(DeploymentDriver.Network spec) {
     ensuredNetworks.add(spec.name());
     ensuredNetworkSpecs.add(spec);
     calls.add("ensureNetwork:" + spec.name());
@@ -280,7 +291,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public List<Network> networks() {
+  public List<DeploymentDriver.Network> networks() {
     return List.copyOf(existingNetworks);
   }
 
@@ -314,7 +325,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public PullResult pull(String imageRef) {
+  public DeploymentDriver.PullResult pull(String imageRef) {
     pulledRefs.add(imageRef);
     return nextPull;
   }
@@ -363,7 +374,7 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   }
 
   @Override
-  public HealthResult awaitHealthy(String containerName, Duration timeout) {
+  public HealthGate.Result awaitHealthy(String containerName, Duration timeout) {
     awaited.add(containerName);
     if (restartingPolls <= 0) {
       return nextHealth;
