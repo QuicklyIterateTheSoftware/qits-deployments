@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
+import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 import io.smallrye.config.PropertiesConfigSource;
@@ -224,15 +225,21 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
-  void runArgsAreTranslatedRatherThanAppended() {
-    // Almost none of docker's `run` vocabulary is valid on a service create, so the free-form key
-    // is translated here. The structured key family that replaces it is a later phase.
+  void everyExtraIsRenderedInSwarmsOwnSpelling() {
+    // Nothing is translated out of a docker argv any more: config states mounts, publishes, groups
+    // and environment, and this is what they are called on a service create.
     SwarmDeploymentDriver driver =
         driver(
             Map.of(
-                DeploymentDriver.RUN_ARGS_PREFIX + "qits-gateway",
-                "-v qits-data:/data -v /var/run/docker.sock:/var/run/docker.sock"
-                    + " --group-add 992 -e FOO=bar -p 127.0.0.1:8081:8080"));
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.mounts[1]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.mounts[2]",
+                    "volume:qits-docs:/docs:ro",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.groups[0]", "992",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.FOO", "bar",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[0]", "8081:8080",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[1]", "5353:8053/udp"));
 
     List<String> argv = driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"));
 
@@ -241,29 +248,111 @@ class SwarmDeploymentDriverTest {
         argv.containsAll(
             List.of("--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock")),
         argv.toString());
+    assertTrue(
+        argv.containsAll(List.of("--mount", "type=volume,source=qits-docs,target=/docs,readonly")));
     assertTrue(argv.containsAll(List.of("--group", "992")));
     assertTrue(argv.containsAll(List.of("--env", "FOO=bar")));
-    // The publish loses its ip, because swarm's syntax has no field for one — the driver says so in
-    // a warning and binds every interface, which is a decision the plan makes rather than hides.
+    // mode=host rather than the ingress default: it is per node, like a plain `docker run`, and
+    // this platform is one node.
     assertTrue(argv.containsAll(List.of("--publish", "published=8081,target=8080,mode=host")));
+    assertTrue(
+        argv.containsAll(List.of("--publish", "published=5353,target=8053,protocol=udp,mode=host")),
+        argv.toString());
     assertEquals(IMAGE, argv.get(argv.size() - 1));
   }
 
   @Test
-  void runArgsOfAnotherApplicationDoNotLeakIn() {
-    // The absence is the assertion that matters, and it is the same one the docker path makes: only
-    // the deployed application's own key reaches its argv, so one application's socket mount cannot
-    // ride along on a sibling's deployment.
+  void aPublishThatDemandsAnIpIsRefusedRatherThanWidened() {
+    // Swarm's publish syntax has no ip field in either mode — measured: a host-mode publish listens
+    // on 0.0.0.0. A port that was deliberately on loopback must not quietly become a port on every
+    // interface, so the deployment is refused and says which port and which address.
     SwarmDeploymentDriver driver =
         driver(
             Map.of(
-                DeploymentDriver.RUN_ARGS_PREFIX + "qits-workspaces",
-                "-v /var/run/docker.sock:/var/run/docker.sock"));
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[0]",
+                "127.0.0.1:9000:9000"));
+
+    ServiceExtras.Refused refused =
+        assertThrows(
+            ServiceExtras.Refused.class,
+            () -> driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net")));
+    assertTrue(refused.getMessage().contains("127.0.0.1"), refused.getMessage());
+
+    // Nothing was applied: the argv is built before the command runs, so the deployment is a
+    // refusal with the detail on the row and a platform that did not change.
+    cli.script("--format {{.ID}}", result(1, "no such service"));
+    DeploymentDriver.ApplyResult applied = driver.apply(spec());
+    assertEquals(DeploymentDriver.ApplyOutcome.REFUSED, applied.outcome());
+    assertTrue(applied.detail().contains("9000"), applied.detail());
+    assertTrue(cli.matching("service create").isEmpty(), "nothing was created");
+  }
+
+  @Test
+  void everyInterfaceIsSaidOutLoudRatherThanImplied() {
+    // The registry's publish is dialled by the HOST's docker daemon, so it cannot be private to the
+    // overlay. 0.0.0.0 is how the generated config says that on purpose — and it is the one ip
+    // swarm can honour, because it is the one it does anyway.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[0]", "0.0.0.0:8081:8080"));
+
+    assertTrue(
+        driver
+            .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+            .containsAll(List.of("--publish", "published=8081,target=8080,mode=host")));
+  }
+
+  @Test
+  void anUnreadableExtraRefusesTheDeployment() {
+    // Config is typed now, so an unknown key is a bug rather than a word this driver does not
+    // speak. It used to be a WARN and a dropped flag — a container that boots without its volume.
+    SwarmDeploymentDriver driver =
+        driver(Map.of(DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.add-hosts[0]", "a:1.2.3.4"));
+
+    assertThrows(
+        ServiceExtras.Refused.class,
+        () -> driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net")));
+  }
+
+  @Test
+  void extrasOfAnotherApplicationDoNotLeakIn() {
+    // The absence is the assertion that matters, and it is the same one the docker path makes: only
+    // the deployed application's own keys reach its argv, so one application's socket bind cannot
+    // ride along on a sibling's deployment — including a sibling whose name merely starts with
+    // this one's.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-workspaces.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway-daemon.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock"));
 
     List<String> argv = driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"));
 
     assertEquals(IMAGE, argv.get(argv.size() - 1));
     assertTrue(argv.stream().noneMatch(argument -> argument.contains("docker.sock")));
+  }
+
+  @Test
+  void theEnvironmentIsRestatedOnAnUpdateBecauseAnAddressCanChange() {
+    // A service update keeps the shape it is not asked to change — mounts and ports stay — but a
+    // variable is a value rather than a shape: config naming a new address is what the next
+    // deployment is supposed to carry.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL",
+                    "http://dev-qits-events:8080",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data"));
+
+    List<String> argv = driver.buildUpdateArgv(spec(), "dev-qits-gateway");
+
+    assertTrue(
+        argv.containsAll(List.of("--env-add", "QITS_EVENTS_URL=http://dev-qits-events:8080")),
+        argv.toString());
+    assertTrue(argv.stream().noneMatch(argument -> argument.startsWith("--mount")));
   }
 
   @Test

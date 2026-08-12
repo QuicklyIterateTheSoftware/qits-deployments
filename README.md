@@ -248,8 +248,10 @@ serving, and the sha a rollback would put back.
   domain that already holds the docker socket, and is never written into a row and never put in an
   argv. There is no `DROP` in the vocabulary and none is coming.
 - **Argv contributions come from deployment config and from this component itself.**
-  `qits.platform.deployments.run-args.<app>` is how a stateful application gets its volume and its
-  extra env; the `QITS_RESOURCE_<NAME>_*` triple is generated here and injected here. **Nothing
+  `qits.platform.deployments.extras.<app>.*` is how a stateful application gets its volume, its
+  published port and its extra env — a structured family each driver renders in its own
+  orchestrator's words (`ServiceExtras`); the `QITS_RESOURCE_<NAME>_*` triple is generated here and
+  injected here. **Nothing
   arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as
   before, now that a credential is a thing this component holds: what a repository can NAME is a
   database of its own, and the VALUES injected for it are ones this component generated.

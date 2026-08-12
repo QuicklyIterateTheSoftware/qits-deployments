@@ -17,6 +17,7 @@ import eu.wohlben.qits.platform.deployments.deployments.control.DeployedIdentity
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
+import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
 import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -121,14 +122,13 @@ public class DockerCli implements DockerHost {
   int outputMaxChars;
 
   /**
-   * The prefix of the per-application run-argument family: {@code
-   * qits.platform.deployments.run-args.<application-name>} holds extra {@code docker run} arguments
-   * (volumes, env, ports — whatever the deployment decides its application needs), whitespace-split
-   * and appended verbatim between cd's own flags and the image reference. Deployment config is the
-   * ONLY source — never the API, never the intake — which is what keeps the trust domain the one
-   * that already holds the docker socket. Package-private for the argv tests.
+   * What one application needs beyond its image, in deployment config: {@code
+   * qits.platform.deployments.extras.<application-name>.*}, rendered here in {@code docker run}'s
+   * own spelling. Deployment config is the ONLY source — never the API, never the intake — which is
+   * what keeps the trust domain the one that already holds the docker socket. Package-private for
+   * the argv tests.
    */
-  static final String RUN_ARGS_PREFIX = DeploymentDriver.RUN_ARGS_PREFIX;
+  static final String EXTRAS_PREFIX = DeploymentDriver.EXTRAS_PREFIX;
 
   /** Looked up per key rather than {@code @ConfigProperty}: the key carries the application name. */
   @Inject Config config;
@@ -585,7 +585,16 @@ public class DockerCli implements DockerHost {
 
   @Override
   public StartResult start(StartSpec spec) {
-    PdProcess.Result result = PdProcess.run(null, buildArgv(spec), RUN_TIMEOUT, outputMaxChars);
+    List<String> argv;
+    try {
+      argv = buildArgv(spec);
+    } catch (ServiceExtras.Refused e) {
+      // Config said something that cannot be rendered. Nothing runs, and the caller puts the
+      // predecessor back — a typed key family makes garbage in it a bug, not a vocabulary.
+      LOG.warnf("Refusing to start %s: %s", spec.containerName(), e.getMessage());
+      return new StartResult(false, e.getMessage());
+    }
+    PdProcess.Result result = PdProcess.run(null, argv, RUN_TIMEOUT, outputMaxChars);
     if (result.exitCode() != 0 || result.timedOut()) {
       LOG.warnf("Could not start container %s: %s", spec.containerName(), result.output());
       return new StartResult(false, result.output());
@@ -780,22 +789,50 @@ public class DockerCli implements DockerHost {
       env(argv, "QITS_RESOURCE_" + key + "_USERNAME", binding.username());
       env(argv, "QITS_RESOURCE_" + key + "_PASSWORD", binding.password());
     }
-    // The deployment's own additions for this application —
-    // qits.platform.deployments.run-args.<name>, whitespace split, no re-quoting (an argument that
-    // needs a space in it does not fit this seam). The application name was already
-    // dns-label-validated at the boundary, so the assembled key cannot escape the family.
+    // What this application needs beyond its image, in docker's spelling. The application name was
+    // already dns-label-validated at the boundary, so the assembled key cannot escape the family,
+    // and only this application's own keys are read.
     //
-    // THEY GO LAST, AND THAT IS THE PRECEDENCE RULE: docker keeps the LAST assignment of a
-    // repeated env key (measured: `docker run -e FOO=first -e FOO=second` leaves one FOO, and it
-    // is `second`). So every variable cd sets above is a DEFAULT the operator can override by
-    // naming the same key in run-args, and cd never overwrites what an operator wrote. The
-    // injection composes with the operator's arguments rather than fighting them.
-    config
-        .getOptionalValue(RUN_ARGS_PREFIX + spec.applicationName(), String.class)
-        .filter(raw -> !raw.isBlank())
-        .ifPresent(raw -> argv.addAll(Arrays.asList(raw.trim().split("\\s+"))));
+    // THE ENVIRONMENT GOES LAST, AND THAT IS THE PRECEDENCE RULE: docker keeps the LAST assignment
+    // of a repeated env key (measured: `docker run -e FOO=first -e FOO=second` leaves one FOO, and
+    // it is `second`). So every variable cd sets above is a DEFAULT the deployment can override by
+    // naming the same key, and cd never overwrites what an operator wrote.
+    extras(argv, ServiceExtras.of(config, spec.applicationName()));
     argv.add(spec.imageRef());
     return List.copyOf(argv);
+  }
+
+  /**
+   * {@link ServiceExtras} in {@code docker run}'s vocabulary — the whole of what this driver does
+   * with it.
+   *
+   * <p>Each element becomes one flag and one value, so a value with a space in it survives: the
+   * free-form family this replaced was whitespace split, and could not carry one at all.
+   */
+  private static void extras(List<String> argv, ServiceExtras extras) {
+    for (ServiceExtras.Mount mount : extras.mounts()) {
+      // docker run takes a volume name and a host path in the same flag and tells them apart by
+      // the leading slash. The kind is stated in config; here it is only checked against that.
+      argv.add("-v");
+      argv.add(mount.source() + ":" + mount.target() + (mount.readOnly() ? ":ro" : ""));
+    }
+    for (ServiceExtras.Publish publish : extras.publishes()) {
+      argv.add("-p");
+      argv.add(
+          (publish.ip() == null ? "" : publish.ip() + ":")
+              + publish.published()
+              + ":"
+              + publish.target()
+              + (publish.protocol() == null ? "" : "/" + publish.protocol()));
+    }
+    for (String group : extras.groups()) {
+      argv.add("--group-add");
+      argv.add(group);
+    }
+    for (String variable : extras.env()) {
+      argv.add("--env");
+      argv.add(variable);
+    }
   }
 
   private static void env(List<String> argv, String key, String value) {

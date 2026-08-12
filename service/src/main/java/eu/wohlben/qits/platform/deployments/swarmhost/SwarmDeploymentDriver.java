@@ -5,6 +5,7 @@ import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
+import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
 import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
 import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
@@ -63,10 +64,15 @@ import org.jboss.logging.Logger;
  * that never starts is a much worse way to learn that nothing published this build), and {@code
  * docker network ls} is the same command whatever created the networks.
  *
+ * <p><b>What a deployment adds beyond its image</b> — mounts, published ports, groups, environment
+ * — is {@link ServiceExtras}, stated in deployment config and rendered here in swarm's own words.
+ * Nothing translates a {@code docker run} argv any more: config states the intent, and the one
+ * intent swarm cannot express — a publish bound to an ip — is refused rather than widened.
+ *
  * <p><b>What this phase deliberately does NOT do</b>: it does not rewrite the startup sweep's
  * adoption arm — that is where the self-update bookkeeping will eventually compare the service's
- * running image with the row's sha — and it does not restructure the run-args key family. Both are
- * later phases, and both are named where they bite: {@link #isSelf} and {@link SwarmRunArgs}.
+ * running image with the row's sha. That is a later phase, and it is named where it bites: {@link
+ * #isSelf}.
  */
 @ApplicationScoped
 @Orchestrated(Orchestrated.Kind.SWARM)
@@ -183,8 +189,15 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     // manager stops this task the moment the new one is healthy.
     boolean self = isSelf(name);
     boolean exists = serviceExists(name);
-    List<String> argv =
-        exists ? buildUpdateArgv(spec, name) : buildCreateArgv(spec, name, networks);
+    List<String> argv;
+    try {
+      argv = exists ? buildUpdateArgv(spec, name) : buildCreateArgv(spec, name, networks);
+    } catch (ServiceExtras.Refused e) {
+      // Deployment config said something swarm cannot express. Nothing was applied — the argv is
+      // built before the command runs — so this deployment changed nothing.
+      LOG.warnf("Refusing to deploy %s: %s", name, e.getMessage());
+      return new ApplyResult(ApplyOutcome.REFUSED, e.getMessage());
+    }
     PdProcess.Result result = run(argv, APPLY_TIMEOUT);
     if (result.exitCode() != 0 || result.timedOut()) {
       LOG.warnf("Could not %s service %s: %s", exists ? "update" : "create", name, result.output());
@@ -591,7 +604,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--env");
       argv.add(variable);
     }
-    argv.addAll(runArgs(spec));
+    extras(argv, ServiceExtras.of(config, spec.applicationName()));
     argv.add(spec.imageRef());
     return List.copyOf(argv);
   }
@@ -603,6 +616,11 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * every part of the spec it is not asked to change, so re-stating them would at best be noise and
    * at worst would append a second copy of a mount. What changes on a deployment is the image, the
    * identity this deployment stamps on the service, and the policy the update itself runs under.
+   *
+   * <p><b>The environment is the exception, and it is re-stated in full</b> — this component's own
+   * variables and the deployment config's alike. A variable is a value rather than a shape: config
+   * naming a new address is a change the next deployment is supposed to carry, and {@code
+   * --env-add} of an existing key replaces it.
    */
   List<String> buildUpdateArgv(ServiceSpec spec, String name) {
     List<String> argv =
@@ -624,6 +642,12 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     healthFlags(argv, spec, "--health-cmd");
     updateFlags(argv, spec, "--update-order");
     for (String variable : environment(spec)) {
+      argv.add("--env-add");
+      argv.add(variable);
+    }
+    for (String variable : ServiceExtras.of(config, spec.applicationName()).env()) {
+      // After this component's own, for the precedence rule the docker path has: the last
+      // assignment of a key wins, so what config says outranks what this component defaults.
       argv.add("--env-add");
       argv.add(variable);
     }
@@ -735,19 +759,57 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
-   * The deployment's own additions for this application, translated. Only this application's key is
-   * read, which is the security property the docker path states the same way: one application's
-   * socket mount cannot ride along on a sibling's deployment.
+   * {@link ServiceExtras} in {@code service create}'s vocabulary. Only this application's own keys
+   * are read, which is the security property the docker path states the same way: one
+   * application's socket bind cannot ride along on a sibling's deployment.
    */
-  private List<String> runArgs(ServiceSpec spec) {
-    return config
-        .getOptionalValue(RUN_ARGS_PREFIX + spec.applicationName(), String.class)
-        .filter(raw -> !raw.isBlank())
-        .map(
-            raw ->
-                SwarmRunArgs.translate(
-                    spec.applicationName(), Arrays.asList(raw.trim().split("\\s+"))))
-        .orElseGet(List::of);
+  private void extras(List<String> argv, ServiceExtras extras) {
+    for (ServiceExtras.Mount mount : extras.mounts()) {
+      // Swarm names the kind rather than inferring it from a leading slash, which is what config
+      // states — so this is a spelling, not a decision.
+      argv.add("--mount");
+      argv.add(
+          "type="
+              + mount.kind().name().toLowerCase(Locale.ROOT)
+              + ",source="
+              + mount.source()
+              + ",target="
+              + mount.target()
+              + (mount.readOnly() ? ",readonly" : ""));
+    }
+    for (ServiceExtras.Publish publish : extras.publishes()) {
+      // mode=host rather than the ingress default: it is per node, like a plain `docker run`, and
+      // this platform is one node.
+      //
+      // AN IP IS A REFUSAL, NOT A WARNING. Swarm's publish syntax has no ip field in either mode
+      // — measured: a host-mode publish listens on 0.0.0.0 — so a spec that asks for loopback
+      // cannot be honoured, and honouring it approximately would put an endpoint that was
+      // deliberately unreachable on every interface of the host.
+      if (!publish.bindsAllInterfaces()) {
+        throw new ServiceExtras.Refused(
+            "swarm cannot publish "
+                + publish.published()
+                + " on "
+                + publish.ip()
+                + ": a service publish has no ip field, so this port would be on every interface");
+      }
+      argv.add("--publish");
+      argv.add(
+          "published="
+              + publish.published()
+              + ",target="
+              + publish.target()
+              + (publish.protocol() == null ? "" : ",protocol=" + publish.protocol())
+              + ",mode=host");
+    }
+    for (String group : extras.groups()) {
+      argv.add("--group");
+      argv.add(group);
+    }
+    for (String variable : extras.env()) {
+      argv.add("--env");
+      argv.add(variable);
+    }
   }
 
   // --- reading swarm back ----------------------------------------------------------------------

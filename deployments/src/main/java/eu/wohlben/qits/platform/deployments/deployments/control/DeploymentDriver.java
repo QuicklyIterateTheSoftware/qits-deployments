@@ -49,18 +49,17 @@ public interface DeploymentDriver {
   String ORCHESTRATOR_KEY = "qits.platform.deployments.orchestrator";
 
   /**
-   * The prefix of the per-application argument family: {@code
-   * qits.platform.deployments.run-args.<application-name>} holds the extra arguments one
-   * application needs — volumes, env, ports — in docker's own {@code run} spelling, whitespace
-   * split.
+   * The prefix of the per-application family that says what one application needs beyond its image
+   * — mounts, published ports, extra groups, extra environment. {@link ServiceExtras} is the
+   * grammar and the reader.
    *
    * <p><b>Deployment config is the ONLY source</b>, never the API and never the intake, which is
    * what keeps the trust domain the one that already holds the docker socket. It is spelled here,
    * on the seam, because both drivers read it and each renders it in its orchestrator's vocabulary
-   * — the docker path appends it verbatim, the swarm path translates it, and a second spelling of
-   * the key would let the two disagree about which application's arguments they are.
+   * — and a second spelling of the key would let the two disagree about which application's
+   * arguments they are.
    */
-  String RUN_ARGS_PREFIX = "qits.platform.deployments.run-args.";
+  String EXTRAS_PREFIX = "qits.platform.deployments.extras.";
 
   /** The environment a service belongs to. Absent on platform services: they belong to no tier. */
   String ENVIRONMENT_LABEL = "qits.platform.deployments.environment";
@@ -259,10 +258,10 @@ public interface DeploymentDriver {
    * per resource the repository declared. Empty for every application that stores nothing, which is
    * most of them.
    *
-   * <p><b>What is deliberately NOT here: mounts, ports and extra env.</b> Those come from {@code
-   * qits.platform.deployments.run-args.<application>} and are read by the driver, from deployment
-   * config, which is the trust domain that already holds the socket. Routing them through this
-   * record would put a value that reaches an argv on a path that starts at an HTTP intake.
+   * <p><b>What is deliberately NOT here: mounts, ports and extra env.</b> Those are {@link
+   * ServiceExtras}, read by the driver from deployment config, which is the trust domain that
+   * already holds the socket. Routing them through this record would put a value that reaches an
+   * argv on a path that starts at an HTTP intake.
    */
   record ServiceSpec(
       String environmentId,

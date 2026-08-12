@@ -36,7 +36,7 @@
 #
 # ADOPTER #1, AND THE ONE THAT CANNOT PROVISION ITSELF FROM COLD. Only the very first container of a
 # fresh platform has no deployer to do it: the bootstrap creates BOTH roles and databases over plain
-# JDBC before this process exists and passes BOTH triples as run-args, and
+# JDBC before this process exists and passes BOTH triples in deployment config, and
 # BootResourceRegistration records what it was handed at every boot — so the first self-deploy after
 # that finds a registry row per resource, takes the no-op arm, and injects the credentials the
 # instance is already connected with. Without those rows it would rotate its own passwords out from

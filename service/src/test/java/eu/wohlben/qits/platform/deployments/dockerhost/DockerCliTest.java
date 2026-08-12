@@ -6,9 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
-import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import java.util.List;
@@ -134,25 +134,26 @@ class DockerCliTest {
   }
 
   @Test
-  void theInjectedIdentityIsADefaultTheOperatorsRunArgsCanOverride() {
+  void theInjectedIdentityIsADefaultTheDeploymentsExtrasCanOverride() {
     // Precedence, and it is docker's rule rather than cd's: the LAST assignment of a repeated env
-    // key is the one the container gets. cd's variables are written before run-args, so run-args
-    // pass through untouched AND win — the injection composes with the operator instead of
-    // fighting them.
+    // key is the one the container gets. cd's variables are written before the deployment's, so
+    // the deployment's pass through untouched AND win — the injection composes with the operator
+    // instead of fighting them.
     DockerCli driver =
         driver(
             Map.of(
-                DockerCli.RUN_ARGS_PREFIX + "qits-gateway",
-                "-v qits-data:/data -e OTEL_RESOURCE_ATTRIBUTES=service.version=operator"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.OTEL_RESOURCE_ATTRIBUTES",
+                    "service.version=operator"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
-    // The operator's arguments, verbatim and last before the image.
+    // The deployment's own, rendered last before the image.
     assertEquals(
         List.of(
             "-v",
             "qits-data:/data",
-            "-e",
+            "--env",
             "OTEL_RESOURCE_ATTRIBUTES=service.version=operator",
             "qits-artifacts:8080/qits/qits-gateway:abc1234"),
         argv.subList(argv.size() - 5, argv.size()));
@@ -190,12 +191,20 @@ class DockerCliTest {
   }
 
   @Test
-  void runArgsAreAppendedBetweenCdsOwnFlagsAndTheImage() {
+  void everyExtraIsRenderedInDockersOwnSpellingBeforeTheImage() {
+    // The four things an application can need beyond its image, each in `docker run`'s words: a
+    // named volume, a host path, a supplementary group, a published port with the ip this
+    // orchestrator can honour, and an environment variable.
     DockerCli driver =
         driver(
             Map.of(
-                DockerCli.RUN_ARGS_PREFIX + "qits-gateway",
-                "-v qits-data:/data --env FOO=bar"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[1]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.publishes[0]", "127.0.0.1:8081:8080",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.publishes[1]", "5353:8053/udp",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.groups[0]", "988",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.FOO", "bar"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
@@ -203,21 +212,41 @@ class DockerCliTest {
         List.of(
             "-v",
             "qits-data:/data",
+            "-v",
+            "/var/run/docker.sock:/var/run/docker.sock",
+            "-p",
+            "127.0.0.1:8081:8080",
+            "-p",
+            "5353:8053/udp",
+            "--group-add",
+            "988",
             "--env",
             "FOO=bar",
             "qits-artifacts:8080/qits/qits-gateway:abc1234"),
-        argv.subList(argv.size() - 5, argv.size()));
+        argv.subList(argv.size() - 13, argv.size()));
   }
 
   @Test
-  void runArgsOfAnotherApplicationDoNotLeakIn() {
-    // The absence is the assertion that matters: only the deployed application's own key reaches
+  void aReadOnlyMountKeepsItsRoSuffix() {
+    DockerCli driver =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data:ro"));
+
+    assertTrue(driver.buildArgv(spec("/q/health/ready")).contains("qits-data:/data:ro"));
+  }
+
+  @Test
+  void extrasOfAnotherApplicationDoNotLeakIn() {
+    // The absence is the assertion that matters: only the deployed application's own keys reach
     // its argv, so one application's socket mount cannot ride along on a sibling's deployment.
+    // The second key is the sharper half — an application whose name merely STARTS with this one's
+    // is a different application, and the dot is what says so.
     DockerCli driver =
         driver(
             Map.of(
-                DockerCli.RUN_ARGS_PREFIX + "qits-workspaces",
-                "-v /var/run/docker.sock:/var/run/docker.sock"));
+                DockerCli.EXTRAS_PREFIX + "qits-workspaces.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway-daemon.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
@@ -226,23 +255,21 @@ class DockerCliTest {
   }
 
   @Test
-  void runArgsResolveFromTheEnvSpelling() {
-    // The deployment sets QITS_PLATFORM_DEPLOYMENTS_RUN_ARGS_QITS_GATEWAY in compose; this pins
-    // that SmallRye's env mapping really answers the dashed property name the driver asks for.
-    DockerCli driver = driver();
-    driver.config =
-        new SmallRyeConfigBuilder()
-            .withSources(
-                new EnvConfigSource(
-                    Map.of("QITS_PLATFORM_DEPLOYMENTS_RUN_ARGS_QITS_GATEWAY", "--env FOO=bar"),
-                    300))
-            .build();
+  void anUnreadableExtraRefusesTheStartRatherThanDroppingIt() {
+    // Config is typed now, so garbage in it is a bug rather than a vocabulary this driver does not
+    // speak — and the failure a dropped mount produces is the worst kind: a container that boots,
+    // passes its gate and has lost its volume.
+    DockerCli driver =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.cap-adds[0]", "SYS_ADMIN"));
 
-    List<String> argv = driver.buildArgv(spec("/q/health/ready"));
+    assertThrows(ServiceExtras.Refused.class, () -> driver.buildArgv(spec("/q/health/ready")));
 
-    assertEquals(
-        List.of("--env", "FOO=bar", "qits-artifacts:8080/qits/qits-gateway:abc1234"),
-        argv.subList(argv.size() - 3, argv.size()));
+    // And the refusal is what the caller sees: nothing runs, and the detail names the key.
+    DockerHost.StartResult started =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "qits-data:/data"))
+            .start(spec("/q/health/ready"));
+    assertFalse(started.started());
+    assertTrue(started.detail().contains("qits-gateway.mounts[0]"), started.detail());
   }
 
   @Test
@@ -489,7 +516,7 @@ class DockerCliTest {
   }
 
   @Test
-  void aProvisionedResourceArrivesAsTheGenericTripleBeforeTheRunArgs() {
+  void aProvisionedResourceArrivesAsTheGenericTripleBeforeTheExtras() {
     // The contract an application maps in its OWN shipped defaults: this component names no
     // framework and no datasource key, which is what lets one code path deploy a Quarkus service
     // and a plain image. The name is uppercased and its dashes underscored.
@@ -522,15 +549,16 @@ class DockerCliTest {
   }
 
   @Test
-  void anOperatorsRunArgsStillOverrideAnInjectedResource() {
+  void anOperatorsExtrasStillOverrideAnInjectedResource() {
     // The precedence rule, extended to the newest injection and measured the same way: docker keeps
-    // the LAST assignment of a repeated env key, and the resource triple is written before the run
-    // args, so it is a default rather than something an operator has to fight.
+    // the LAST assignment of a repeated env key, and the resource triple is written before the
+    // deployment's own environment, so it is a default rather than something an operator has to
+    // fight.
     DockerCli driver =
         driver(
             Map.of(
-                DockerCli.RUN_ARGS_PREFIX + "qits-gateway",
-                "-e QITS_RESOURCE_DB_URL=jdbc:postgresql://somewhere-else:5432/qits_gateway"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.QITS_RESOURCE_DB_URL",
+                "jdbc:postgresql://somewhere-else:5432/qits_gateway"));
 
     List<String> argv =
         driver.buildArgv(

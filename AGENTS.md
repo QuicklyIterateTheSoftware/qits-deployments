@@ -398,7 +398,9 @@ to maintain.
 is not half of one word. It was `qits.cd.*` in the ancestor and `qits.pd.*` for one release here; a
 deployment carrying an old spelling configures nothing and fails loudly at boot (SmallRye rejects an
 unsatisfied `@ConfigProperty`), which is the intended failure. The env form is
-`QITS_PLATFORM_DEPLOYMENTS_*` — every wrapper and compose file that injects run-args moves with it.
+`QITS_PLATFORM_DEPLOYMENTS_*` — every wrapper and compose file that injects config moves with it.
+The one family read in the DOTTED spelling only is `qits.platform.deployments.extras.<app>.*`, and
+`ServiceExtras` says why: an underscore cannot tell `qits-ci`'s keys from `qits-ci-daemon`'s.
 
 ## Adopting what qits-cd left behind
 
@@ -529,17 +531,22 @@ than escaping it cleverly.
 Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not lean on that:
 validation stays at the boundary and the belt stays at the argv.
 
-Mounts and extra env in a *started* container's argv come from the **deployment's own config and
-nowhere else** (`qits.platform.deployments.run-args.<application>`). Nothing arriving over HTTP may
-contribute a token to a `docker run`; the API is deliberately open on the platform's networks, and config is the trust
-domain that already holds the socket.
-`DockerDeploymentDriverTest.runArgsOfAnotherApplicationDoNotLeakIn` asserts the absence as the
-security property. A `docker exec`, or run-args growing an HTTP-writable source, is the regression.
+Mounts, published ports, groups and extra env in a *started* container's argv come from the
+**deployment's own config and nowhere else** (`qits.platform.deployments.extras.<application>.*`,
+read by `ServiceExtras`). Nothing arriving over HTTP may contribute a token to a `docker run`; the
+API is deliberately open on the platform's networks, and config is the trust domain that already
+holds the socket. `ServiceExtrasTest.anotherApplicationsKeysAreNeverRead`, plus
+`extrasOfAnotherApplicationDoNotLeakIn` on **both** driver tests, asserts the absence as the
+security property. A `docker exec`, or the family growing an HTTP-writable source, is the
+regression.
+
+**The family is typed, and an unknown or malformed key is a refused deployment** — never a warning
+and a dropped flag, which is a container that boots, passes its gate and has lost its volume.
 
 This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RESOURCE_ATTRIBUTES`
-and its `QUARKUS_`-spelled twin) are written **before** the run args, and docker keeps the **last**
-assignment of a repeated key — measured, not assumed. So they are defaults an operator overrides,
-and the ordering is the precedence rule: never reorder them past the run args.
+and its `QUARKUS_`-spelled twin) are written **before** the deployment's own, and docker keeps the
+**last** assignment of a repeated key — measured, not assumed. So they are defaults an operator
+overrides, and the ordering is the precedence rule: never reorder them past the extras.
 
 ## Resources: what the deployer provisions, and where the truth is
 
@@ -571,7 +578,7 @@ each is easy to undo by accident:
   precise about because this component is its own deployer: the spec is read at the built sha, so
   the *running* instance reads the new `resources:` line, creates the role and the database, and
   injects the triple into the successor it starts. Only a cold bootstrap has no deployer to do it,
-  which is why the bootstrap's run-args carry both triples. A missing one is not a degraded boot —
+  which is why the bootstrap's generated config carries both triples. A missing one is not a degraded boot —
   the jars' expressions have no defaults, so the process dies at Flyway naming what is absent, and
   the health gate leaves the predecessor serving.
 - **No transaction spans the seam call.** The registry read and the row upsert are two
