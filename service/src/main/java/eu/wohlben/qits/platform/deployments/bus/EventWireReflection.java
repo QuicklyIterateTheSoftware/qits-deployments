@@ -1,6 +1,11 @@
 package eu.wohlben.qits.platform.deployments.bus;
 
+import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
+import eu.wohlben.qits.platform.deployments.events.DeploymentActive;
+import eu.wohlben.qits.platform.deployments.events.DeploymentFailed;
+import eu.wohlben.qits.platform.deployments.events.DeploymentQueued;
+import eu.wohlben.qits.platform.deployments.events.DeploymentStarted;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
@@ -15,7 +20,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * registered them or not, which is exactly what makes the omission survive a green suite: the
  * failure is in the binary, at runtime, on the first frame.
  *
- * <p>What is registered is the whole of the CONSUMING path, and it is two channels rather than one:
+ * <p>The CONSUMING path is two channels rather than one:
  *
  * <ul>
  *   <li>{@link EventFrame} — a live frame off {@code /events/stream}, and also every row of the
@@ -28,16 +33,35 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  *       reads out of the frame.
  * </ul>
  *
- * <p><b>The publishing trio is deliberately absent</b>: {@code EventEnvelope} and the {@code
- * CanonicalJson$QitsEventMixin} are what a publisher needs, and this component publishes nothing.
- * They join this list in the commit that gives it an event to announce — the same rule
- * {@code ApiWireReflection} states for a new response type, and worth honouring here because
- * qits-ci proved the mix-in's absence is the quiet failure of the two: a payload that carries an
- * {@code eventId} it is contractually supposed to omit, with no crash and no log.
+ * <p><b>The PUBLISHING path joined it when this component got events of its own to announce</b>, and
+ * it is the four records plus a pair from the library:
+ *
+ * <ul>
+ *   <li>{@link DeploymentQueued}, {@link DeploymentStarted}, {@link DeploymentActive} and {@link
+ *       DeploymentFailed} — what {@code DeployEventAnnouncer} serializes. Unregistered, the binary
+ *       publishes an empty payload rather than failing.
+ *   <li>{@link EventEnvelope} — the wrapper every publish is sent as.
+ *   <li>The {@code CanonicalJson$QitsEventMixin}, by string name because it is a nested type inside
+ *       the library. <b>This is the quiet one</b>, and qits-ci paid for it: the mix-in is what keeps
+ *       {@code eventId} out of the payload, so its absence is a payload carrying an id it is
+ *       contractually supposed to omit — no crash, no log, and every consumer reading a wire
+ *       contract that silently changed.
+ * </ul>
  */
 @RegisterForReflection(
-    targets = {EventFrame.class, PdBuildSuccessfulSubscriber.BuildSuccessfulPayload.class},
-    classNames = {"eu.wohlben.qits.eventstream.control.EventPage"})
+    targets = {
+      EventFrame.class,
+      PdBuildSuccessfulSubscriber.BuildSuccessfulPayload.class,
+      EventEnvelope.class,
+      DeploymentQueued.class,
+      DeploymentStarted.class,
+      DeploymentActive.class,
+      DeploymentFailed.class
+    },
+    classNames = {
+      "eu.wohlben.qits.eventstream.control.EventPage",
+      "eu.wohlben.qits.eventstream.control.CanonicalJson$QitsEventMixin"
+    })
 final class EventWireReflection {
 
   private EventWireReflection() {}

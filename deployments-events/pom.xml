@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben.qits</groupId>
+        <artifactId>qits-platform-deployments</artifactId>
+        <version>2026.811.165453</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <!-- This component's event vocabulary: what a deployment announces to the platform. Four
+         records, one per lifecycle point — DeploymentQueued, DeploymentStarted, DeploymentActive,
+         DeploymentFailed.
+
+         A module of its own, between `eventstream` and everything else, for one reason: a
+         vocabulary is what a CONSUMER needs, and nothing else in this repo is. The day another
+         service wants to know when a deployment goes live, it depends on this jar and gets the
+         records plus the bus and no part of the deployer — which is why the split is here rather
+         than a package inside `deployments`.
+
+         It depends on `eventstream` and on nothing else, not even quarkus-arc: these are plain
+         records, and a data module that cannot boot a container cannot grow a service.
+
+         Modelled on services/qits-ci/ci-events and services/qits-githost/githost-events, which are
+         the same shape for the same reason. The DIRECTORY carries the repo's name the way those two
+         do (`deployments-events`, not `events`), because this module is meant to be read beside
+         them rather than beside the three role directories it sits in.
+
+         Separately *publishable* one day, separately *published* explicitly out of scope now. -->
+    <artifactId>qits-platform-deployments-events</artifactId>
+    <name>qits-platform-deployments :: events</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-eventstream</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Plain JUnit 5, not quarkus-junit5: nothing here is a @QuarkusTest. The suite drives
+                 plain constructors and the canonical serializer, which needs no container. -->
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -48,8 +48,10 @@
     <name>qits-platform-deployments</name>
 
     <modules>
-        <!-- Listed in dependency order: `deployments` depends on `environments`, `service` on both. -->
+        <!-- Listed in dependency order: `deployments` depends on `environments` and on
+             `deployments-events`, `service` on all three. -->
         <module>environments</module>
+        <module>deployments-events</module>
         <module>deployments</module>
         <module>service</module>
     </modules>
@@ -174,6 +176,14 @@
             <dependency>
                 <groupId>${project.groupId}</groupId>
                 <artifactId>qits-platform-deployments-deployments</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <!-- This component's event vocabulary. A data jar over `eventstream` and nothing
+                     else, so both the domain module that builds the events and the adapter that
+                     publishes them may hold it. -->
+                <groupId>${project.groupId}</groupId>
+                <artifactId>qits-platform-deployments-events</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

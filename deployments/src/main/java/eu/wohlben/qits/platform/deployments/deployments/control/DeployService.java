@@ -13,12 +13,17 @@ import eu.wohlben.qits.platform.deployments.environments.control.ServiceCatalog;
 import eu.wohlben.qits.platform.deployments.environments.control.ServiceCatalog.LinkedService;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdEnvironment;
+import eu.wohlben.qits.platform.deployments.events.DeploymentActive;
+import eu.wohlben.qits.platform.deployments.events.DeploymentFailed;
+import eu.wohlben.qits.platform.deployments.events.DeploymentQueued;
+import eu.wohlben.qits.platform.deployments.events.DeploymentStarted;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.runtime.LaunchMode;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
@@ -31,6 +36,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -123,6 +129,13 @@ public class DeployService implements BuildAnnouncements {
   @Inject EnvironmentService environments;
   @Inject ResourceProvisioning resourceProvisioning;
   @Inject DeploymentObserver observer;
+
+  /**
+   * Where this component's own events leave it ({@link DeployAnnouncer}). An {@code Instance}
+   * because zero implementations is a supported configuration: a build without the bus deploys
+   * exactly as before and says nothing to anybody.
+   */
+  @Inject Instance<DeployAnnouncer> announcers;
 
   @ConfigProperty(name = "qits.artifacts.registry-host")
   String registryHost;
@@ -435,8 +448,8 @@ public class DeployService implements BuildAnnouncements {
 
     List<String> queued = queue(runId, commitSha, targets, causationId);
     if (failure != null) {
-      for (String deploymentId : queued) {
-        finish(deploymentId, PdDeploymentStatus.FAILED, failure);
+      for (int i = 0; i < queued.size(); i++) {
+        finish(queued.get(i), targets.get(i), PdDeploymentStatus.FAILED, failure);
       }
       return;
     }
@@ -446,7 +459,7 @@ public class DeployService implements BuildAnnouncements {
         execute(deploymentId, targets.get(i), commitSha);
       } catch (RuntimeException e) {
         LOG.errorf(e, "Deployment %s failed unexpectedly", deploymentId);
-        finish(deploymentId, PdDeploymentStatus.FAILED, "[unexpected: " + e + "]");
+        finish(deploymentId, targets.get(i), PdDeploymentStatus.FAILED, "[unexpected: " + e + "]");
       }
     }
   }
@@ -799,41 +812,74 @@ public class DeployService implements BuildAnnouncements {
    * nothing half-done and a resent event replays it. The retried brackets are the ones that come
    * AFTER a container is already running, where dropping the work leaves a live container with no
    * row that admits it.
+   *
+   * <p>Each created row is announced as {@code DeploymentQueued} <b>after the transaction
+   * commits</b>, so a consumer that reads the deployment back finds it. One event per row: a build
+   * addressing three tiers queues three deployments and says so three times.
    */
   private List<String> queue(
       String runId, String commitSha, List<Target> targets, UUID causationId) {
     if (targets.isEmpty()) {
       return List.of();
     }
-    return QuarkusTransaction.requiringNew()
-        .call(
-            () -> {
-              List<String> ids = new ArrayList<>();
-              for (Target target : targets) {
-                PdDeployment deployment = new PdDeployment();
-                deployment.id = UUID.randomUUID().toString();
-                // The generic causation column, set EXPLICITLY. This runs on pd-deploy-worker,
-                // behind the queue hop the intake made: CausationScope does not follow work, so
-                // CausationStamp would read null here and record a decision nobody made. An
-                // author-set value is what the stamp yields to. Every row of one event shares it —
-                // one build going green is one cause, however many tiers it fans out over.
-                deployment.causationId = causationId;
-                deployment.applicationName = target.applicationName();
-                deployment.environmentId = target.environmentId();
-                deployment.commitSha = commitSha;
-                deployment.runId = runId;
-                deployment.status = PdDeploymentStatus.QUEUED;
-                deployment.createdAt = Instant.now();
-                deployments.persist(deployment);
-                ids.add(deployment.id);
-              }
-              return ids;
-            });
+    List<Queued> rows =
+        QuarkusTransaction.requiringNew()
+            .call(
+                () -> {
+                  List<Queued> queued = new ArrayList<>();
+                  for (Target target : targets) {
+                    queued.add(persistQueued(runId, commitSha, target, causationId));
+                  }
+                  return queued;
+                });
+    for (Queued row : rows) {
+      announceQueued(row, runId, commitSha, causationId);
+    }
+    return rows.stream().map(Queued::deploymentId).toList();
   }
 
-  /** Everything a deployment needs off the worker thread — plain values, never entities. */
+  /** A queued row, and the facts its announcement needs, carried out of the transaction. */
+  private record Queued(String deploymentId, Target target, Instant queuedAt) {}
+
+  /** One {@code QUEUED} row. Inside {@link #queue}'s transaction, never on its own. */
+  private Queued persistQueued(String runId, String commitSha, Target target, UUID causationId) {
+    PdDeployment deployment = new PdDeployment();
+    deployment.id = UUID.randomUUID().toString();
+    // The generic causation column, set EXPLICITLY. This runs on pd-deploy-worker, behind the
+    // queue hop the intake made: CausationScope does not follow work, so CausationStamp would read
+    // null here and record a decision nobody made. An author-set value is what the stamp yields to.
+    // Every row of one event shares it — one build going green is one cause, however many tiers it
+    // fans out over.
+    deployment.causationId = causationId;
+    deployment.applicationName = target.applicationName();
+    deployment.environmentId = target.environmentId();
+    deployment.commitSha = commitSha;
+    deployment.runId = runId;
+    deployment.status = PdDeploymentStatus.QUEUED;
+    deployment.createdAt = Instant.now();
+    deployments.persist(deployment);
+    return new Queued(deployment.id, target, deployment.createdAt);
+  }
+
+  /**
+   * Everything a deployment needs off the worker thread — plain values, never entities.
+   *
+   * <p><b>The last three are for the announcements and nothing else.</b> They are read off the row
+   * inside the {@code STARTING} transaction because that is the one place a deployment has the row
+   * open; re-reading it at each of the three later announcement points would be three queries for
+   * values that cannot change. {@code startedAt} is a clock reading rather than a column — there is
+   * no {@code started_at} — taken at the transition rather than at publish, which is the property an
+   * event log actually needs.
+   */
   private record Plan(
-      String deploymentId, Target target, String sha, String healthPath, String healthCmd) {
+      String deploymentId,
+      Target target,
+      String sha,
+      String healthPath,
+      String healthCmd,
+      String runId,
+      UUID cause,
+      Instant startedAt) {
 
     String applicationName() {
       return target.applicationName();
@@ -916,11 +962,15 @@ public class DeployService implements BuildAnnouncements {
                       target.healthPath() != null ? target.healthPath() : defaultHealthPath,
                       // No default to fall back on, and none to want: an image that named no
                       // command is one the HTTP probe describes.
-                      target.healthCmd());
+                      target.healthCmd(),
+                      deployment.runId,
+                      deployment.causationId,
+                      Instant.now());
                 });
     if (plan == null) {
       return;
     }
+    announceStarted(plan);
 
     // PROVISIONING GOES HERE, between the row's STARTING transition and the pull, and the placement
     // is three decisions at once:
@@ -942,6 +992,7 @@ public class DeployService implements BuildAnnouncements {
           "Could not provision the resources of %s: %s", plan.applicationName(), e.getMessage());
       finish(
           deploymentId,
+          target,
           PdDeploymentStatus.FAILED,
           "[resource provisioning failed: " + e.getMessage() + "]");
       return;
@@ -957,12 +1008,13 @@ public class DeployService implements BuildAnnouncements {
       case IMAGE_MISSING -> {
         finish(
             deploymentId,
+            target,
             PdDeploymentStatus.IMAGE_MISSING,
             "no image " + imageRef + "\n" + safe(pulled.detail()));
         return;
       }
       case ERROR -> {
-        finish(deploymentId, PdDeploymentStatus.FAILED, safe(pulled.detail()));
+        finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(pulled.detail()));
         return;
       }
       case OK -> {
@@ -1032,7 +1084,7 @@ public class DeployService implements BuildAnnouncements {
           driver.start(startSpec(plan, primaryNetwork, imageRef, containerName, bindings));
       if (!successor.started()) {
         driver.remove(containerName);
-        finish(deploymentId, PdDeploymentStatus.FAILED, safe(successor.detail()));
+        finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(successor.detail()));
         return;
       }
       String unjoined = join(containerName, plan.wireAlias(), joins);
@@ -1041,7 +1093,7 @@ public class DeployService implements BuildAnnouncements {
         // it by removing the instance that still works. Nothing was stopped yet, so dropping the
         // successor puts everything back.
         driver.remove(containerName);
-        finish(deploymentId, PdDeploymentStatus.FAILED, unjoined);
+        finish(deploymentId, target, PdDeploymentStatus.FAILED, unjoined);
         return;
       }
       reconcile(plan, primaryNetwork);
@@ -1062,7 +1114,7 @@ public class DeployService implements BuildAnnouncements {
     if (!started.started()) {
       driver.remove(containerName); // in case docker created it and then failed
       rollback(predecessors);
-      finish(deploymentId, PdDeploymentStatus.FAILED, safe(started.detail()));
+      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(started.detail()));
       return;
     }
     // Docker takes one network at `run`; everything else is a join, and the set is recomputed from
@@ -1078,7 +1130,7 @@ public class DeployService implements BuildAnnouncements {
     if (unjoined != null) {
       driver.remove(containerName);
       rollback(predecessors);
-      finish(deploymentId, PdDeploymentStatus.FAILED, unjoined);
+      finish(deploymentId, target, PdDeploymentStatus.FAILED, unjoined);
       return;
     }
     reconcile(plan, primaryNetwork);
@@ -1090,7 +1142,7 @@ public class DeployService implements BuildAnnouncements {
       // the previous deployment goes back to serving.
       driver.remove(containerName);
       rollback(predecessors);
-      finish(deploymentId, PdDeploymentStatus.FAILED, safe(health.detail()));
+      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(health.detail()));
       return;
     }
 
@@ -1107,7 +1159,7 @@ public class DeployService implements BuildAnnouncements {
     // `inNewTx` rather than `call` around a `requiringNew`: the retry owns the transaction, so an
     // attempt that fails is one it knows never committed. The two spelled separately would retry a
     // lost commit acknowledgement as well, which is the one round trip nothing can place.
-    List<String> oldContainers =
+    Cutover cutover =
         DbRetry.inNewTx(
             "The cutover bookkeeping of " + deploymentId,
             () -> {
@@ -1130,10 +1182,13 @@ public class DeployService implements BuildAnnouncements {
               // lost connection is a body failure — certainly not committed, so certainly safe to
               // run again.
               deployments.flush();
-              return old;
+              // The timestamp comes back out rather than being taken again afterwards: the event
+              // says when the cutover happened, and a retry that ran the body twice must announce
+              // the value that is on the row.
+              return new Cutover(old, deployment.finishedAt);
             },
             CUTOVER_BUDGET);
-    Set<String> toRemove = new LinkedHashSet<>(oldContainers);
+    Set<String> toRemove = new LinkedHashSet<>(cutover.oldContainers());
     for (DeploymentDriver.Holder predecessor : predecessors) {
       toRemove.add(predecessor.name());
     }
@@ -1147,7 +1202,13 @@ public class DeployService implements BuildAnnouncements {
         plan.sha(),
         plan.platform() ? "the platform" : plan.environmentName(),
         containerName);
+    // Last, so an unreachable qits-events delays nothing this deployment still has to do. The
+    // timestamp is the row's, so announcing late does not make the event late.
+    announceActive(plan, containerName, cutover.finishedAt());
   }
+
+  /** What the cutover bracket carries out: the containers to reap, and when it happened. */
+  private record Cutover(List<String> oldContainers, Instant finishedAt) {}
 
   private DeploymentDriver.Network primaryNetworkSpec(Plan plan) {
     return plan.platform()
@@ -1313,23 +1374,144 @@ public class DeployService implements BuildAnnouncements {
    * Record the outcome. Retried on a connection-class failure for the same reason the cutover
    * bookkeeping is: this is the last write of a deployment that may have just replaced the database
    * it writes to, and an outcome nobody could record is a row that says {@code STARTING} forever.
+   *
+   * <p><b>The one funnel every recorded failure goes through, which is why the announcement lives
+   * here</b> rather than at the nine call sites that reach it. It announces only when the written
+   * status is not {@code ACTIVE} — the same test the WARN already made, and nothing calls this with
+   * {@code ACTIVE} today; the happy path announces from the cutover, which knows things this does
+   * not.
+   *
+   * <p><b>No row, no event.</b> A deployment whose environment was torn down mid-deploy has nothing
+   * to record and nothing to announce: the bracket returns null and this returns without publishing.
+   *
+   * <p>{@code target} is the caller's, and it is the only thing here the row cannot supply — {@code
+   * pd_deployment} holds the environment's ID and never its NAME. Every call site already has one.
    */
-  private void finish(String deploymentId, PdDeploymentStatus status, String detail) {
-    DbRetry.runInNewTx(
-        "Recording deployment " + deploymentId + " as " + status,
-        () -> {
-          PdDeployment deployment = deployments.findById(deploymentId);
-          if (deployment == null) {
-            return; // environment torn down mid-deploy
-          }
-          deployment.status = status;
-          deployment.detail = detail;
-          deployment.finishedAt = Instant.now();
-          deployments.flush(); // statement phase, so a lost connection is retriable — see cutover()
-        },
-        CUTOVER_BUDGET);
+  private void finish(
+      String deploymentId, Target target, PdDeploymentStatus status, String detail) {
+    Finished finished =
+        DbRetry.inNewTx(
+            "Recording deployment " + deploymentId + " as " + status,
+            () -> {
+              PdDeployment deployment = deployments.findById(deploymentId);
+              if (deployment == null) {
+                return null; // environment torn down mid-deploy
+              }
+              deployment.status = status;
+              deployment.detail = detail;
+              deployment.finishedAt = Instant.now();
+              // statement phase, so a lost connection is retriable — see the cutover bracket
+              deployments.flush();
+              return new Finished(
+                  deployment.commitSha,
+                  deployment.runId,
+                  deployment.causationId,
+                  deployment.finishedAt);
+            },
+            CUTOVER_BUDGET);
     if (status != PdDeploymentStatus.ACTIVE) {
       LOG.warnf("Deployment %s ended %s: %s", deploymentId, status, firstLine(detail));
+      if (finished != null) {
+        announceFailed(deploymentId, target, status, detail, finished);
+      }
+    }
+  }
+
+  /** What the outcome bracket carries out — the row's own values, for the announcement. */
+  private record Finished(String commitSha, String runId, UUID cause, Instant finishedAt) {}
+
+  /**
+   * The four announcements, each called after the transaction that made its statement true.
+   *
+   * <p><b>They are wrapped, every one of them, and that is the rule rather than caution.</b> An
+   * announcement is a statement about a deployment, never part of it: a bus that is unreachable, a
+   * serializer that refuses a value, an implementation with a bug must all cost the log line below
+   * and nothing else. The port already says an implementation must not throw; this is what makes a
+   * broken one survivable.
+   *
+   * <p>Every announcer is offered the event — {@code Instance} is a set, usually of one and validly
+   * of none — and one that throws does not stop the next.
+   */
+  private void announceQueued(Queued row, String runId, String commitSha, UUID cause) {
+    announce(
+        row.deploymentId(),
+        announcer ->
+            announcer.onQueued(
+                new DeploymentQueued(
+                    row.deploymentId(),
+                    row.target().applicationName(),
+                    row.target().environmentId(),
+                    row.target().environmentName(),
+                    commitSha,
+                    runId,
+                    row.queuedAt()),
+                cause));
+  }
+
+  private void announceStarted(Plan plan) {
+    announce(
+        plan.deploymentId(),
+        announcer ->
+            announcer.onStarted(
+                new DeploymentStarted(
+                    plan.deploymentId(),
+                    plan.applicationName(),
+                    plan.environmentId(),
+                    plan.environmentName(),
+                    plan.sha(),
+                    plan.runId(),
+                    plan.startedAt()),
+                plan.cause()));
+  }
+
+  private void announceActive(Plan plan, String containerName, Instant finishedAt) {
+    announce(
+        plan.deploymentId(),
+        announcer ->
+            announcer.onActive(
+                new DeploymentActive(
+                    plan.deploymentId(),
+                    plan.applicationName(),
+                    plan.environmentId(),
+                    plan.environmentName(),
+                    plan.sha(),
+                    plan.runId(),
+                    containerName,
+                    finishedAt),
+                plan.cause()));
+  }
+
+  private void announceFailed(
+      String deploymentId,
+      Target target,
+      PdDeploymentStatus status,
+      String detail,
+      Finished finished) {
+    announce(
+        deploymentId,
+        announcer ->
+            announcer.onFailed(
+                new DeploymentFailed(
+                    deploymentId,
+                    target.applicationName(),
+                    target.environmentId(),
+                    target.environmentName(),
+                    finished.commitSha(),
+                    finished.runId(),
+                    status.name(),
+                    detail,
+                    finished.finishedAt()),
+                finished.cause()));
+  }
+
+  /** See {@link #announceQueued} for why every one of these is wrapped. */
+  private void announce(String deploymentId, Consumer<DeployAnnouncer> announcement) {
+    for (DeployAnnouncer announcer : announcers) {
+      try {
+        announcement.accept(announcer);
+      } catch (RuntimeException e) {
+        LOG.warnf(e, "Announcing deployment %s failed", deploymentId);
+      }
     }
   }
 

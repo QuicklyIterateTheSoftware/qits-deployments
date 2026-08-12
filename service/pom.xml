@@ -51,6 +51,13 @@
             <artifactId>qits-platform-deployments-deployments</artifactId>
         </dependency>
         <dependency>
+            <!-- The event vocabulary bus/DeployEventAnnouncer publishes and
+                 bus/EventWireReflection registers. It arrives transitively through the module
+                 above; declared here because this module's own code names the classes. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-platform-deployments-events</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>

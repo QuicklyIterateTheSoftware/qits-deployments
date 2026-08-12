@@ -50,13 +50,15 @@ byte-for-byte wire contract and a consuming application's customizers must not r
 whole graph it binds is invisible to the same analysis. It registers the consuming path
 (`EventFrame`, the package-private `EventPage` by string name, and the payload record). Leave
 `EventPage` out and the stream works in the binary while **catch-up alone** fails, which is the half
-nobody would be watching. The publishing pair (`EventEnvelope` and `CanonicalJson$QitsEventMixin`)
-is deliberately absent and joins the list in the commit that gives this component an event to
-publish.
+nobody would be watching. **The publishing path joined it when this component got events of its
+own**: the four `DeploymentQueued`/`Started`/`Active`/`Failed` records, `EventEnvelope`, and
+`CanonicalJson$QitsEventMixin` by string name because it is nested in the library. The mix-in is the
+quiet one — it is what keeps `eventId` out of the payload, so its absence is a wire contract that
+changed with no crash and no log. **A fifth event joins the list in the commit that adds it.**
 
 ## The partition, and the one rule that keeps it
 
-Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
+Four maven modules, package root `eu.wohlben.qits.platform.deployments`:
 
 - **`environments/`** (`…environments.*`) — the topology: `entity`, `persistence`, `dto`, `mapper`,
   `control`, `error`. `EnvironmentService` (tier rows), `ServiceCatalog` (services, links and the
@@ -67,10 +69,18 @@ Three maven modules, package root `eu.wohlben.qits.platform.deployments`:
   `RollbackPins`, `DeploymentSpecParser`, `DeploymentIdentifiers` (what only reaches an argv),
   `ImageRefs`, `ContainerNames`, `PdProcess`, `ResourceProvisioning` and `BootResourceRegistration`,
   and the three seams `DeploymentDriver` / `SpecSource` / `ResourceProvisioner` plus the
-  announcement port `BuildAnnouncements` and the ordering collapse `BuildTips` behind it.
+  announcement port `BuildAnnouncements` and the ordering collapse `BuildTips` behind it, and the
+  outgoing port `DeployAnnouncer`.
+- **`deployments-events/`** (`…deployments.events.*`) — the event VOCABULARY: four plain records
+  over `qits-eventstream` and nothing else, not even quarkus-arc. It is a module rather than a
+  package because a vocabulary is what a *consumer* needs: the day another service listens for
+  `DeploymentActive` it takes this jar and gets the record plus the bus and no part of the deployer.
+  The ci-events and githost-events shape, which is also why the directory carries the repo's name
+  rather than a bare role word.
 - **`service/`** (`…api`, `…bus`, `…dockerhost`, `…githost`, `…pghost`) — the adapters. `bus` is the
-  event-bus half: the durable `BuildSuccessful` subscriber and the native-image registration for
-  what the library's own `ObjectMapper` binds. Identity is not a package here: the forward-auth pair
+  event-bus half: the durable `BuildSuccessful` subscriber, the `DeployEventAnnouncer` that
+  publishes this component's own four events, and the native-image registration for what the
+  library's own `ObjectMapper` binds. Identity is not a package here: the forward-auth pair
   lives in the published `qits-auth-core`.
 
 `eu.wohlben.qits.webui` sits outside that tree, holding `WebUiRedirect` and only that. It keeps the
@@ -572,8 +582,8 @@ and it is an ordinary open debt now that it agrees.
 
 ## The event side: two doors, one seam
 
-`BuildAnnouncements` in `deployments/control` is the seam, and **wave 3 has landed**, so there are
-two ways in. Neither wins: both call `announce`, and everything after it — the spec read, derived
+`BuildAnnouncements` in `deployments/control` is the seam for what comes IN, and **wave 3 has
+landed**, so there are two ways in. (What goes OUT is `DeployAnnouncer`, below.) Neither wins: both call `announce`, and everything after it — the spec read, derived
 registration, the queue, the health-gated cutover — cannot tell them apart.
 
 - **`POST /platform-deployments/api/events/build-succeeded`** (`api/PdEventController`), payload
@@ -650,6 +660,48 @@ in `service/` because that is the only classpath carrying every entity of the co
 domain jars and anything this module adds. The domain modules pay no test cost for the jar: neither
 has a `@QuarkusTest`, so the eventstream persistence unit never boots there and only `service/`'s
 `EmbeddedPgConfigSource` owes it a database.
+
+### The other direction: what a deployment announces (2026-08-12)
+
+**This component publishes now.** It consumed the bus for a release and produced nothing, so a
+chain in the event log ended at `BuildSuccessful` — the container a commit ended up in was reachable
+only by asking this component's API. Four events close it, one per lifecycle point, all in
+`deployments-events/` and all published through `DeployAnnouncer` (`deployments/control`) by
+`bus/DeployEventAnnouncer`:
+
+| event | published from | timestamp |
+| --- | --- | --- |
+| `DeploymentQueued` | `DeployService.queue`, one per created row | the row's `created_at` |
+| `DeploymentStarted` | after the `QUEUED`→`STARTING` transaction | taken at the transition — there is no `started_at` column |
+| `DeploymentActive` | after the cutover bookkeeping, last thing in `execute` | the row's `finished_at` |
+| `DeploymentFailed` | the single `finish` funnel, when the status is not `ACTIVE` | the row's `finished_at` |
+
+Five things about it, each easy to undo by accident:
+
+- **Every announcement happens AFTER the transaction that made it true**, so a consumer that reads
+  the deployment back finds what the event said. `DeploymentActive` is deliberately the last
+  statement in `execute`, after the old containers are reaped: an unreachable qits-events must delay
+  nothing the deployment still has to do.
+- **Announcing can never change a deployment's outcome.** `DeployService` wraps every call in a
+  try/catch with a WARN, and the port says an implementation must not throw. Zero implementations is
+  a supported configuration — `Instance<DeployAnnouncer>`, so a build without the bus deploys
+  exactly as before.
+- **The cause is data, and it does not need parsing here.** `PdDeployment.causationId` is a `uuid`
+  column, set explicitly at queue time (see "The cause rides the seam"), and the announcer hands it
+  to `publish(event, parent)`. qits-ci needs a defensive parse because its trigger id is a
+  `varchar`; the leniency here already happened one layer up, in the subscriber.
+- **`@ActivateRequestContext` is on every announcer method**, for the reason `ScmEventAnnouncer`
+  carries it: `pd-deploy-worker` is a bare daemon thread with no request context, and the outbox
+  needs one to open its transaction in. A `@QuarkusTest` driving the REST door has a context already
+  and would not catch its absence — `PdDeployPublishTest` drives the worker.
+- **`DeploymentObserver`'s later corrections announce nothing**, nor does the startup sweep's
+  adoption. They restate an outcome minutes or hours later, and a consumer would first need to know
+  that the second statement supersedes the first. That is a second design and it is not this one.
+  So is `recordRejection`, which writes a `FAILED` row outside the `finish` funnel.
+
+The vocabulary jar is `qits-platform-deployments-events`. It depends on `qits-eventstream` and
+nothing else — see the partition above for why it is a module.
+
 
 ## Adding a dependency on another context
 
@@ -737,9 +789,12 @@ result onto a maintenance branch. A second spelling of either version anywhere w
 behind. A bump lands on a branch and not on main on purpose: a library release is not a decision to
 redeploy the deployer.
 
-**`qits-eventstream` sits in all three modules now**, and only `service/` uses it for the bus: the
-domain modules take it for the causation persistence trio, which is a narrowing of the boundary
-rather than a hole in it — see "The cause rides the seam". `qits-arch-rules` is a third published
+**`qits-eventstream` sits in all four modules now**, and only `service/` uses it for the bus: the
+domain modules take it for the causation persistence trio and `deployments-events` for `QitsEvent`
+itself, which is a narrowing of the boundary rather than a hole in it — see "The cause rides the
+seam". `deployments/` additionally holds `qits-platform-deployments-events`, because
+`DeployAnnouncer` is spelled in those records; they are plain data with no publish and no transport
+in them, so that is the same narrowing rather than the bus reaching into a domain module. `qits-arch-rules` is a third published
 jar, test scope, in `service/` only; it is version-pinned by a property of its own and no release
 train step rewrites it.
 
@@ -790,6 +845,13 @@ against.
   component's half — the decode, the tip check, the call into the seam. The funnel, the claim ledger
   and the catch-up sweep are the library's and are proved in its own repository; a stub here would
   re-prove them and prove nothing about a deployment.
+- **The PUBLISHING test aims the bus at a closed port**, which is the same stance from the other
+  side: `PdDeployPublishTest` turns the bus on in its own `@TestProfile` (`qits.events.url` is
+  `http://localhost:1`, the scheduler and the startup catch-up are off), so every publish lands as
+  exactly one `outbox_event` row with the canonical payload it would have been sent with. A row IS
+  the publish from this side of the bus. It reads them through the `eventstream` persistence unit's
+  own `EntityManager`, never a Panache static — `OutboxEvent` comes from a jar this application did
+  not compile, and the static throws naming the wrong problem.
 - **Machine-token tests mint their own tokens.** `MachineTokens` signs RS256 with the key pair in
   `service/src/test/resources/machine-token-*.pem`, and `MachineGuardEnforcedProfile` hands
   quarkus-oidc the public half, so the enforced path is exercised end to end with no

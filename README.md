@@ -127,6 +127,16 @@ never a guess, because a guessed topology is a container on the wrong networks u
                           │
                           ▼   one recorded deployment per place it addresses
                     pull ▶ stop the predecessor ▶ run ▶ join networks ▶ health gate ▶ cut over
+                          │
+                          ▼   back onto qits-events, at each of the four points
+                    DeploymentQueued ▶ DeploymentStarted ▶ DeploymentActive | DeploymentFailed
+
+**It announces as well as listens.** Each of the four points publishes an event naming the
+deployment, the application, the tier, the commit and the run — and carrying, as its parent, the
+`BuildSuccessful` that caused it. So a push, the build it triggered and the container it ended up
+in are one walk through the event log rather than three lookups. The vocabulary is the
+`qits-platform-deployments-events` jar; a consumer takes that and needs no part of this component.
+Nothing is announced twice: an outcome the observer corrects later stays a row.
 
 **Two doors, one flow.** Both announcements meet at the same seam, and nothing below it can tell
 them apart. The bus is the ordinary one — the publisher retries it, qits-events' log replays it

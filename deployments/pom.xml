@@ -35,6 +35,13 @@
             <artifactId>qits-platform-deployments-environments</artifactId>
         </dependency>
         <dependency>
+            <!-- The event vocabulary DeployAnnouncer is spelled in. Plain records over
+                 `eventstream`, no bus and no transport, so holding them here does not put the bus
+                 in a domain module — see AGENTS.md, "the bus's SEAMS live in service/". -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-platform-deployments-events</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-arc</artifactId>
         </dependency>
