@@ -388,19 +388,14 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    */
   @Override
   public HealthGate.Poll observe(String name) {
-    PdProcess.Result listed =
-        run(
-            List.of(
-                runtime,
-                "service",
-                "ps",
-                name,
-                "--filter",
-                "desired-state=running",
-                "--no-trunc",
-                "--format",
-                "{{.CurrentState}}"),
-            INSPECT_TIMEOUT);
+    PdProcess.Result listed = observeTasks(name);
+    if (listed.exitCode() != 0) {
+      // The application may live under the seed stack's name — the deployer's own self-update
+      // keeps its stack-named service. Asking only the bare alias flipped a healthy self-updated
+      // deployer to FAILED: two observation passes read "no such service" while
+      // qits_dev-qits-deployments served. The same fallback runningImage already has.
+      listed = observeTasks(SEED_STACK_PREFIX + name);
+    }
     if (listed.exitCode() != 0) {
       return HealthGate.Poll.gone(listed.output());
     }
@@ -412,6 +407,21 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       return HealthGate.Poll.of("starting/unhealthy");
     }
     return HealthGate.Poll.of("exited/unhealthy");
+  }
+
+  private PdProcess.Result observeTasks(String service) {
+    return run(
+        List.of(
+            runtime,
+            "service",
+            "ps",
+            service,
+            "--filter",
+            "desired-state=running",
+            "--no-trunc",
+            "--format",
+            "{{.CurrentState}}"),
+        INSPECT_TIMEOUT);
   }
 
   /**

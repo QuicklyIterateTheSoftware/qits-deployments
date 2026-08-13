@@ -519,6 +519,18 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void observationFallsBackToTheStackNamedService() {
+    // The deployer's self-update keeps its seed-stack service, and the observer must read it
+    // there: asking only the bare alias flipped a healthy self-updated deployer to FAILED on two
+    // "no such service" passes.
+    SwarmDeploymentDriver driver = driver();
+    cli.script("service ps dev-qits-gateway", result(1, "Error: no such service: dev-qits-gateway"));
+    cli.script("service ps qits_dev-qits-gateway", result(0, "Running 4 minutes ago"));
+
+    assertTrue(HealthGate.healthy(driver.observe("dev-qits-gateway")));
+  }
+
+  @Test
   void anOverlayIsAttachableSoPlainContainersKeepWorkingOnIt() {
     List<String> argv =
         driver()
