@@ -254,7 +254,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       LOG.infof(
           "Self-update issued on service %s: the swarm manager finishes it, and the row stays"
               + " STARTING until the instance that survives records it",
-          name);
+          target);
       return new ApplyResult(
           ApplyOutcome.HANDED_OFF, "the swarm manager arbitrates this service's own succession");
     }
@@ -433,7 +433,23 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
             List.of(runtime, "service", "inspect", "--format", RUNNING_IMAGE_FORMAT, name),
             INSPECT_TIMEOUT);
     if (inspected.exitCode() != 0) {
-      return Optional.empty(); // swarm has no such service
+      // The application may live under the seed stack's name: the deployer's own self-update
+      // targets the stack-named service it runs as, so the successor's startup sweep must read
+      // its evidence from the same place — asking only the bare alias settled the self-update's
+      // row as "interrupted" while the service ran the row's exact image.
+      inspected =
+          run(
+              List.of(
+                  runtime,
+                  "service",
+                  "inspect",
+                  "--format",
+                  RUNNING_IMAGE_FORMAT,
+                  SEED_STACK_PREFIX + name),
+              INSPECT_TIMEOUT);
+    }
+    if (inspected.exitCode() != 0) {
+      return Optional.empty(); // swarm has no such service under either name
     }
     String[] parts = safe(inspected.output()).strip().split("\\|", 3);
     String image = parts[0].strip();

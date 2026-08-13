@@ -674,6 +674,21 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void theRunningImageFallsBackToTheStackNamedService() {
+    // The deployer's own self-update targets the stack-named service it runs as, so the
+    // successor's startup sweep reads its evidence there too — asking only the bare alias
+    // settled a succeeded self-update as "interrupted".
+    SwarmDeploymentDriver driver = driver();
+    cli.script("{{end}} dev-qits-gateway", result(1, "Error: no such service: dev-qits-gateway"));
+    cli.script("{{end}} qits_dev-qits-gateway", result(0, IMAGE + "|completed|update completed\n"));
+
+    DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
+
+    assertEquals(IMAGE, running.imageRef());
+    assertEquals("completed: update completed", running.detail());
+  }
+
+  @Test
   void aServiceSwarmDoesNotHaveIsNoEvidenceAtAll() {
     // "No such service" is not a rollback and not a success; the sweep fails the row as interrupted
     // rather than reading a verdict out of an error message.
