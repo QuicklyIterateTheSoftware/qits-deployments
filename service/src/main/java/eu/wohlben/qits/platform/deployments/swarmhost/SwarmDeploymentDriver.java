@@ -93,6 +93,15 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * A network is removable roughly a second after the services on it go, not immediately —
    * measured. So a teardown retries rather than reporting a failure that is only a moment early.
    */
+  /**
+   * How long a reaped seed twin's task may take to stop before the successor is created anyway.
+   * Ten seconds covers a postgres shutdown; the give-up arm exists so a wedged task cannot hold
+   * every deployment hostage, and it says what it risks.
+   */
+  private static final int TWIN_DRAIN_ATTEMPTS = 10;
+
+  private static final Duration TWIN_DRAIN_WAIT = Duration.ofSeconds(1);
+
   private static final int NETWORK_REMOVE_ATTEMPTS = 5;
 
   private static final Duration NETWORK_REMOVE_WAIT = Duration.ofSeconds(1);
@@ -471,10 +480,16 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
-   * Remove the seed stack's service for this application, when one is still there. No wait for
-   * the tasks to drain: a successor whose host port is briefly still held sits {@code Pending}
-   * for the seconds the twin's task takes to stop, and schedules by itself — the same statement a
-   * wait loop would make, without a second timeout to pick.
+   * Remove the seed stack's service for this application, when one is still there — and WAIT for
+   * its task containers to be gone before returning.
+   * <p>
+   * The wait is not about ports: a successor whose host port is briefly still held sits
+   * {@code Pending} and schedules by itself. It is about VOLUMES. {@code service rm} returns
+   * while the task is still shutting down, and a successor created in that window starts beside
+   * it — for a stateless service an overlap of seconds is nothing, for postgres on its data
+   * volume it is two writers on one cluster. Measured twice: the un-reaped twin corrupted the WAL
+   * over hours, and the first reap-then-create did the same in its seconds of overlap — both
+   * boots ended in "could not locate a valid checkpoint record" at the next cold start.
    */
   private void reapSeedTwin(String name) {
     String twin = SEED_STACK_PREFIX + name;
@@ -488,7 +503,31 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
           twin, removed.output());
       return;
     }
-    LOG.infof("Removed the seed service %s: %s takes the alias and the ports", twin, name);
+    for (int attempt = 0; attempt < TWIN_DRAIN_ATTEMPTS; attempt++) {
+      PdProcess.Result tasks =
+          run(
+              List.of(
+                  runtime,
+                  "ps",
+                  "--quiet",
+                  "--filter",
+                  "label=" + SWARM_SERVICE_LABEL + "=" + twin),
+              INSPECT_TIMEOUT);
+      if (tasks.exitCode() == 0 && safe(tasks.output()).strip().isEmpty()) {
+        LOG.infof("Removed the seed service %s: %s takes the alias and the ports", twin, name);
+        return;
+      }
+      try {
+        Thread.sleep(TWIN_DRAIN_WAIT.toMillis());
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return;
+      }
+    }
+    LOG.warnf(
+        "The seed service %s is removed but its task is still stopping — the successor may start"
+            + " beside it",
+        twin);
   }
 
   /**
