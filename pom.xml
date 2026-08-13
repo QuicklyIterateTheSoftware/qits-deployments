@@ -21,7 +21,7 @@
                           them (a link is presence; a platform service has none and is therefore
                           everywhere). Owns the datasource and the schema.
            deployments/   the execution domain — deployment rows, the deploy orchestration, the
-                          rollback pins, the run-args convention, and the docker SEAM.
+                          rollback pins, the extras convention, and the docker SEAM.
            service/       the adapters — JAX-RS for both domains, the docker driver, the git-host
                           spec reader, the build-succeeded intake, and the web client.
 

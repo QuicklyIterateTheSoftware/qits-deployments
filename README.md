@@ -205,13 +205,22 @@ labels under one namespace — `qits.platform.deployments.` + `environment`, `ap
 `--filter label=`. One record of the truth, and it is the runtime's. Containers carrying an earlier
 spelling (`qits.cd.*`, `qits.pd.*`) count as unlabelled: adoptable, never protected.
 
-## Self-update is a handoff
+## Self-update takes an orchestrator
 
-This component deploys itself, and it cannot stop its own container and then finish the cutover. So
-the roles split three ways: this instance starts the successor and launches a **detached referee**;
-the referee stops this container — freeing the published port and the socket the successor is
-retrying on — awaits the successor's health gate, and removes whichever side lost; the surviving instance's startup sweep
-records the outcome. A successor that misses its gate leaves the predecessor serving.
+This component deploys itself, and it cannot stop its own container and then finish the cutover:
+the instance that would arbitrate is the one being replaced. That takes a third party, and **swarm
+is it** — the manager lives in the daemon, so it stops this task, starts the successor and reverts
+the spec if the successor never goes healthy. This instance issues the update on its own service
+and dies.
+
+What no orchestrator does is the **row**. The deployment stays `STARTING` until an instance boots
+that can settle it, and the startup sweep does that from what is running: the service's image
+carrying the row's sha is this deployment serving, another sha is a rollback or a later deployment,
+nothing at all is a deployment a restart interrupted.
+
+**The docker path refuses a self-update** and says so on the row. It used to launch a detached
+referee container to arbitrate; the referee is retired, and this component updates itself under
+`qits.platform.deployments.orchestrator=swarm`.
 
 ## What it answers
 
@@ -248,8 +257,10 @@ serving, and the sha a rollback would put back.
   domain that already holds the docker socket, and is never written into a row and never put in an
   argv. There is no `DROP` in the vocabulary and none is coming.
 - **Argv contributions come from deployment config and from this component itself.**
-  `qits.platform.deployments.run-args.<app>` is how a stateful application gets its volume and its
-  extra env; the `QITS_RESOURCE_<NAME>_*` triple is generated here and injected here. **Nothing
+  `qits.platform.deployments.extras.<app>.*` is how a stateful application gets its volume, its
+  published port and its extra env — a structured family each driver renders in its own
+  orchestrator's words (`ServiceExtras`); the `QITS_RESOURCE_<NAME>_*` triple is generated here and
+  injected here. **Nothing
   arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as
   before, now that a credential is a thing this component holds: what a repository can NAME is a
   database of its own, and the VALUES injected for it are ones this component generated.

@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Six scalar keys, no nesting, no YAML
+ * The strict reader of {@code .config/qits/deployments.yml}. Seven scalar keys, no nesting, no YAML
  * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
@@ -20,8 +20,17 @@ import java.util.Set;
  * health_path: /q/health/ready         # default: /&lt;name without the qits- prefix&gt;/q/health/ready
  * health_cmd: pg_isready -U postgres   # instead of health_path: the probe runs in the container
  * resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
+ * update_order: start-first            # default | stop-first for anything single-writer
  * deploy_branches: environment/prod    # RETIRED, accepted and ignored — see below
  * </pre>
+ *
+ * <p><b>{@code update_order} is the one key an orchestrator reads rather than this component.</b>
+ * {@code start-first} overlaps the successor with the predecessor, which is what makes a rollback
+ * lossless; {@code stop-first} is the opt-out for an application that cannot be two processes at
+ * once — one binder per published host port, one writer per store, one holder of a config volume.
+ * The docker path is stop-first by construction and reads the key without using it; under swarm it
+ * is {@code --update-order}. A repository that says nothing gets {@code start-first}, so an
+ * application that must not overlap has to say so.
  *
  * <p><b>{@code health_cmd} and {@code health_path} are alternatives, and setting both is an
  * error.</b> They are not two settings on one gate: the path names a URL a {@code curl} inside the
@@ -81,6 +90,7 @@ public final class DeploymentSpecParser {
   private static final String HEALTH_PATH = "health_path";
   private static final String HEALTH_CMD = "health_cmd";
   private static final String RESOURCES = "resources";
+  private static final String UPDATE_ORDER = "update_order";
 
   /** The only resource type there is. It is spelled in the file so a second one can arrive. */
   private static final String POSTGRESQL = "postgresql";
@@ -101,6 +111,7 @@ public final class DeploymentSpecParser {
     String healthPath = null;
     String healthCmd = null;
     List<DeploymentSpec.ResourceSpec> resources = List.of();
+    DeploymentDriver.UpdateOrder updateOrder = DeploymentDriver.UpdateOrder.START_FIRST;
     Set<String> seen = new HashSet<>();
 
     String[] lines = (yaml == null ? "" : yaml).split("\\R", -1);
@@ -130,6 +141,7 @@ public final class DeploymentSpecParser {
         case HEALTH_PATH -> healthPath = healthPath(value, source, lineNumber);
         case HEALTH_CMD -> healthCmd = healthCmd(value, source, lineNumber);
         case RESOURCES -> resources = resources(value, source, lineNumber);
+        case UPDATE_ORDER -> updateOrder = updateOrder(value, source, lineNumber);
         default ->
             throw error(
                 source,
@@ -146,8 +158,10 @@ public final class DeploymentSpecParser {
                     + HEALTH_PATH
                     + ", "
                     + HEALTH_CMD
+                    + ", "
+                    + RESOURCES
                     + " and "
-                    + RESOURCES);
+                    + UPDATE_ORDER);
       }
     }
 
@@ -171,7 +185,35 @@ public final class DeploymentSpecParser {
               + " environment's networks, and the bundle is environment-scoped");
     }
     return new DeploymentSpec(
-        target, availableOnEnv, deployBranches, healthPath, healthCmd, resources);
+        target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, updateOrder);
+  }
+
+  /**
+   * How a replacement may overlap what it replaces. Two values and no third: the file is written by
+   * a person in the orchestrator's own spelling ({@code start-first}, {@code stop-first}) and the
+   * enum is read by a machine, so neither has to spell the other's convention.
+   *
+   * <p>An unrecognised value is refused rather than defaulted, like every other value here: the
+   * difference between the two is whether an application is ever two processes at once, and
+   * answering that with a silent default is exactly what this parser exists not to do.
+   */
+  private static DeploymentDriver.UpdateOrder updateOrder(String value, String source, int line) {
+    for (DeploymentDriver.UpdateOrder candidate : DeploymentDriver.UpdateOrder.values()) {
+      if (candidate.spelling().equals(value)) {
+        return candidate;
+      }
+    }
+    throw error(
+        source,
+        line,
+        "`"
+            + UPDATE_ORDER
+            + "` must be `"
+            + DeploymentDriver.UpdateOrder.START_FIRST.spelling()
+            + "` or `"
+            + DeploymentDriver.UpdateOrder.STOP_FIRST.spelling()
+            + "`, got: "
+            + value);
   }
 
   /**

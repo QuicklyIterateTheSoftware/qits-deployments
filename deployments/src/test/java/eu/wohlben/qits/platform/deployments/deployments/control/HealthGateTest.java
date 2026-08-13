@@ -41,7 +41,7 @@ class HealthGateTest {
     };
     AtomicInteger polled = new AtomicInteger();
 
-    DeploymentDriver.HealthResult result =
+    HealthGate.Result result =
         HealthGate.await(
             Duration.ofSeconds(5),
             Duration.ofMillis(1),
@@ -58,7 +58,7 @@ class HealthGateTest {
     // The other half of the old instant fail. A container that is up and answering its probe with a
     // failure is a container whose probe may yet succeed — Flyway on a cold database takes longer
     // than the first health interval, and the deadline is what decides, not the first answer.
-    DeploymentDriver.HealthResult result =
+    HealthGate.Result result =
         HealthGate.await(
             Duration.ofSeconds(5),
             Duration.ofMillis(1),
@@ -72,7 +72,7 @@ class HealthGateTest {
   void onlyTheDeadlineFailsAContainerThatNeverComesUp() {
     AtomicInteger logsRead = new AtomicInteger();
 
-    DeploymentDriver.HealthResult result =
+    HealthGate.Result result =
         HealthGate.await(
             Duration.ofMillis(200),
             Duration.ofMillis(5),
@@ -100,7 +100,7 @@ class HealthGateTest {
     // so waiting out the deadline would only make the deployment slow as well as failed.
     AtomicInteger polled = new AtomicInteger();
 
-    DeploymentDriver.HealthResult result =
+    HealthGate.Result result =
         HealthGate.await(
             Duration.ofSeconds(30),
             Duration.ofMillis(1),
@@ -119,7 +119,7 @@ class HealthGateTest {
   void anAlreadyHealthyContainerIsAnsweredOnTheFirstPoll() {
     AtomicInteger polled = new AtomicInteger();
 
-    DeploymentDriver.HealthResult result =
+    HealthGate.Result result =
         HealthGate.await(
             Duration.ZERO,
             Duration.ofMillis(1),

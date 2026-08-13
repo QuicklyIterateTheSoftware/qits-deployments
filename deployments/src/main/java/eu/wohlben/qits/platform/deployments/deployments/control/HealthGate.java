@@ -30,8 +30,8 @@ import java.util.function.Supplier;
  * network connect} for every join → {@code docker start} would put the container on all its
  * networks before its first boot, so the race would not happen at all. It is a restructure across
  * the driver seam — the argv stops being a {@code run}, {@code StartSpec} grows the join set, and
- * the self-update handoff and the cutover's call-order assertions all move with it — and a patient
- * gate makes the race self-heal without any of that. Recorded, not done.
+ * the cutover's call-order assertions move with it — and a patient gate makes the race self-heal
+ * without any of that. Recorded, not done, and the docker path it belongs to is being retired.
  */
 public final class HealthGate {
 
@@ -57,6 +57,16 @@ public final class HealthGate {
   }
 
   /**
+   * What a completed gate says: healthy, or why it gave up.
+   *
+   * <p>It lives here rather than on a driver interface because the gate is the domain's — the
+   * docker path polls it, and an orchestrator that gates for itself (swarm) never builds one. It
+   * was {@code DeploymentDriver.HealthResult} while docker was the only orchestrator and the seam
+   * carried docker's own vocabulary.
+   */
+  public record Result(boolean healthy, String detail) {}
+
+  /**
    * The gate's one early success verdict, on its own so nothing has to restate it.
    *
    * <p>{@link DeploymentObserver} settles a row on exactly this reading — a {@code FAILED} row is
@@ -80,19 +90,18 @@ public final class HealthGate {
    * @param logs the container's log tail, read <b>only</b> when the gate is about to fail — it is
    *     the diagnosis, and fetching it on every poll would spend the deadline on docker calls
    */
-  public static DeploymentDriver.HealthResult await(
+  public static Result await(
       Duration timeout, Duration poll, Supplier<Poll> polls, Supplier<String> logs) {
     long deadline = System.nanoTime() + timeout.toNanos();
     String last = "(never inspected)";
     while (true) {
       Poll observed = polls.get();
       if (observed.gone() != null) {
-        return new DeploymentDriver.HealthResult(
-            false, "container vanished: " + observed.gone());
+        return new Result(false, "container vanished: " + observed.gone());
       }
       last = observed.state();
       if (healthy(observed)) {
-        return new DeploymentDriver.HealthResult(true, null);
+        return new Result(true, null);
       }
       if (System.nanoTime() >= deadline) {
         break;
@@ -101,14 +110,13 @@ public final class HealthGate {
         Thread.sleep(poll.toMillis());
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        return new DeploymentDriver.HealthResult(
-            false, "interrupted while waiting on the health gate");
+        return new Result(false, "interrupted while waiting on the health gate");
       }
     }
     // The verdict names the state it gave up on, because "restarting" and "unhealthy" are two very
     // different bugs to go looking for: the first is a container dying and being restarted, the
     // second is one that is up and answering its probe with a failure.
-    return new DeploymentDriver.HealthResult(
+    return new Result(
         false,
         "container still " + last + " after " + timeout.toSeconds() + "s\n" + logs.get());
   }

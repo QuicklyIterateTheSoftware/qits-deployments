@@ -5,7 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -36,7 +37,7 @@ public class PdPinApiTest {
   private static final String SHA_C = "c".repeat(40);
   private static final String SHA_D = "d".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
 
   @BeforeEach
   void reset() {
@@ -71,7 +72,7 @@ public class PdPinApiTest {
     String environmentId = createEnvironment("pins-gate");
     deploy("repo-pins-gate", "environment/pins-gate", SHA_A, environmentId, 1);
 
-    driver.scriptHealth(new DeploymentDriver.HealthResult(false, "container exited"));
+    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
     deploy("repo-pins-gate", "environment/pins-gate", SHA_B, environmentId, 2);
 
     assertEquals(List.of(SHA_A), shasOf("repo-pins-gate"));

@@ -256,12 +256,41 @@ class DeploymentSpecParserTest {
   }
 
   @Test
+  void anApplicationThatCannotOverlapItselfSaysStopFirst() {
+    // The default is the lossless one — the successor starts beside the predecessor, so an
+    // orchestrator that fails it reverts to something that never stopped serving. What a repository
+    // says here is that it cannot be two processes at once: one binder per published host port, one
+    // writer per store, one holder of a config volume.
+    assertEquals(
+        DeploymentDriver.UpdateOrder.START_FIRST, parse("").updateOrder(), "the default");
+    assertEquals(
+        DeploymentDriver.UpdateOrder.START_FIRST,
+        parse("update_order: start-first\n").updateOrder());
+    assertEquals(
+        DeploymentDriver.UpdateOrder.STOP_FIRST, parse("update_order: stop-first\n").updateOrder());
+  }
+
+  @Test
+  void anUpdateOrderOutsideThePairIsAnError() {
+    // Refused rather than defaulted, like every other value here: the difference between the two is
+    // whether an application is ever two processes at once, and a silent default answers that
+    // question for a repository that was trying to answer it itself.
+    String message = messageOf("update_order: rolling\n");
+    assertTrue(message.contains("start-first"), message);
+    assertTrue(message.contains("stop-first"), message);
+    assertTrue(message.contains("rolling"), "the message names what was written: " + message);
+    // The enum's own spelling is the file's, so neither side has to translate.
+    assertTrue(messageOf("update_order: STOP_FIRST\n").contains("update_order"));
+  }
+
+  @Test
   void anUnknownKeyIsAnError() {
     // A lenient parser answers a typo with a default, which deploys the wrong topology in silence.
     String message = messageOf("deployment_targets: platform\n");
     assertTrue(message.contains("unknown key"), message);
     // ...and the message lists every key there is, so a typo is answered with the vocabulary.
     assertTrue(message.contains("resources"), message);
+    assertTrue(message.contains("update_order"), message);
   }
 
   @Test

@@ -6,9 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
-import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import java.util.List;
@@ -19,15 +19,19 @@ import org.junit.jupiter.api.Test;
  * The {@code docker run} argv as assembled — plain JUnit over the package-private builder, the
  * {@code CiDaemonLauncherTest} stance: the argv IS the contract with the docker CLI, and asserting
  * it needs no docker.
+ *
+ * <p>It was {@code DockerDeploymentDriverTest} while this class was the whole driver. What moved
+ * out is the choreography that decides WHICH container to run and when; what is asserted here is
+ * unchanged, because the argv and the output parsing did not move.
  */
-class DockerDeploymentDriverTest {
+class DockerCliTest {
 
-  private DockerDeploymentDriver driver() {
+  private DockerCli driver() {
     return driver(Map.of());
   }
 
-  private DockerDeploymentDriver driver(Map<String, String> properties) {
-    DockerDeploymentDriver driver = new DockerDeploymentDriver();
+  private DockerCli driver(Map<String, String> properties) {
+    DockerCli driver = new DockerCli();
     driver.runtime = "docker";
     driver.pullTimeoutSeconds = 600;
     driver.healthIntervalSeconds = 3;
@@ -41,17 +45,17 @@ class DockerDeploymentDriverTest {
     return driver;
   }
 
-  private DeploymentDriver.StartSpec spec(String healthPath) {
+  private DockerHost.StartSpec spec(String healthPath) {
     return spec(healthPath, null);
   }
 
-  private DeploymentDriver.StartSpec spec(String healthPath, String healthCmd) {
+  private DockerHost.StartSpec spec(String healthPath, String healthCmd) {
     return spec(healthPath, healthCmd, List.of());
   }
 
-  private DeploymentDriver.StartSpec spec(
+  private DockerHost.StartSpec spec(
       String healthPath, String healthCmd, List<DeploymentDriver.ResourceBinding> resources) {
-    return new DeploymentDriver.StartSpec(
+    return new DockerHost.StartSpec(
         "env-id",
         "dev",
         "app-id",
@@ -69,8 +73,8 @@ class DockerDeploymentDriverTest {
   }
 
   /** A platform-plane container: no environment at all, and qits-platform as its primary network. */
-  private DeploymentDriver.StartSpec platformSpec() {
-    return new DeploymentDriver.StartSpec(
+  private DockerHost.StartSpec platformSpec() {
+    return new DockerHost.StartSpec(
         null,
         null,
         "app-id",
@@ -130,25 +134,26 @@ class DockerDeploymentDriverTest {
   }
 
   @Test
-  void theInjectedIdentityIsADefaultTheOperatorsRunArgsCanOverride() {
+  void theInjectedIdentityIsADefaultTheDeploymentsExtrasCanOverride() {
     // Precedence, and it is docker's rule rather than cd's: the LAST assignment of a repeated env
-    // key is the one the container gets. cd's variables are written before run-args, so run-args
-    // pass through untouched AND win — the injection composes with the operator instead of
-    // fighting them.
-    DockerDeploymentDriver driver =
+    // key is the one the container gets. cd's variables are written before the deployment's, so
+    // the deployment's pass through untouched AND win — the injection composes with the operator
+    // instead of fighting them.
+    DockerCli driver =
         driver(
             Map.of(
-                DockerDeploymentDriver.RUN_ARGS_PREFIX + "qits-gateway",
-                "-v qits-data:/data -e OTEL_RESOURCE_ATTRIBUTES=service.version=operator"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.OTEL_RESOURCE_ATTRIBUTES",
+                    "service.version=operator"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
-    // The operator's arguments, verbatim and last before the image.
+    // The deployment's own, rendered last before the image.
     assertEquals(
         List.of(
             "-v",
             "qits-data:/data",
-            "-e",
+            "--env",
             "OTEL_RESOURCE_ATTRIBUTES=service.version=operator",
             "qits-artifacts:8080/qits/qits-gateway:abc1234"),
         argv.subList(argv.size() - 5, argv.size()));
@@ -165,8 +170,8 @@ class DockerDeploymentDriverTest {
     // The belt at the argv, the health-path stance. Nothing validated at the boundary can carry a
     // comma today; this is what turns a loosened boundary check into a failed deployment rather
     // than a container stamped with attributes cd never wrote.
-    DeploymentDriver.StartSpec forged =
-        new DeploymentDriver.StartSpec(
+    DockerHost.StartSpec forged =
+        new DockerHost.StartSpec(
             "env-id",
             "dev,service.name=impostor",
             "app-id",
@@ -186,12 +191,20 @@ class DockerDeploymentDriverTest {
   }
 
   @Test
-  void runArgsAreAppendedBetweenCdsOwnFlagsAndTheImage() {
-    DockerDeploymentDriver driver =
+  void everyExtraIsRenderedInDockersOwnSpellingBeforeTheImage() {
+    // The four things an application can need beyond its image, each in `docker run`'s words: a
+    // named volume, a host path, a supplementary group, a published port with the ip this
+    // orchestrator can honour, and an environment variable.
+    DockerCli driver =
         driver(
             Map.of(
-                DockerDeploymentDriver.RUN_ARGS_PREFIX + "qits-gateway",
-                "-v qits-data:/data --env FOO=bar"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[1]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.publishes[0]", "127.0.0.1:8081:8080",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.publishes[1]", "5353:8053/udp",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.groups[0]", "988",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.FOO", "bar"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
@@ -199,21 +212,41 @@ class DockerDeploymentDriverTest {
         List.of(
             "-v",
             "qits-data:/data",
+            "-v",
+            "/var/run/docker.sock:/var/run/docker.sock",
+            "-p",
+            "127.0.0.1:8081:8080",
+            "-p",
+            "5353:8053/udp",
+            "--group-add",
+            "988",
             "--env",
             "FOO=bar",
             "qits-artifacts:8080/qits/qits-gateway:abc1234"),
-        argv.subList(argv.size() - 5, argv.size()));
+        argv.subList(argv.size() - 13, argv.size()));
   }
 
   @Test
-  void runArgsOfAnotherApplicationDoNotLeakIn() {
-    // The absence is the assertion that matters: only the deployed application's own key reaches
+  void aReadOnlyMountKeepsItsRoSuffix() {
+    DockerCli driver =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "volume:qits-data:/data:ro"));
+
+    assertTrue(driver.buildArgv(spec("/q/health/ready")).contains("qits-data:/data:ro"));
+  }
+
+  @Test
+  void extrasOfAnotherApplicationDoNotLeakIn() {
+    // The absence is the assertion that matters: only the deployed application's own keys reach
     // its argv, so one application's socket mount cannot ride along on a sibling's deployment.
-    DockerDeploymentDriver driver =
+    // The second key is the sharper half — an application whose name merely STARTS with this one's
+    // is a different application, and the dot is what says so.
+    DockerCli driver =
         driver(
             Map.of(
-                DockerDeploymentDriver.RUN_ARGS_PREFIX + "qits-workspaces",
-                "-v /var/run/docker.sock:/var/run/docker.sock"));
+                DockerCli.EXTRAS_PREFIX + "qits-workspaces.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock",
+                DockerCli.EXTRAS_PREFIX + "qits-gateway-daemon.mounts[0]",
+                    "bind:/var/run/docker.sock:/var/run/docker.sock"));
 
     List<String> argv = driver.buildArgv(spec("/q/health/ready"));
 
@@ -222,23 +255,21 @@ class DockerDeploymentDriverTest {
   }
 
   @Test
-  void runArgsResolveFromTheEnvSpelling() {
-    // The deployment sets QITS_PLATFORM_DEPLOYMENTS_RUN_ARGS_QITS_GATEWAY in compose; this pins
-    // that SmallRye's env mapping really answers the dashed property name the driver asks for.
-    DockerDeploymentDriver driver = driver();
-    driver.config =
-        new SmallRyeConfigBuilder()
-            .withSources(
-                new EnvConfigSource(
-                    Map.of("QITS_PLATFORM_DEPLOYMENTS_RUN_ARGS_QITS_GATEWAY", "--env FOO=bar"),
-                    300))
-            .build();
+  void anUnreadableExtraRefusesTheStartRatherThanDroppingIt() {
+    // Config is typed now, so garbage in it is a bug rather than a vocabulary this driver does not
+    // speak — and the failure a dropped mount produces is the worst kind: a container that boots,
+    // passes its gate and has lost its volume.
+    DockerCli driver =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.cap-adds[0]", "SYS_ADMIN"));
 
-    List<String> argv = driver.buildArgv(spec("/q/health/ready"));
+    assertThrows(ServiceExtras.Refused.class, () -> driver.buildArgv(spec("/q/health/ready")));
 
-    assertEquals(
-        List.of("--env", "FOO=bar", "qits-artifacts:8080/qits/qits-gateway:abc1234"),
-        argv.subList(argv.size() - 3, argv.size()));
+    // And the refusal is what the caller sees: nothing runs, and the detail names the key.
+    DockerHost.StartResult started =
+        driver(Map.of(DockerCli.EXTRAS_PREFIX + "qits-gateway.mounts[0]", "qits-data:/data"))
+            .start(spec("/q/health/ready"));
+    assertFalse(started.started());
+    assertTrue(started.detail().contains("qits-gateway.mounts[0]"), started.detail());
   }
 
   @Test
@@ -250,12 +281,12 @@ class DockerDeploymentDriverTest {
         "aaa111|/qits-gateway|qits-gateway abc|\n"
             + "bbb222|/qits-pd-dev-qits-gateway-12345678|dev-qits-gateway|env-1\n"
             + "ccc333|/unrelated|other-alias|env-1\n";
-    List<DeploymentDriver.Holder> holders =
-        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway"));
+    List<DockerHost.Holder> holders =
+        DockerCli.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway"));
     assertEquals(
         List.of(
-            new DeploymentDriver.Holder("aaa111", "qits-gateway", null),
-            new DeploymentDriver.Holder("bbb222", "qits-pd-dev-qits-gateway-12345678", "env-1")),
+            new DockerHost.Holder("aaa111", "qits-gateway", null),
+            new DockerHost.Holder("bbb222", "qits-pd-dev-qits-gateway-12345678", "env-1")),
         holders);
   }
 
@@ -268,11 +299,11 @@ class DockerDeploymentDriverTest {
 
     assertEquals(
         List.of(),
-        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway")),
+        DockerCli.parseHolders(output, List.of("dev-qits-gateway")),
         "the qualified alias alone does not see it");
     assertEquals(
-        List.of(new DeploymentDriver.Holder("aaa111", "qits-pd-dev-qits-gateway-old", "env-1")),
-        DockerDeploymentDriver.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway")));
+        List.of(new DockerHost.Holder("aaa111", "qits-pd-dev-qits-gateway-old", "env-1")),
+        DockerCli.parseHolders(output, List.of("dev-qits-gateway", "qits-gateway")));
   }
 
   @Test
@@ -281,17 +312,17 @@ class DockerDeploymentDriverTest {
     // on a network it needs and no health gate will notice". The first wording is measured against
     // the platform's own daemon (29.5.3); the second is what older daemons answer.
     assertTrue(
-        DockerDeploymentDriver.alreadyJoined(
+        DockerCli.alreadyJoined(
             "Error response from daemon: endpoint with name qits-pd-dev-qits-gateway-1234abcd"
                 + " already exists in network qits-net"));
     assertTrue(
-        DockerDeploymentDriver.alreadyJoined(
+        DockerCli.alreadyJoined(
             "Error response from daemon: container abc is already connected to network qits-net"));
     // Anything else is a real refusal — the match errs toward failing the deployment.
     assertFalse(
-        DockerDeploymentDriver.alreadyJoined(
+        DockerCli.alreadyJoined(
             "Error response from daemon: network qits-net not found"));
-    assertFalse(DockerDeploymentDriver.alreadyJoined(""));
+    assertFalse(DockerCli.alreadyJoined(""));
   }
 
   @Test
@@ -300,8 +331,8 @@ class DockerDeploymentDriverTest {
     // environment" has to survive every spelling docker has for it: a missing field (an older
     // format), an empty one, and the `<no value>` a Go template prints for an absent map key —
     // measured on docker 29.5.3, where an `index` following the alias ranges produces exactly that.
-    List<DeploymentDriver.Holder> holders =
-        DockerDeploymentDriver.parseHolders(
+    List<DockerHost.Holder> holders =
+        DockerCli.parseHolders(
             "aaa111|/qits-gateway|qits-gateway|<no value>\n"
                 + "bbb222|/seeded|qits-gateway|\n"
                 + "ccc333|/older-format|qits-gateway\n",
@@ -309,34 +340,19 @@ class DockerDeploymentDriverTest {
 
     assertEquals(
         List.of(
-            new DeploymentDriver.Holder("aaa111", "qits-gateway", null),
-            new DeploymentDriver.Holder("bbb222", "seeded", null),
-            new DeploymentDriver.Holder("ccc333", "older-format", null)),
+            new DockerHost.Holder("aaa111", "qits-gateway", null),
+            new DockerHost.Holder("bbb222", "seeded", null),
+            new DockerHost.Holder("ccc333", "older-format", null)),
         holders);
   }
 
   @Test
-  void theRefereeArgvSwapsTheEntrypointMountsTheSocketAndCarriesTheArbitrationScript() {
-    DockerDeploymentDriver driver = driver();
-    driver.dockerSocketPath = "/var/run/docker.sock";
-    DeploymentDriver.HandoffSpec spec =
-        new DeploymentDriver.HandoffSpec(
-            "qits-artifacts:8080/qits/qits-platform-deployments:abc",
-            "old-full-id",
-            "qits-pd-prod-qits-platform-deployments-12345678",
-            120);
-    String script = "docker stop old-full-id\n...";
-
-    List<String> argv = driver.buildHandoffArgv(spec, script);
-
-    assertEquals(List.of("docker", "run", "-d", "--rm"), argv.subList(0, 4));
-    assertTrue(argv.containsAll(List.of("--name", "qits-pd-handoff-12345678")));
-    assertTrue(argv.containsAll(List.of("-v", "/var/run/docker.sock:/var/run/docker.sock")));
-    assertTrue(argv.containsAll(List.of("--entrypoint", "/bin/sh")));
-    // The image is the deployment's own — just pulled, guaranteed present — then -c <script>.
-    int image = argv.indexOf("qits-artifacts:8080/qits/qits-platform-deployments:abc");
-    assertEquals("-c", argv.get(image + 1));
-    assertEquals(script, argv.get(image + 2));
+  void theRunningImageArgvAsksForTheReferenceTheContainerWasRunWith() {
+    // The startup sweep compares this answer with the row's sha, so it has to be the REFERENCE:
+    // `.Image` would be the resolved image id, which carries no tag to compare with.
+    assertEquals(
+        List.of("docker", "inspect", "--format", "{{.Config.Image}}", "qits-pd-dev-qits-gateway-dep"),
+        driver().buildRunningImageArgv("qits-pd-dev-qits-gateway-dep"));
   }
 
   @Test
@@ -418,7 +434,7 @@ class DockerDeploymentDriverTest {
             + "qits-platform|qits.platform.deployments.network=platform\n"
             + "someone-elses|com.docker.compose.project=x\n";
 
-    List<DeploymentDriver.Network> networks = DockerDeploymentDriver.parseNetworks(output);
+    List<DeploymentDriver.Network> networks = DockerCli.parseNetworks(output);
 
     assertEquals(
         List.of(
@@ -438,13 +454,13 @@ class DockerDeploymentDriverTest {
   void aReconciliationCandidateWithoutAnAppNameLabelIsSkipped() {
     // A container from before this label existed cannot be joined under the right alias, so it is
     // left alone rather than joined under a name nothing resolves. Its own next deploy fixes it.
-    List<DeploymentDriver.Endpoint> endpoints =
-        DockerDeploymentDriver.parseEndpoints("aaa111|qits-gateway\nbbb222|\nccc333|qits-idp\n");
+    List<DockerHost.Endpoint> endpoints =
+        DockerCli.parseEndpoints("aaa111|qits-gateway\nbbb222|\nccc333|qits-idp\n");
 
     assertEquals(
         List.of(
-            new DeploymentDriver.Endpoint("aaa111", "qits-gateway"),
-            new DeploymentDriver.Endpoint("ccc333", "qits-idp")),
+            new DockerHost.Endpoint("aaa111", "qits-gateway"),
+            new DockerHost.Endpoint("ccc333", "qits-idp")),
         endpoints);
   }
 
@@ -485,7 +501,7 @@ class DockerDeploymentDriverTest {
   }
 
   @Test
-  void aProvisionedResourceArrivesAsTheGenericTripleBeforeTheRunArgs() {
+  void aProvisionedResourceArrivesAsTheGenericTripleBeforeTheExtras() {
     // The contract an application maps in its OWN shipped defaults: this component names no
     // framework and no datasource key, which is what lets one code path deploy a Quarkus service
     // and a plain image. The name is uppercased and its dashes underscored.
@@ -518,15 +534,16 @@ class DockerDeploymentDriverTest {
   }
 
   @Test
-  void anOperatorsRunArgsStillOverrideAnInjectedResource() {
+  void anOperatorsExtrasStillOverrideAnInjectedResource() {
     // The precedence rule, extended to the newest injection and measured the same way: docker keeps
-    // the LAST assignment of a repeated env key, and the resource triple is written before the run
-    // args, so it is a default rather than something an operator has to fight.
-    DockerDeploymentDriver driver =
+    // the LAST assignment of a repeated env key, and the resource triple is written before the
+    // deployment's own environment, so it is a default rather than something an operator has to
+    // fight.
+    DockerCli driver =
         driver(
             Map.of(
-                DockerDeploymentDriver.RUN_ARGS_PREFIX + "qits-gateway",
-                "-e QITS_RESOURCE_DB_URL=jdbc:postgresql://somewhere-else:5432/qits_gateway"));
+                DockerCli.EXTRAS_PREFIX + "qits-gateway.env.QITS_RESOURCE_DB_URL",
+                "jdbc:postgresql://somewhere-else:5432/qits_gateway"));
 
     List<String> argv =
         driver.buildArgv(

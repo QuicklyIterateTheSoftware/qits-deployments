@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import eu.wohlben.qits.eventstream.CausationHeader;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
@@ -48,7 +48,7 @@ public class PdCausationTest {
 
   private static final String SHA = "c".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
   @Inject PdBuildSuccessfulSubscriber subscriber;

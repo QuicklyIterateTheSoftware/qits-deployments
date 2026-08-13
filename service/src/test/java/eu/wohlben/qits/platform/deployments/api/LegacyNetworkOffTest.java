@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -26,7 +26,7 @@ public class LegacyNetworkOffTest {
 
   private static final String SHA = "a".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
 
   @BeforeEach

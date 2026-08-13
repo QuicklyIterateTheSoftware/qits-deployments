@@ -73,7 +73,7 @@ public class BootResourceRegistrationTest {
         "boot-b");
     String id = rowOf("boot-b").id;
 
-    // An operator rotated the password in run-args and restarted. The environment is the truth: a
+    // An operator rotated the password in deployment config and restarted. The environment is the truth: a
     // row still naming the old one would send the next self-deploy down the reconcile arm against
     // a credential that already works.
     registration.record(

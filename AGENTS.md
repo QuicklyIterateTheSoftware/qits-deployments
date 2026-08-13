@@ -162,9 +162,10 @@ Transactions are programmatic everywhere in `control`, never `@Transactional` �
 worker, partly because a `this.`-invocation never crosses the interceptor and a lost bracket fails
 quietly.
 
-The startup sweep (`DeployService.onStart`) fails rows left `QUEUED`/`STARTING` by a crash and
-**deliberately reaps no containers** — a deployed application outlives its deployer, and whatever
-was ACTIVE before the restart is still serving. Do not "complete" the sweep with a reap.
+The startup sweep (`DeployService.onStart`) settles rows left `QUEUED`/`STARTING` by a crash — see
+"Two orchestrators, one seam" for what settles them — and **deliberately reaps no containers**: a
+deployed application outlives its deployer, and whatever was ACTIVE before the restart is still
+serving. Do not "complete" the sweep with a reap.
 
 **The worker survives losing its own datasource, in exactly three brackets.** This component deploys
 qits-oci-postgresql — the postgres its own registry lives in — so cutting that container over kills
@@ -273,7 +274,7 @@ whose container died an hour after the gate passed, with nothing ever noticing.
 - **It settles the LATEST row per (application, tier) only**, latest by `seq`. History stays history:
   an older `FAILED` row describes an attempt that really did fail, and today's healthy container says
   nothing about it. `QUEUED`/`STARTING` belong to the worker's state machine and to the startup sweep
-  — a self-update handoff sits in `STARTING` with a healthy successor **on purpose** —
+  — a self-update sits in `STARTING` with a healthy successor **on purpose** —
   and `DECOMMISSIONED` is another deployment's decision.
 - **`FAILED` → `ACTIVE`** when the container **the row itself names** is healthy by
   `HealthGate.healthy` (the gate's own verdict, extracted so there is one spelling of it). Only the
@@ -303,6 +304,67 @@ its shipped default in the suite and `PdDeploymentObservationTest` drives `obser
 `enqueueObservation()` directly, the `PdSweepAdoptionTest` shape. That test also holds the serialization
 claim, off the fake's call log: the pass's `observe:` calls land after the deployment's last one.
 
+## Two orchestrators, one seam
+
+`qits.platform.deployments.orchestrator` is `docker` (shipped) or `swarm`, and it picks which
+`DeploymentDriver` the whole component runs on. Both paths work, with one asymmetry that is the
+migration itself: **only swarm can deploy this component**. A self-update takes a third party, the
+docker path's was a detached referee container and it is retired, so that path refuses a deployment
+of this component and names swarm on the row. Flipping the default and deleting the docker path is
+the next phase.
+
+**The seam is two verbs now**: `apply(ServiceSpec)` makes the described service exist at the
+described image, `awaitConverged(name, timeout)` says whether it took. `start`, `stop`, `restart`,
+`connect`, `disconnect`, `aliasHolders`, `handoff`, `isSelf` and `containerId` are gone
+from it — every one of them is a statement about how *docker* replaces a container, and keeping
+them would have made one orchestrator's model look like the contract.
+
+**So `DeployService.execute` has no branches in it**: resolve → provision → pull (for the
+`IMAGE_MISSING` classification, on both paths) → `apply` → `awaitConverged` → record. The
+predecessor search, the alias union, the stop-before-start, the join loop, the reconciliation and
+the rollback all moved into `dockerhost/DockerDeploymentDriver`. What stayed is the
+bookkeeping, because it is the same on both paths: the row per place, the four announcements, the
+cutover bracket, and the reap **after** the rows (`Convergence.retired()` comes back as data for
+exactly that reason).
+
+Three things about the shape, each easy to undo by accident:
+
+- **`nameOf(spec)` is asked before `apply`**, and it is the whole of the naming difference: docker
+  names a container per deployment (`qits-pd-<env>-<app>-<id8>`), a swarm service's name IS its
+  address so it is the wire alias, and the row records whichever it is. A name-based check that
+  assumes the first shape breaks the swarm path silently.
+- **`ApplyOutcome.HANDED_OFF` is neither success nor failure.** A deployment that replaces this very
+  process leaves its row `STARTING` on purpose; the instance that survives records it, from
+  `runningImage`. Only the swarm path answers this way — the docker one has no arbiter and returns
+  `REFUSED` before it stops anything.
+- **`DockerHost` is the docker CLI as its own seam**, and the suite's `@Mock` fake sits there rather
+  than at `DeploymentDriver`. That is what keeps every flow test driving the REAL cutover
+  choreography — the stop, the joins, the reconcile, the rollback — with no docker.
+  `FakeDeploymentDriver` still exists for the state-machine tests and is installed per test with
+  `QuarkusMock`; making it a `@Mock` would take the choreography out of the suite.
+
+**Under swarm the topology is flat and that is a decision, not a simplification**: every
+`--network-add` recreates the task, so a service declares its whole membership at create time —
+`qits.platform.deployments.swarm.flat-network` (an *attachable* overlay, which is what keeps CI
+step, workspace and agent containers working on it) plus `qits-platform` for the plane. The
+per-application networks the state machine still computes are dropped by the swarm driver, out
+loud. A service update keeps the mounts, networks and ports it was created with: changing the shape
+of a service is a `service rm` and a redeploy, not a deployment.
+
+**`update_order` in `.config/qits/deployments.yml`** is `start-first` (default) or `stop-first`, per
+repository, and only the repository knows: a published host port, a single-writer store or a held
+config volume each make the overlap impossible. This repo says `stop-first`. The docker path reads
+it and ignores it — its cutover is stop-first by construction.
+
+**The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
+one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
+the prior actives of that place decommissioned, another sha is `FAILED` as superseded (swarm's
+`UpdateStatus` supplies the wording), and no such service is the interrupted-by-a-restart failure
+every other in-flight row takes. The **image** is the check and `UpdateStatus` is only wording: that
+field holds the most recent update, so a later deployment overwrites the verdict of the one a row is
+about. It replaced "is this row's name me", which cannot tell a completed succession from a
+rolled-back one — under swarm the service keeps its name across both.
+
 ## The health gate is patient, and that is not a tuning choice
 
 `HealthGate` (in `deployments/control`, polled by the driver) ends early on exactly two verdicts:
@@ -322,8 +384,8 @@ why the instant fail survived this long.
 
 **The follow-up this makes optional:** `docker create` → connects → `docker start` would remove the
 race outright. It moves the argv off `run`, grows `StartSpec` with the join set, and drags the
-self-update handoff and the cutover's call-order assertions with it. Recorded, not done — a patient
-gate is the fix, and it is the one that also covers every other slow first boot.
+cutover's call-order assertions with it. Recorded, not done — a patient gate is the fix, it covers
+every other slow first boot too, and the docker path it belongs to is being retired anyway.
 
 The gate lives in the domain module rather than in `dockerhost/` so the suite's fake gate IS the
 shipped gate: `FakeDeploymentDriver.scriptRestartingUntilHealthy` feeds it states and nothing else.
@@ -345,7 +407,9 @@ to maintain.
 is not half of one word. It was `qits.cd.*` in the ancestor and `qits.pd.*` for one release here; a
 deployment carrying an old spelling configures nothing and fails loudly at boot (SmallRye rejects an
 unsatisfied `@ConfigProperty`), which is the intended failure. The env form is
-`QITS_PLATFORM_DEPLOYMENTS_*` — every wrapper and compose file that injects run-args moves with it.
+`QITS_PLATFORM_DEPLOYMENTS_*` — every wrapper and compose file that injects config moves with it.
+The one family read in the DOTTED spelling only is `qits.platform.deployments.extras.<app>.*`, and
+`ServiceExtras` says why: an underscore cannot tell `qits-ci`'s keys from `qits-ci-daemon`'s.
 
 ## Adopting what qits-cd left behind
 
@@ -476,17 +540,22 @@ than escaping it cleverly.
 Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not lean on that:
 validation stays at the boundary and the belt stays at the argv.
 
-Mounts and extra env in a *started* container's argv come from the **deployment's own config and
-nowhere else** (`qits.platform.deployments.run-args.<application>`). Nothing arriving over HTTP may
-contribute a token to a `docker run`; the API is deliberately open on the platform's networks, and config is the trust
-domain that already holds the socket.
-`DockerDeploymentDriverTest.runArgsOfAnotherApplicationDoNotLeakIn` asserts the absence as the
-security property. A `docker exec`, or run-args growing an HTTP-writable source, is the regression.
+Mounts, published ports, groups and extra env in a *started* container's argv come from the
+**deployment's own config and nowhere else** (`qits.platform.deployments.extras.<application>.*`,
+read by `ServiceExtras`). Nothing arriving over HTTP may contribute a token to a `docker run`; the
+API is deliberately open on the platform's networks, and config is the trust domain that already
+holds the socket. `ServiceExtrasTest.anotherApplicationsKeysAreNeverRead`, plus
+`extrasOfAnotherApplicationDoNotLeakIn` on **both** driver tests, asserts the absence as the
+security property. A `docker exec`, or the family growing an HTTP-writable source, is the
+regression.
+
+**The family is typed, and an unknown or malformed key is a refused deployment** — never a warning
+and a dropped flag, which is a container that boots, passes its gate and has lost its volume.
 
 This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RESOURCE_ATTRIBUTES`
-and its `QUARKUS_`-spelled twin) are written **before** the run args, and docker keeps the **last**
-assignment of a repeated key — measured, not assumed. So they are defaults an operator overrides,
-and the ordering is the precedence rule: never reorder them past the run args.
+and its `QUARKUS_`-spelled twin) are written **before** the deployment's own, and docker keeps the
+**last** assignment of a repeated key — measured, not assumed. So they are defaults an operator
+overrides, and the ordering is the precedence rule: never reorder them past the extras.
 
 ## Resources: what the deployer provisions, and where the truth is
 
@@ -518,7 +587,7 @@ each is easy to undo by accident:
   precise about because this component is its own deployer: the spec is read at the built sha, so
   the *running* instance reads the new `resources:` line, creates the role and the database, and
   injects the triple into the successor it starts. Only a cold bootstrap has no deployer to do it,
-  which is why the bootstrap's run-args carry both triples. A missing one is not a degraded boot —
+  which is why the bootstrap's generated config carries both triples. A missing one is not a degraded boot —
   the jars' expressions have no defaults, so the process dies at Flyway naming what is absent, and
   the health gate leaves the predecessor serving.
 - **No transaction spans the seam call.** The registry read and the row upsert are two
@@ -927,9 +996,10 @@ lockfile keeps the developer-host origin, which is correct locally.
 **This repo is its own deployer**, and it is an **environment service** — one instance per
 environment, deploying that environment. Its `.config/qits/deployments.yml` takes the default
 target and names no branch at all: a push to the branch an environment listens to is a deployment.
-A green run announces this component to itself and it takes the self-update handoff; the
-`/platform-deployments` surface blips mid-cutover, and a successor that misses its health gate
-leaves the predecessor serving.
+A green run announces this component to itself, and **under swarm** it deploys itself: the manager
+arbitrates the succession, the `/platform-deployments` surface blips mid-cutover (this repo's spec
+says `update_order: stop-first`), and a successor that misses its health gate leaves the predecessor
+serving. Under the docker path that deployment is refused.
 
 **`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
 *environment* listens to its branch, and what comes out on the platform plane is still

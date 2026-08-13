@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.control.ResourceProvisioner;
@@ -26,7 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The deployment loop end to end, against {@link FakeDeploymentDriver}: intake → queued deployment
+ * The deployment loop end to end, against {@link FakeDockerHost}: intake → queued deployment
  * → pull → start → health gate → cutover, and each of the recorded failure shapes. The boundary
  * starts at the build-succeeded POST, not at a CI run — what qits-ci sends and when belongs to that
  * repo's tests (the CiPipelineBoundaryTest stance).
@@ -40,7 +42,7 @@ public class PdDeploymentFlowTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeployService deployService;
@@ -184,7 +186,7 @@ public class PdDeploymentFlowTest {
     // The image reference is DERIVED — the convention is the contract under test.
     assertEquals(
         List.of("qits-platform-artifacts:8080/qits/repo-green:" + SHA_A), driver.pulledRefs());
-    DeploymentDriver.StartSpec spec = driver.started().get(0);
+    DockerHost.StartSpec spec = driver.started().get(0);
     // The primary network is the application's OWN, not the environment's bundle: an ordinary
     // application is a spoke, and only its own containers are on it.
     assertEquals("qits-env-flow-green-repo-green", spec.network());
@@ -254,7 +256,7 @@ public class PdDeploymentFlowTest {
     awaitDeployments(environmentId, 1);
     String healthyContainer = driver.started().get(0).containerName();
 
-    driver.scriptHealth(new DeploymentDriver.HealthResult(false, "container exited"));
+    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
     postBuildSucceeded("repo-unhealthy", "environment/flow-unhealthy", SHA_B);
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 2);
 
@@ -292,7 +294,7 @@ public class PdDeploymentFlowTest {
 
   @Test
   public void aRefusedStartIsAFailedDeployment() {
-    driver.scriptStart(new DeploymentDriver.StartResult(false, "docker: connection refused"));
+    driver.scriptStart(new DockerHost.StartResult(false, "docker: connection refused"));
     String environmentId = createEnvironment("flow-refused");
     postBuildSucceeded("repo-refused", "environment/flow-refused", SHA_A);
 
@@ -305,7 +307,7 @@ public class PdDeploymentFlowTest {
     // The predecessor here is NOT one of cd's own rows — it is whatever holds the alias, which is
     // how the compose-seeded originals hand over to cd on their first pipeline deployment.
     String environmentId = createEnvironment("flow-replace");
-    driver.scriptAliasHolders(List.of(new DeploymentDriver.Holder("c0ffee".repeat(10) + "beef", "seeded-original", null)));
+    driver.scriptAliasHolders(List.of(new DockerHost.Holder("c0ffee".repeat(10) + "beef", "seeded-original", null)));
     postBuildSucceeded("repo-replace", "environment/flow-replace", SHA_A);
 
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
@@ -324,8 +326,8 @@ public class PdDeploymentFlowTest {
   @Test
   public void aFailedGateRestartsWhatTheCutoverStopped() {
     String environmentId = createEnvironment("flow-rollback");
-    driver.scriptAliasHolders(List.of(new DeploymentDriver.Holder("dead".repeat(16), "previous-app", null)));
-    driver.scriptHealth(new DeploymentDriver.HealthResult(false, "container exited"));
+    driver.scriptAliasHolders(List.of(new DockerHost.Holder("dead".repeat(16), "previous-app", null)));
+    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
     postBuildSucceeded("repo-rollback", "environment/flow-rollback", SHA_A);
 
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
@@ -337,90 +339,48 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void aSelfUpdateStartsTheSuccessorAndHandsArbitrationToTheReferee() {
-    // Deploying the application whose alias this very instance holds: the worker must not stop
-    // its own process. It starts the successor, launches the detached referee, and leaves the row
-    // STARTING — the surviving instance's sweep records the outcome, not this one.
+  public void aSelfUpdateIsRefusedOnTheDockerPathAndTheRunningInstanceKeepsServing() {
+    // Deploying the application whose alias this very instance holds. The docker path cannot do it:
+    // the process that would stop the predecessor IS the predecessor, and nothing would be left to
+    // await the successor's gate or put the loser back. It used to launch a detached referee
+    // container for exactly that; the referee is retired, so this is a refusal — recorded on the
+    // row, with nothing stopped, started or removed.
     String environmentId = createEnvironment("flow-self");
     String selfId = "abcdef123456";
-    String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(List.of(new DeploymentDriver.Holder(selfFullId, "qits-platform-deployments", null)));
+    driver.scriptAliasHolders(
+        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
     postBuildSucceeded("repo-self", "environment/flow-self", SHA_A);
 
-    long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.handoffs().isEmpty() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(50);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
-    assertEquals(1, driver.handoffs().size(), "the referee was launched");
-    DeploymentDriver.HandoffSpec handoff = driver.handoffs().get(0);
-    assertEquals(selfFullId, handoff.oldContainerId());
-    assertEquals(driver.started().get(0).containerName(), handoff.newContainerName());
-    // The successor is started through the same StartSpec as any other deployment, so it carries
-    // the same identity into the same argv builder: deploying cd itself is not a second code path
-    // that could miss the OTel resource attributes.
-    assertEquals(SHA_A, driver.started().get(0).commitSha());
-    assertEquals("flow-self", driver.started().get(0).environmentName());
-    // Nothing stopped, nothing removed by THIS process — the referee owns retirement.
-    assertEquals(List.of(), driver.stoppedContainers());
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+
+    assertEquals("FAILED", deployments.get(0).get("status"));
+    String detail = (String) deployments.get(0).get("detail");
+    assertTrue(detail.contains("swarm"), "the row says where a self-update belongs: " + detail);
+    assertEquals(List.of(), driver.started(), "nothing ran");
+    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
     assertEquals(List.of(), driver.removedContainers());
-    // The row stays STARTING: adoption (successor) or the restart sweep (rollback) finishes it.
-    Map<String, Object> row =
-        given()
-            .when()
-            .get("/platform-deployments/api/deployments?environmentId=" + environmentId)
-            .then()
-            .statusCode(200)
-            .extract()
-            .jsonPath()
-            .<Map<String, Object>>getList("deployments")
-            .get(0);
-    assertEquals("STARTING", row.get("status"));
   }
 
   @Test
-  public void aPlatformSelfUpdateStillHandsArbitrationToTheReferee() {
-    // A platform service updating itself, so the handoff path has to work with the platform naming
-    // and networks — a predecessor found on the legacy network, a successor named without any tier
-    // segment, and still no container stopped by this process.
+  public void aPlatformSelfUpdateIsRefusedTheSameWay() {
+    // The platform plane finds itself through the legacy network and the bare alias, so the
+    // refusal has to hold there too — this is the deployment this component actually takes.
     createPlatformEnvironment("flow-selfplane");
     specs.script(
         "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     String selfId = "abcdef123456";
-    String selfFullId = selfId + "f".repeat(52);
     driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(List.of(new DeploymentDriver.Holder(selfFullId, "qits-platform-deployments", null)));
+    driver.scriptAliasHolders(
+        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
     postBuildSucceeded("qits-platform-deployments", "environment/flow-selfplane", SHA_A);
+    awaitWorkerIdle();
 
-    long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.handoffs().isEmpty() && System.currentTimeMillis() < deadline) {
-      try {
-        Thread.sleep(50);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    }
-    assertEquals(1, driver.handoffs().size(), "the referee was launched");
-    DeploymentDriver.HandoffSpec handoff = driver.handoffs().get(0);
-    assertEquals(selfFullId, handoff.oldContainerId());
-    String successor = driver.started().get(0).containerName();
-    assertEquals(successor, handoff.newContainerName());
-    assertTrue(successor.startsWith("qits-pd-qits-platform-deployments-"), successor);
-    assertEquals("qits-platform", driver.started().get(0).network());
-    // The successor is on its networks BEFORE the referee stops the predecessor — it has to be
-    // reachable the moment it passes its gate.
-    List<String> calls = driver.calls();
-    assertTrue(
-        calls.indexOf("connect:qits-net:" + successor + ":qits-platform-deployments")
-            < calls.indexOf("handoff:" + successor),
-        "joined before the handoff: " + calls);
-    // Nothing stopped, nothing removed by THIS process — the referee owns retirement.
-    assertEquals(List.of(), driver.stoppedContainers());
-    assertEquals(List.of(), driver.removedContainers());
+    PdDeployment row = deploymentOf("qits-platform-deployments", null, SHA_A);
+    assertEquals("FAILED", row.status.name());
+    assertTrue(row.detail.contains("swarm"), row.detail);
+    assertEquals(List.of(), driver.started(), "nothing ran");
+    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
   }
 
   @Test
@@ -450,7 +410,7 @@ public class PdDeploymentFlowTest {
     assertEquals("flow-resource-qits-oci-postgresql", request.host());
     assertNull(request.storedPassword(), "nothing had recorded one yet");
 
-    DeploymentDriver.StartSpec started = driver.started().get(0);
+    DockerHost.StartSpec started = driver.started().get(0);
     assertEquals(1, started.resources().size());
     DeploymentDriver.ResourceBinding binding = started.resources().get(0);
     assertEquals("db", binding.name());
@@ -587,7 +547,7 @@ public class PdDeploymentFlowTest {
     postBuildSucceeded("repo-idp", "environment/flow-single", SHA_A);
 
     awaitStarted(1);
-    DeploymentDriver.StartSpec spec = driver.started().get(0);
+    DockerHost.StartSpec spec = driver.started().get(0);
     assertEquals("qits-platform", spec.network());
     assertEquals(PdDeploymentTarget.PLATFORM, spec.target());
     assertNull(spec.environmentId(), "a platform service belongs to no tier");
@@ -683,9 +643,9 @@ public class PdDeploymentFlowTest {
     // found by container label, because docker is the membership bookkeeping.
     String environmentId = createEnvironment("flow-reconcile");
     driver.scriptHubContainers(
-        List.of(new DeploymentDriver.Endpoint("hub-id", "qits-gateway")));
+        List.of(new DockerHost.Endpoint("hub-id", "qits-gateway")));
     driver.scriptPlatformContainers(
-        List.of(new DeploymentDriver.Endpoint("idp-id", "qits-idp")));
+        List.of(new DockerHost.Endpoint("idp-id", "qits-idp")));
     postBuildSucceeded("repo-rec", "environment/flow-reconcile", SHA_A);
 
     awaitDeployments(environmentId, 1);
@@ -715,9 +675,9 @@ public class PdDeploymentFlowTest {
             environmentId,
             DeploymentDriver.NetworkKind.APPLICATION,
             "repo-reheal"));
-    driver.scriptHubContainers(List.of(new DeploymentDriver.Endpoint("hub-id", "qits-gateway")));
+    driver.scriptHubContainers(List.of(new DockerHost.Endpoint("hub-id", "qits-gateway")));
     driver.scriptPlatformContainers(
-        List.of(new DeploymentDriver.Endpoint("pd-id", "qits-platform-deployments")));
+        List.of(new DockerHost.Endpoint("pd-id", "qits-platform-deployments")));
     postBuildSucceeded("repo-reheal", "environment/flow-reheal", SHA_A);
 
     awaitDeployments(environmentId, 1);
@@ -740,7 +700,7 @@ public class PdDeploymentFlowTest {
     // has to replace rather than run beside.
     String environmentId = createEnvironment("flow-adopt");
     driver.scriptAliasHolders(
-        List.of(new DeploymentDriver.Holder("aa".repeat(32), "seeded-original", null)));
+        List.of(new DockerHost.Holder("aa".repeat(32), "seeded-original", null)));
     postBuildSucceeded("repo-adopt", "environment/flow-adopt", SHA_A);
 
     awaitDeployments(environmentId, 1);
@@ -757,8 +717,8 @@ public class PdDeploymentFlowTest {
     String environmentId = createEnvironment("flow-scope");
     driver.scriptAliasHolders(
         List.of(
-            new DeploymentDriver.Holder("bb".repeat(32), "mine", environmentId),
-            new DeploymentDriver.Holder("cc".repeat(32), "another-tiers", "some-other-env-id")));
+            new DockerHost.Holder("bb".repeat(32), "mine", environmentId),
+            new DockerHost.Holder("cc".repeat(32), "another-tiers", "some-other-env-id")));
     postBuildSucceeded("repo-scope", "environment/flow-scope", SHA_A);
 
     awaitDeployments(environmentId, 1);
@@ -780,8 +740,8 @@ public class PdDeploymentFlowTest {
         "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     driver.scriptAliasHolders(
         List.of(
-            new DeploymentDriver.Holder("dd".repeat(32), "an-env-copy", "some-env-id"),
-            new DeploymentDriver.Holder("ee".repeat(32), "the-old-unlabelled-one", null)));
+            new DockerHost.Holder("dd".repeat(32), "an-env-copy", "some-env-id"),
+            new DockerHost.Holder("ee".repeat(32), "the-old-unlabelled-one", null)));
     postBuildSucceeded("repo-plane", "environment/flow-plane", SHA_A);
 
     awaitStarted(1);
@@ -799,7 +759,7 @@ public class PdDeploymentFlowTest {
     // rollback is the failed-gate one — the fresh container goes, the predecessor serves again.
     String environmentId = createEnvironment("flow-nojoin");
     driver.scriptAliasHolders(
-        List.of(new DeploymentDriver.Holder("ff".repeat(32), "still-serving", environmentId)));
+        List.of(new DockerHost.Holder("ff".repeat(32), "still-serving", environmentId)));
     driver.scriptRefusedJoin("qits-net", "Error response from daemon: network qits-net not found");
     postBuildSucceeded("repo-nojoin", "environment/flow-nojoin", SHA_A);
 

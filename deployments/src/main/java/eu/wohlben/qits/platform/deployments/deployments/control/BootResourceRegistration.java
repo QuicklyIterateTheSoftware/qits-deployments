@@ -38,7 +38,7 @@ import org.jboss.logging.Logger;
  *
  * <p><b>And it survives everything.</b> The row is rewritten on every boot from the environment the
  * container was started with, so it is correct after all containers die, after the registry
- * database is restored, and after an operator rotates the password in run-args. The environment is
+ * database is restored, and after an operator rotates the password in deployment config. The environment is
  * the truth here; the row is a copy this component keeps so it can reason about itself the way it
  * reasons about every other application.
  *

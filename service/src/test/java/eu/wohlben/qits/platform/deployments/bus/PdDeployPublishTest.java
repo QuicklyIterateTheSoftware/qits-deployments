@@ -12,7 +12,8 @@ import eu.wohlben.qits.eventstream.CausationHeader;
 import eu.wohlben.qits.eventstream.entity.OutboxEvent;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.hibernate.orm.PersistenceUnit;
@@ -67,7 +68,7 @@ public class PdDeployPublishTest {
     }
   }
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeployService deployService;
@@ -162,7 +163,7 @@ public class PdDeployPublishTest {
   public void aDeploymentThatFailsItsHealthGateAnnouncesTheGatesOwnWords() {
     String environmentId = createEnvironment("pub-sick");
     driver.scriptHealth(
-        new DeploymentDriver.HealthResult(false, "container still restarting after 60s"));
+        new HealthGate.Result(false, "container still restarting after 60s"));
 
     postBuildSucceeded("run-pub-sick", "repo-pub-sick", "environment/pub-sick", null);
     awaitSettled(environmentId, 1);

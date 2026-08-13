@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
+import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
+import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -35,7 +37,7 @@ public class PdDeploymentObservationTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDeploymentDriver driver;
+  @Inject FakeDockerHost driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeploymentObserver observer;
@@ -238,7 +240,7 @@ public class PdDeploymentObservationTest {
   @Test
   public void aQueuedOrStartingRowIsNeverTouched() {
     // Those two belong to the worker's own state machine and to the startup sweep. A self-update
-    // handoff sits in STARTING with a healthy successor on purpose, and an observation that promoted
+    // self-update sits in STARTING with a healthy successor on purpose, and an observation that promoted
     // it would take the surviving instance's decision away.
     String queued =
         deployment(
@@ -256,7 +258,7 @@ public class PdDeploymentObservationTest {
     observer.observeOnce();
 
     assertEquals("QUEUED", statusOf(queued));
-    assertEquals("STARTING", statusOf(starting), "the handoff's outcome is the survivor's to record");
+    assertEquals("STARTING", statusOf(starting), "a succession's outcome is the survivor's to record");
   }
 
   @Test
@@ -312,7 +314,7 @@ public class PdDeploymentObservationTest {
         "obs-serial-b", "env-obs-serial", PdDeploymentStatus.ACTIVE, "qits-pd-obs-serial-b", null);
     // A predecessor to remove, so the deployment's own last driver call is unambiguous.
     driver.scriptAliasHolders(
-        List.of(new DeploymentDriver.Holder("ab".repeat(32), "obs-serial-predecessor", environmentId)));
+        List.of(new DockerHost.Holder("ab".repeat(32), "obs-serial-predecessor", environmentId)));
     driver.scriptRestartingUntilHealthy(40);
 
     given()
