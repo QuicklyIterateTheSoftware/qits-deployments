@@ -118,6 +118,17 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   /** The label swarm itself puts on a task container, naming the service it belongs to. */
   private static final String SWARM_SERVICE_LABEL = "com.docker.swarm.service.name";
 
+  /**
+   * The seed stack's namespace. The bootstrap deploys the seed as {@code docker stack deploy …
+   * qits}, and a stack prefixes every service it creates — so the seed twin of {@code dev-qits-ci}
+   * is {@code qits_dev-qits-ci}. Two things follow, and both live in {@link #apply}: the twin IS
+   * this process when the deployer still runs as the seed (a self-update targets the stack-named
+   * service), and for every other application the twin must be REMOVED at cutover — it holds the
+   * wire alias and any host-mode ports, so a successor beside it schedules never (the port) or
+   * serves half the traffic (the alias round-robins).
+   */
+  static final String SEED_STACK_PREFIX = "qits_";
+
   /** Task states that mean the task is not coming up. Everything else is patience. */
   private static final Set<String> TERMINAL_TASK_STATES =
       Set.of("failed", "rejected", "shutdown", "orphaned", "complete", "remove");
@@ -195,17 +206,31 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     }
 
     // Asked BEFORE the update, because after it this process may not exist to ask anything: the
-    // manager stops this task the moment the new one is healthy.
-    boolean self = isSelf(name);
-    boolean exists = serviceExists(name);
+    // manager stops this task the moment the new one is healthy. `own` is the service label on
+    // this very container: when the deployer still runs as the SEED STACK's service, that label
+    // is the stack-prefixed name, and the self-update must target that service — creating a
+    // bare-named sibling instead would leave two deployers on one registry.
+    String own = ownServiceName();
+    boolean self = own.equals(name) || own.equals(SEED_STACK_PREFIX + name);
+    String target = self ? own : name;
+    boolean exists = serviceExists(target);
     List<String> argv;
     try {
-      argv = exists ? buildUpdateArgv(spec, name) : buildCreateArgv(spec, name, networks);
+      argv = exists ? buildUpdateArgv(spec, target) : buildCreateArgv(spec, target, networks);
     } catch (ServiceExtras.Refused e) {
       // Deployment config said something swarm cannot express. Nothing was applied — the argv is
       // built before the command runs — so this deployment changed nothing.
       LOG.warnf("Refusing to deploy %s: %s", name, e.getMessage());
       return new ApplyResult(ApplyOutcome.REFUSED, e.getMessage());
+    }
+    if (!self) {
+      // The seed twin dies at cutover, and it dies FIRST. It holds the wire alias (DNS would
+      // round-robin between seed and successor — measured: a step's ci-daemon registered with the
+      // instance that had not launched it and exited 6) and any host-mode ports (the successor's
+      // task then sits Pending on "port already in use" forever). Removed after the argv is built,
+      // so a REFUSED deployment changes nothing; if the create still fails, the task the twin ran
+      // is what the last boot's stack file restores.
+      reapSeedTwin(name);
     }
     PdProcess.Result result = run(argv, APPLY_TIMEOUT);
     if (result.exitCode() != 0 || result.timedOut()) {
@@ -413,18 +438,21 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
-   * Whether the named service is the one this task belongs to — read off the label swarm puts on
-   * every task container ({@value #SWARM_SERVICE_LABEL}), via this container's own id.
+   * The service this task belongs to — the label swarm puts on every task container
+   * ({@value #SWARM_SERVICE_LABEL}), read via this container's own id. Empty outside a container,
+   * which is every local run.
    *
    * <p>Asked by {@link #apply} alone, and it answers one question: may this process wait for the
-   * verdict, or is it what is being replaced. Whether the succession then WORKED is a different
-   * question, asked of the image by the next instance to boot ({@link #runningImage}) — "am I this
-   * service" is true of the successor and of a predecessor swarm rolled back to, alike.
+   * verdict, or is it what is being replaced. The NAME matters as much as the yes: a deployer
+   * still running as the seed stack's service must update that stack-named service in place.
+   * Whether the succession then WORKED is a different question, asked of the image by the next
+   * instance to boot ({@link #runningImage}) — "am I this service" is true of the successor and of
+   * a predecessor swarm rolled back to, alike.
    */
-  private boolean isSelf(String name) {
+  private String ownServiceName() {
     String hostname = selfContainerId();
     if (hostname.isBlank()) {
-      return false;
+      return "";
     }
     PdProcess.Result inspected =
         run(
@@ -436,10 +464,31 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
                 hostname),
             INSPECT_TIMEOUT);
     if (inspected.exitCode() != 0) {
-      return false;
+      return "";
     }
     String service = safe(inspected.output()).strip();
-    return !service.isBlank() && !"<no value>".equals(service) && service.equals(name);
+    return service.isBlank() || "<no value>".equals(service) ? "" : service;
+  }
+
+  /**
+   * Remove the seed stack's service for this application, when one is still there. No wait for
+   * the tasks to drain: a successor whose host port is briefly still held sits {@code Pending}
+   * for the seconds the twin's task takes to stop, and schedules by itself — the same statement a
+   * wait loop would make, without a second timeout to pick.
+   */
+  private void reapSeedTwin(String name) {
+    String twin = SEED_STACK_PREFIX + name;
+    if (!serviceExists(twin)) {
+      return;
+    }
+    PdProcess.Result removed = run(List.of(runtime, "service", "rm", twin), CLEANUP_TIMEOUT);
+    if (removed.exitCode() != 0) {
+      LOG.warnf(
+          "Could not remove the seed service %s — the successor may wait on its ports: %s",
+          twin, removed.output());
+      return;
+    }
+    LOG.infof("Removed the seed service %s: %s takes the alias and the ports", twin, name);
   }
 
   /**

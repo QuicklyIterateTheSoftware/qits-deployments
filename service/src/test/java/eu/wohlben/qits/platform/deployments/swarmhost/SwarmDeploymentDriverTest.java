@@ -608,6 +608,46 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void aSelfStillRunningAsTheSeedStackServiceUpdatesThatServiceInPlace() {
+    // The bootstrap starts the deployer as the seed stack's service, so its own label is the
+    // stack-prefixed name. The self-update must target THAT service — a bare-named sibling would
+    // be a second deployer on the same registry — and the seed twin is never reaped: it is self.
+    SwarmDeploymentDriver driver = driver();
+    driver.hostnameFile = hostnameFile("this-task-container");
+    cli.script("--format {{.ID}}", result(0, "svc123"));
+    cli.script("Config.Labels", result(0, "qits_dev-qits-gateway"));
+
+    DeploymentDriver.ApplyResult applied = driver.apply(spec());
+
+    assertEquals(DeploymentDriver.ApplyOutcome.HANDED_OFF, applied.outcome());
+    List<String> update = cli.matching("service update");
+    assertEquals(
+        "qits_dev-qits-gateway", update.get(update.size() - 1), "the stack-named service is the target");
+    assertTrue(cli.matching("service rm").isEmpty(), "its own seed service is not reaped");
+  }
+
+  @Test
+  void theSeedTwinIsRemovedBeforeTheSuccessorTakesItsAliasAndPorts() {
+    // First pipeline deploy of an application the seed stack still serves: the twin holds the
+    // wire alias (DNS would round-robin between the two) and any host-mode ports (the successor
+    // would sit Pending on them forever), so it goes first.
+    SwarmDeploymentDriver driver = driver();
+    cli.script("--format {{.ID}} dev-qits-gateway", result(1, "no such service"));
+    cli.script("--format {{.ID}} qits_dev-qits-gateway", result(0, "twin123"));
+
+    DeploymentDriver.ApplyResult applied = driver.apply(spec());
+
+    assertEquals(DeploymentDriver.ApplyOutcome.APPLIED, applied.outcome());
+    assertEquals(
+        List.of("docker", "service", "rm", "qits_dev-qits-gateway"), cli.matching("service rm"));
+    assertFalse(cli.matching("service create").isEmpty(), "the successor is still created");
+    int rmAt = cli.calls.indexOf(List.of("docker", "service", "rm", "qits_dev-qits-gateway"));
+    int createAt =
+        cli.calls.indexOf(cli.matching("service create"));
+    assertTrue(rmAt < createAt, "the twin goes before the successor is created");
+  }
+
+  @Test
   void theRunningImageIsReadWithSwarmsUpdateStatusBesideIt() {
     // The startup sweep's evidence, in one inspect: what the service runs, and swarm's account of
     // the update that put it there. The image is the verdict — UpdateStatus holds the most recent
