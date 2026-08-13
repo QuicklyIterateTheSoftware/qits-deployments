@@ -106,6 +106,14 @@ class SwarmDeploymentDriverTest {
       PdDeploymentTarget target,
       DeploymentDriver.UpdateOrder order,
       List<DeploymentDriver.ResourceBinding> resources) {
+    return spec(target, order, DeploymentDriver.PublishMode.HOST, resources);
+  }
+
+  private DeploymentDriver.ServiceSpec spec(
+      PdDeploymentTarget target,
+      DeploymentDriver.UpdateOrder order,
+      DeploymentDriver.PublishMode publishMode,
+      List<DeploymentDriver.ResourceBinding> resources) {
     boolean platform = target == PdDeploymentTarget.PLATFORM;
     return new DeploymentDriver.ServiceSpec(
         platform ? null : "env-id",
@@ -125,6 +133,7 @@ class SwarmDeploymentDriverTest {
         target,
         !platform,
         order,
+        publishMode,
         resources);
   }
 
@@ -292,6 +301,80 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void anIngressServiceHandsItsPortToTheRoutingMeshAndKeepsStartFirst() {
+    // The mode is the repository's publish_mode, and it is the whole of what changes: the port is
+    // held by the mesh rather than by the task, so the successor can start while the predecessor
+    // is still serving — which is why the update order stays start-first beside it.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[0]", "8080:8080",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[1]", "5353:8053/udp"));
+
+    List<String> argv =
+        driver.buildCreateArgv(
+            spec(
+                PdDeploymentTarget.ENVIRONMENT,
+                DeploymentDriver.UpdateOrder.START_FIRST,
+                DeploymentDriver.PublishMode.INGRESS,
+                List.of()),
+            "dev-qits-gateway",
+            List.of("qits-net"));
+
+    assertTrue(
+        argv.containsAll(List.of("--publish", "published=8080,target=8080,mode=ingress")),
+        argv.toString());
+    assertTrue(
+        argv.containsAll(
+            List.of("--publish", "published=5353,target=8053,protocol=udp,mode=ingress")),
+        argv.toString());
+    assertTrue(argv.containsAll(List.of("--update-order", "start-first")), argv.toString());
+  }
+
+  @Test
+  void anIngressServiceThatDeclaresStopFirstStillGetsStopFirst() {
+    // The two keys are independent statements and nothing derives one from the other: a repository
+    // that has a reason to say stop-first is not overruled by its publish mode.
+    List<String> argv =
+        driver()
+            .buildUpdateArgv(
+                spec(
+                    PdDeploymentTarget.ENVIRONMENT,
+                    DeploymentDriver.UpdateOrder.STOP_FIRST,
+                    DeploymentDriver.PublishMode.INGRESS,
+                    List.of()),
+                "dev-qits-gateway");
+
+    assertTrue(argv.containsAll(List.of("--update-order", "stop-first")), argv.toString());
+  }
+
+  @Test
+  void anIngressPublishStillCannotNameAnAddress() {
+    // Swarm's publish has no ip field in EITHER mode, so the refusal is the mode-independent one:
+    // ingress binds 0.0.0.0 exactly as host does, and the mode changes who holds the port rather
+    // than who can reach it.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.publishes[0]",
+                "127.0.0.1:9000:9000"));
+
+    ServiceExtras.Refused refused =
+        assertThrows(
+            ServiceExtras.Refused.class,
+            () ->
+                driver.buildCreateArgv(
+                    spec(
+                        PdDeploymentTarget.ENVIRONMENT,
+                        DeploymentDriver.UpdateOrder.START_FIRST,
+                        DeploymentDriver.PublishMode.INGRESS,
+                        List.of()),
+                    "dev-qits-gateway",
+                    List.of("qits-net")));
+    assertTrue(refused.getMessage().contains("127.0.0.1"), refused.getMessage());
+  }
+
+  @Test
   void aPublishThatDemandsAnIpIsRefusedRatherThanWidened() {
     // Swarm's publish syntax has no ip field in either mode — measured: a host-mode publish listens
     // on 0.0.0.0. A port that was deliberately on loopback must not quietly become a port on every
@@ -430,6 +513,7 @@ class SwarmDeploymentDriverTest {
             PdDeploymentTarget.ENVIRONMENT,
             true,
             DeploymentDriver.UpdateOrder.START_FIRST,
+            DeploymentDriver.PublishMode.HOST,
             List.of());
 
     SwarmDeploymentDriver driver = driver();

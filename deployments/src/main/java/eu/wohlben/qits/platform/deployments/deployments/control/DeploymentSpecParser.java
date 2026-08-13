@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Seven scalar keys, no nesting, no YAML
+ * The strict reader of {@code .config/qits/deployments.yml}. Eight scalar keys, no nesting, no YAML
  * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
@@ -21,8 +21,17 @@ import java.util.Set;
  * health_cmd: pg_isready -U postgres   # instead of health_path: the probe runs in the container
  * resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
  * update_order: start-first            # default | stop-first for anything single-writer
+ * publish_mode: host                   # default | ingress for a port the routing mesh holds
  * deploy_branches: environment/prod    # RETIRED, accepted and ignored — see below
  * </pre>
+ *
+ * <p><b>{@code publish_mode} is the second key an orchestrator reads rather than this
+ * component.</b> {@code host} is today's behaviour and the default: the task binds the port on the
+ * node itself. {@code ingress} gives the port to swarm's routing mesh, which keeps holding it
+ * while a replacement starts — the whole reason a front door can pull its own successor's image.
+ * It reaches the orchestrator as {@code mode=} on the publish, and it means nothing at all to an
+ * application that publishes no port. It does <b>not</b> touch {@code update_order}: the two are
+ * independent statements and this component derives neither from the other.
  *
  * <p><b>{@code update_order} is the one key an orchestrator reads rather than this component.</b>
  * {@code start-first} overlaps the successor with the predecessor, which is what makes a rollback
@@ -90,6 +99,7 @@ public final class DeploymentSpecParser {
   private static final String HEALTH_CMD = "health_cmd";
   private static final String RESOURCES = "resources";
   private static final String UPDATE_ORDER = "update_order";
+  private static final String PUBLISH_MODE = "publish_mode";
 
   /** The only resource type there is. It is spelled in the file so a second one can arrive. */
   private static final String POSTGRESQL = "postgresql";
@@ -111,6 +121,7 @@ public final class DeploymentSpecParser {
     String healthCmd = null;
     List<DeploymentSpec.ResourceSpec> resources = List.of();
     DeploymentDriver.UpdateOrder updateOrder = DeploymentDriver.UpdateOrder.START_FIRST;
+    DeploymentDriver.PublishMode publishMode = DeploymentDriver.PublishMode.HOST;
     Set<String> seen = new HashSet<>();
 
     String[] lines = (yaml == null ? "" : yaml).split("\\R", -1);
@@ -141,6 +152,7 @@ public final class DeploymentSpecParser {
         case HEALTH_CMD -> healthCmd = healthCmd(value, source, lineNumber);
         case RESOURCES -> resources = resources(value, source, lineNumber);
         case UPDATE_ORDER -> updateOrder = updateOrder(value, source, lineNumber);
+        case PUBLISH_MODE -> publishMode = publishMode(value, source, lineNumber);
         default ->
             throw error(
                 source,
@@ -159,8 +171,10 @@ public final class DeploymentSpecParser {
                     + HEALTH_CMD
                     + ", "
                     + RESOURCES
+                    + ", "
+                    + UPDATE_ORDER
                     + " and "
-                    + UPDATE_ORDER);
+                    + PUBLISH_MODE);
       }
     }
 
@@ -184,7 +198,41 @@ public final class DeploymentSpecParser {
               + " environment's networks, and the bundle is environment-scoped");
     }
     return new DeploymentSpec(
-        target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, updateOrder);
+        target,
+        availableOnEnv,
+        deployBranches,
+        healthPath,
+        healthCmd,
+        resources,
+        updateOrder,
+        publishMode);
+  }
+
+  /**
+   * Where a published host port is held. Two values and no third, and the file spells them the way
+   * docker does ({@code host}, {@code ingress}) so neither side has to translate.
+   *
+   * <p>Refused rather than defaulted, like every other value here. The difference between the two
+   * is whether a replacement can start while its predecessor still serves, and a typo answered with
+   * a silent default is exactly what this parser exists not to do.
+   */
+  private static DeploymentDriver.PublishMode publishMode(String value, String source, int line) {
+    for (DeploymentDriver.PublishMode candidate : DeploymentDriver.PublishMode.values()) {
+      if (candidate.spelling().equals(value)) {
+        return candidate;
+      }
+    }
+    throw error(
+        source,
+        line,
+        "`"
+            + PUBLISH_MODE
+            + "` must be `"
+            + DeploymentDriver.PublishMode.HOST.spelling()
+            + "` or `"
+            + DeploymentDriver.PublishMode.INGRESS.spelling()
+            + "`, got: "
+            + value);
   }
 
   /**
