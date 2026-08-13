@@ -85,28 +85,24 @@ import org.jboss.logging.Logger;
  * is what lets it retry only attempts that certainly did not commit, and leaves the one undecidable
  * round trip (the commit acknowledgement) reported rather than repeated.
  *
- * <p><b>The cutover is the DRIVER's, and that is the shape this class settled into once there were
- * two orchestrators.</b> What is left here is one path with no branches in it: resolve the target,
- * provision what the repository declared, pull so a missing image is its own outcome, {@link
- * DeploymentDriver#apply} the spec, {@link DeploymentDriver#awaitConverged wait for the verdict},
- * record it. The predecessor search, the alias union, the stop-before-start and the rollback of a
- * failed gate all moved into {@code dockerhost}, because every one of them is a statement about how
- * <i>docker</i> replaces a container — swarm replaces one by updating
- * a service in place and needs none of it. Nothing about the sequence above is orchestrator-shaped,
- * which is the test that it is in the right place.
+ * <p><b>The cutover is the DRIVER's, and that is the shape this class settled into.</b> What is
+ * left here is one path with no branches in it: resolve the target, provision what the repository
+ * declared, pull so a missing image is its own outcome, {@link DeploymentDriver#apply} the spec,
+ * {@link DeploymentDriver#awaitConverged wait for the verdict}, record it. A predecessor search, a
+ * stop-before-start and a hand-rolled rollback used to sit in the middle of that, and each was a
+ * statement about how one orchestrator replaces a container rather than about deploying. Nothing
+ * about the sequence above is orchestrator-shaped, which is the test that it is in the right place.
  *
- * <p><b>What did not move is the bookkeeping</b>, because it is the same on both paths: the row per
- * place, the four announcements, the cutover bracket that decommissions the prior {@code ACTIVE}
- * rows of an (application, tier) and marks this one live, and the reap that follows it — rows
- * first, containers after, so a bracket that has to retry for thirty seconds has not already
- * removed the predecessor.
+ * <p><b>What stayed is the bookkeeping</b>: the row per place, the four announcements, the cutover
+ * bracket that decommissions the prior {@code ACTIVE} rows of an (application, tier) and marks this
+ * one live, and the reap that follows it — rows first, services after, so a bracket that has to
+ * retry for thirty seconds has not already removed the predecessor.
  *
  * <p><b>One outcome is neither success nor failure and is worth knowing about here</b>: a
  * deployment that replaces THIS process comes back {@link DeploymentDriver.ApplyOutcome#HANDED_OFF
  * HANDED_OFF}, and the row is deliberately left {@code STARTING}. Neither instance can arbitrate
  * its own succession, so the outcome is recorded by whichever survives: the next boot's {@link
- * #sweepInFlight() sweep} settles the row from the image the service is running. Only the swarm
- * path answers this way — the docker path has no third party to finish the job and refuses.
+ * #sweepInFlight() sweep} settles the row from the image the service is running.
  */
 @ApplicationScoped
 public class DeployService implements BuildAnnouncements {
@@ -322,7 +318,7 @@ public class DeployService implements BuildAnnouncements {
    * </table>
    *
    * <p><b>An adopted row is not a claim that the gate passed</b>, and it does not need to be: on
-   * both paths what carries the row's image is what is serving under the row's name, and a
+   * what carries the row's image is what is serving under the row's name, and a
    * container that is in fact dying is demoted by {@link DeploymentObserver} on the next two
    * passes. The prior actives are matched with an explicit null test for the platform plane
    * ({@code environment_id = ?} would silently match nothing, and a self-updated instance would

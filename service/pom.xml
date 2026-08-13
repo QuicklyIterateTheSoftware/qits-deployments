@@ -14,8 +14,8 @@
     <!-- The ADAPTERS: everything the two domain modules declare but cannot do.
          `api` holds the JAX-RS surface of BOTH domains — the environment and service catalogue
          (topology) and the deployment, pin and build-succeeded routes (execution) — plus the
-         exception mapper and the MachineAuth wiring; `dockerhost` holds the sole implementation of
-         the docker seam; `githost` the sole implementation of the spec seam. Identity is not a
+         exception mapper and the MachineAuth wiring; `swarmhost` holds the sole implementation of
+         the orchestrator seam; `githost` the sole implementation of the spec seam. Identity is not a
          package here: the forward-auth pair lives in the published qits-auth-core.
 
          A DEPLOYABLE APP, not a library JAR — <packaging>quarkus</packaging> binds augmentation

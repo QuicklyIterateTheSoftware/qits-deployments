@@ -5,8 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
-import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -37,7 +36,7 @@ public class PdPinApiTest {
   private static final String SHA_C = "c".repeat(40);
   private static final String SHA_D = "d".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
 
   @BeforeEach
   void reset() {
@@ -64,15 +63,16 @@ public class PdPinApiTest {
 
   @Test
   public void aFailedGateLeavesThePinsWhereItLeavesTheApplication() {
-    // The anchor to the real rollback: a failed health gate removes the fresh container and
-    // restarts what the cutover stopped, so the previous deployment is still ACTIVE and serving
-    // (PdDeploymentFlowTest.aFailedGateRestartsWhatTheCutoverStopped). The pins say exactly that —
-    // the serving sha, and no rollback target, because nothing ever served before it. The failed
-    // sha is pinned by nothing: no container was created from it.
+    // The anchor to the real rollback: a successor that never converges is reverted by the
+    // orchestrator, so the previous deployment is still ACTIVE and serving
+    // (PdSwarmDeployFlowTest.aRolledBackUpdateIsAFailedDeploymentCarryingSwarmsOwnWords). The pins
+    // say exactly that — the serving sha, and no rollback target, because nothing ever served
+    // before it. The failed sha is pinned by nothing: nothing was ever created from it.
     String environmentId = createEnvironment("pins-gate");
     deploy("repo-pins-gate", "environment/pins-gate", SHA_A, environmentId, 1);
 
-    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
+    driver.scriptConvergence(
+        DeploymentDriver.Convergence.rolledBack("the successor never went healthy"));
     deploy("repo-pins-gate", "environment/pins-gate", SHA_B, environmentId, 2);
 
     assertEquals(List.of(SHA_A), shasOf("repo-pins-gate"));

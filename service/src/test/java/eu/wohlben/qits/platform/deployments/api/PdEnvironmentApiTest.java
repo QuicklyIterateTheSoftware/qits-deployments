@@ -10,9 +10,8 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
@@ -23,7 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The environment surface end to end, against {@link FakeDockerHost} (no docker).
+ * The environment surface end to end, against {@link FakeDeploymentDriver} (no docker).
  *
  * <p>Both ancestors had a suite here and they merged into this one. qits-serviceregistry's proved
  * the rows and the validation; qits-cd's proved the docker side effects and, after the extraction,
@@ -42,7 +41,7 @@ public class PdEnvironmentApiTest {
   private static final String ENVIRONMENTS = "/platform-deployments/api/environments";
   private static final String SERVICES = "/platform-deployments/api/services";
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
 
   @BeforeEach
   void reset() {
@@ -157,7 +156,7 @@ public class PdEnvironmentApiTest {
         .statusCode(400);
 
     assertTrue(
-        driver.calls().isEmpty(), "no refused request reached docker: " + driver.calls());
+        driver.calls().isEmpty(), "no refused request reached the driver: " + driver.calls());
   }
 
   // --- reads ------------------------------------------------------------------------------------
@@ -285,7 +284,7 @@ public class PdEnvironmentApiTest {
 
     // This is the migration path onto the branch convention, so it must be safe on a live tier:
     // nothing was ensured, removed, disconnected or reaped.
-    assertTrue(driver.calls().isEmpty(), "PATCH has no docker side effects: " + driver.calls());
+    assertTrue(driver.calls().isEmpty(), "PATCH has no runtime side effects: " + driver.calls());
     assertTrue(driver.removedEnvironments().isEmpty());
   }
 
@@ -368,7 +367,7 @@ public class PdEnvironmentApiTest {
   }
 
   @Test
-  public void theDockerTeardownRunsBeforeTheRowsGo() {
+  public void theRuntimeTeardownRunsBeforeTheRowsGo() {
     // The order is the contract. The teardown is label-driven and needs nothing from the topology,
     // but deleting the tier first would leave a failed teardown with no row to retry it from — so a
     // half-finished teardown stays addressable.
@@ -408,15 +407,20 @@ public class PdEnvironmentApiTest {
             environmentId,
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-x"));
-    driver.scriptPlatformContainers(List.of(new DockerHost.Endpoint("idp-id", "qits-idp")));
 
     given().when().delete(ENVIRONMENTS + "/" + environmentId).then().statusCode(204);
 
     // A platform service survives the tier it merely served, so it is what holds the networks open
-    // — docker refuses to remove a network with an endpoint on it.
+    // — docker refuses to remove a network with an endpoint on it. Releasing whatever the plane
+    // holds is asked of the driver first, and only then are the networks removed.
     assertTrue(
-        driver.disconnections().contains("qits-env-env-derived-teardown-app-x:idp-id"),
-        "platform containers leave the derived networks first: " + driver.disconnections());
+        driver.detached().contains("qits-env-env-derived-teardown-app-x"),
+        "the plane is released from the derived networks first: " + driver.detached());
+    List<String> calls = driver.calls();
+    int released = indexOfPrefix(calls, "detachPlatformPlane:");
+    assertTrue(
+        released >= 0 && released < calls.indexOf("removeNetwork:qits-env-env-derived-teardown-app-x"),
+        "and first is the order: " + calls);
     assertTrue(driver.removedNetworks().contains("qits-env-env-derived-teardown"));
     assertTrue(
         driver.removedNetworks().contains("qits-env-env-derived-teardown-app-x"),
@@ -437,21 +441,18 @@ public class PdEnvironmentApiTest {
             environmentId,
             DeploymentDriver.NetworkKind.APPLICATION,
             "app-y"));
-    driver.scriptPlatformContainers(
-        List.of(new DockerHost.Endpoint("pd-id", "qits-platform-deployments")));
 
     given().when().delete(ENVIRONMENTS + "/" + environmentId).then().statusCode(204);
 
     assertTrue(
-        driver.disconnections().stream().noneMatch(d -> d.startsWith("qits-net:")),
-        "no platform container is taken off the legacy network: " + driver.disconnections());
+        driver.detached().stream().noneMatch("qits-net"::equals),
+        "the plane is never released from the legacy network: " + driver.detached());
     assertTrue(
         !driver.removedNetworks().contains("qits-net"),
         "and the legacy network itself stays: " + driver.removedNetworks());
-    // The environment's OWN derived network still goes, platform container disconnected from it.
+    // The environment's OWN derived network still goes, and the plane is released from it.
     assertTrue(
-        driver.disconnections().contains("qits-env-env-legacy-bundle-app-y:pd-id"),
-        driver.disconnections().toString());
+        driver.detached().contains("qits-env-env-legacy-bundle-app-y"), driver.detached().toString());
     assertTrue(driver.removedNetworks().contains("qits-env-env-legacy-bundle-app-y"));
   }
 
@@ -592,6 +593,16 @@ public class PdEnvironmentApiTest {
     // …and once the designation has moved, the same delete goes through.
     create(Map.of("name", "env-undeletable-successor", "platform", true));
     given().when().delete(ENVIRONMENTS + "/" + platform).then().statusCode(204);
+  }
+
+  /** The first call whose tag starts with this prefix, or -1 — the ORDER assertions read it. */
+  private static int indexOfPrefix(List<String> calls, String prefix) {
+    for (int i = 0; i < calls.size(); i++) {
+      if (calls.get(i).startsWith(prefix)) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   // --- helpers ----------------------------------------------------------------------------------

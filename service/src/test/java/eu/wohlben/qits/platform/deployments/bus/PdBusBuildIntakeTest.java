@@ -8,7 +8,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -40,7 +40,7 @@ public class PdBusBuildIntakeTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
   @Inject PdBuildSuccessfulSubscriber subscriber;
@@ -69,11 +69,11 @@ public class PdBusBuildIntakeTest {
 
     subscriber.onFrame(frame(Instant.now(), "repo-bus-plain", "environment/bus-plain", SHA_A));
 
-    awaitStarted(1);
-    assertEquals(SHA_A, driver.started().get(0).commitSha());
+    awaitApplied(1);
+    assertEquals(SHA_A, driver.applied().get(0).commitSha());
     assertTrue(
-        driver.started().get(0).containerName().startsWith("qits-pd-bus-plain-repo-bus-plain-"),
-        driver.started().get(0).containerName());
+        driver.applied().get(0).deploymentName().startsWith("qits-pd-bus-plain-repo-bus-plain-"),
+        driver.applied().get(0).deploymentName());
   }
 
   @Test
@@ -85,14 +85,14 @@ public class PdBusBuildIntakeTest {
     Instant newer = Instant.now();
 
     subscriber.onFrame(frame(newer, "repo-bus-order", "environment/bus-order", SHA_B));
-    awaitStarted(1);
+    awaitApplied(1);
 
     subscriber.onFrame(
         frame(newer.minusSeconds(600), "repo-bus-order", "environment/bus-order", SHA_A));
     awaitWorkerIdle();
 
-    assertEquals(1, driver.started().size(), "the stale build was not deployed");
-    assertEquals(SHA_B, driver.started().get(0).commitSha(), "the newer commit is still what runs");
+    assertEquals(1, driver.applied().size(), "the stale build was not deployed");
+    assertEquals(SHA_B, driver.applied().get(0).commitSha(), "the newer commit is still what runs");
   }
 
   @Test
@@ -105,11 +105,11 @@ public class PdBusBuildIntakeTest {
     Instant first = Instant.now();
 
     subscriber.onFrame(frame(first, "repo-bus-pair", "environment/bus-pair", SHA_A));
-    awaitStarted(1);
+    awaitApplied(1);
     subscriber.onFrame(frame(first.plusSeconds(1), "repo-bus-pair", "environment/bus-pair", SHA_B));
-    awaitStarted(2);
+    awaitApplied(2);
 
-    assertEquals(SHA_B, driver.started().get(1).commitSha());
+    assertEquals(SHA_B, driver.applied().get(1).commitSha());
   }
 
   @Test
@@ -127,7 +127,7 @@ public class PdBusBuildIntakeTest {
             Instant.now().minusSeconds(3600), "repo-bus-floor", "environment/bus-floor", SHA_A));
     awaitWorkerIdle();
 
-    assertEquals(List.of(), driver.started(), "an hour-old build did not roll the running one");
+    assertEquals(List.of(), driver.applied(), "an hour-old build did not roll the running one");
   }
 
   @Test
@@ -142,8 +142,8 @@ public class PdBusBuildIntakeTest {
     subscriber.onFrame(
         frame(Instant.now().plusSeconds(60), "repo-bus-fresh", "environment/bus-fresh", SHA_B));
 
-    awaitStarted(1);
-    assertEquals(SHA_B, driver.started().get(0).commitSha());
+    awaitApplied(1);
+    assertEquals(SHA_B, driver.applied().get(0).commitSha());
   }
 
   @Test
@@ -161,7 +161,7 @@ public class PdBusBuildIntakeTest {
     subscriber.onFrame(poison);
     awaitWorkerIdle();
 
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.applied());
   }
 
   @Test
@@ -181,7 +181,7 @@ public class PdBusBuildIntakeTest {
     subscriber.onFrame(partial);
     awaitWorkerIdle();
 
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.applied());
   }
 
   @Test
@@ -230,12 +230,12 @@ public class PdBusBuildIntakeTest {
         .statusCode(202);
   }
 
-  private void awaitStarted(int count) {
+  private void awaitApplied(int count) {
     long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.started().size() < count && System.currentTimeMillis() < deadline) {
+    while (driver.applied().size() < count && System.currentTimeMillis() < deadline) {
       sleep();
     }
-    assertEquals(count, driver.started().size(), "started containers");
+    assertEquals(count, driver.applied().size(), "applied services");
   }
 
   private void awaitDeployments(String environmentId, int count) {

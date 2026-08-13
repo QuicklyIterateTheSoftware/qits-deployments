@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
@@ -37,7 +37,7 @@ public class PdRegistrationTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
 
@@ -54,7 +54,7 @@ public class PdRegistrationTest {
     String one = createEnvironment("reg-one", "environment/reg-shared");
     String two = createEnvironment("reg-two", "environment/reg-shared");
     postBuildSucceeded("repo-reg", "environment/reg-shared", SHA_A);
-    awaitStarted(2);
+    awaitApplied(2);
 
     Map<String, Object> service = service("repo-reg");
     assertEquals("ENVIRONMENT", service.get("target"));
@@ -69,9 +69,9 @@ public class PdRegistrationTest {
     String dev = createEnvironment("reg-dev", "environment/reg-dev");
     String preprod = createEnvironment("reg-preprod", "environment/reg-preprod");
     postBuildSucceeded("repo-both", "environment/reg-preprod", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
     postBuildSucceeded("repo-both", "environment/reg-dev", SHA_B);
-    awaitStarted(2);
+    awaitApplied(2);
 
     assertEquals(
         List.of(preprod, dev),
@@ -86,7 +86,7 @@ public class PdRegistrationTest {
         "repo-reg-gw",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null, null));
     postBuildSucceeded("repo-reg-gw", "environment/reg-hub", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     Map<String, Object> service = service("repo-reg-gw");
     assertEquals(true, service.get("availableOnEnv"), "the spec's availableOnEnv is written down");
@@ -104,7 +104,7 @@ public class PdRegistrationTest {
         "repo-reg-idp",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-idp", "environment/reg-platform", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     Map<String, Object> service = service("repo-reg-idp");
     assertEquals("PLATFORM", service.get("target"));
@@ -122,12 +122,12 @@ public class PdRegistrationTest {
         "repo-reg-trunk",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-trunk", "environment/reg-trunk", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     Map<String, Object> service = service("repo-reg-trunk");
     assertEquals("PLATFORM", service.get("target"));
     assertEquals(List.of(), service.get("environmentIds"));
-    assertNull(driver.started().get(0).environmentId(), "one instance, on no tier");
+    assertNull(driver.applied().get(0).environmentId(), "one instance, on no tier");
   }
 
   @Test
@@ -143,8 +143,8 @@ public class PdRegistrationTest {
     awaitWorkerIdle();
 
     assertNull(service("repo-reg-mainonly"), "nothing was registered");
-    assertEquals(List.of(), driver.started());
-    assertEquals(List.of(), driver.pulledRefs());
+    assertEquals(List.of(), driver.applied());
+    assertEquals(List.of(), driver.pulled());
   }
 
   @Test
@@ -155,14 +155,14 @@ public class PdRegistrationTest {
     specs.script(
         "repo-alias", DeploymentSpecParserAlias.parse("deployment_target: singleton\n"));
     postBuildSucceeded("repo-alias", "environment/reg-alias", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals("PLATFORM", service("repo-alias").get("target"));
-    // No environment segment in the name: a platform container belongs to no tier, and the word
-    // that used to fill the gap is in the repository names now.
+    // No environment segment in the derived name: a platform service belongs to no tier, and the
+    // word that used to fill the gap is in the repository names now.
     assertTrue(
-        driver.started().get(0).containerName().startsWith("qits-pd-repo-alias-"),
-        driver.started().get(0).containerName());
+        driver.applied().get(0).deploymentName().startsWith("qits-pd-repo-alias-"),
+        driver.applied().get(0).deploymentName());
   }
 
   @Test
@@ -176,7 +176,7 @@ public class PdRegistrationTest {
         "repo-reg-plane",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-plane", "environment/reg-plane", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
     awaitWorkerIdle();
 
     Map<String, Object> deployment =
@@ -198,12 +198,12 @@ public class PdRegistrationTest {
     // back.
     createPlatformEnvironment("reg-planes", "environment/reg-planes");
     postBuildSucceeded("repo-reg-tiered", "environment/reg-planes", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
     specs.script(
         "repo-reg-crossplane",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-reg-crossplane", "environment/reg-planes", SHA_A);
-    awaitStarted(2);
+    awaitApplied(2);
     awaitWorkerIdle();
 
     List<String> names = platformDeployments().stream().map(d -> (String) d.get("applicationName")).toList();
@@ -217,13 +217,13 @@ public class PdRegistrationTest {
     // null and every service mounted under its own prefix failed a gate against a URL that 404s.
     createEnvironment("reg-health", "environment/reg-health");
     postBuildSucceeded("qits-observability", "environment/reg-health", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals(
         "/observability/q/health/ready",
         service("qits-observability").get("healthPath"),
         "the convention is derived from the name and WRITTEN, not left to the deploy default");
-    assertEquals("/observability/q/health/ready", driver.started().get(0).healthPath());
+    assertEquals("/observability/q/health/ready", driver.applied().get(0).healthPath());
   }
 
   @Test
@@ -235,7 +235,7 @@ public class PdRegistrationTest {
         new SpecSource.DeploymentSpec(
             PdDeploymentTarget.ENVIRONMENT, true, null, "/q/health/ready", null, null));
     postBuildSucceeded("qits-gateway", "environment/reg-health-gw", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals("/q/health/ready", service("qits-gateway").get("healthPath"));
   }
@@ -243,7 +243,7 @@ public class PdRegistrationTest {
   @Test
   public void aDeclaredHealthCmdReachesTheDriverAndNoRowHoldsIt() {
     // The deployable-image case end to end: a plain image names its own probe, the driver is
-    // started with it, and nothing is written down — the spec is read again before every
+    // handed it, and nothing is written down — the spec is read again before every
     // deployment, so a column would only be a second copy to keep right.
     createEnvironment("reg-health-cmd", "environment/reg-health-cmd");
     specs.script(
@@ -256,9 +256,9 @@ public class PdRegistrationTest {
             "pg_isready -U postgres || exit 1",
             null));
     postBuildSucceeded("qits-db", "environment/reg-health-cmd", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
-    assertEquals("pg_isready -U postgres || exit 1", driver.started().get(0).healthCmd());
+    assertEquals("pg_isready -U postgres || exit 1", driver.applied().get(0).healthCmd());
     // The row keeps the convention path it always would have: the command is this deployment's,
     // not the service's identity.
     assertEquals("/db/q/health/ready", service("qits-db").get("healthPath"));
@@ -283,7 +283,7 @@ public class PdRegistrationTest {
         .statusCode(201);
 
     postBuildSucceeded("qits-odd", "environment/reg-health-keep", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals("/hand/placed/health", service("qits-odd").get("healthPath"));
   }
@@ -297,10 +297,10 @@ public class PdRegistrationTest {
         "qits-idp",
         new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("qits-idp", "environment/reg-health-plane", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals("/idp/q/health/ready", service("qits-idp").get("healthPath"));
-    assertEquals("/idp/q/health/ready", driver.started().get(0).healthPath());
+    assertEquals("/idp/q/health/ready", driver.applied().get(0).healthPath());
   }
 
   @Test
@@ -312,7 +312,7 @@ public class PdRegistrationTest {
     awaitWorkerIdle();
 
     assertNull(service("repo-quiet"), "nothing was registered");
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.applied());
   }
 
   @Test
@@ -324,7 +324,7 @@ public class PdRegistrationTest {
     postBuildSucceeded("Repo-Bad", "environment/reg-badname", SHA_A);
     awaitWorkerIdle();
 
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.applied());
   }
 
   @Test
@@ -351,7 +351,7 @@ public class PdRegistrationTest {
     assertTrue(
         ((String) deployments.get(0).get("detail")).contains("the git host answered 500"),
         "the cause is on the row: " + deployments.get(0).get("detail"));
-    assertEquals(List.of(), driver.pulledRefs(), "a topology is never guessed");
+    assertEquals(List.of(), driver.pulled(), "a topology is never guessed");
   }
 
   // --- helpers ----------------------------------------------------------------------------------
@@ -415,12 +415,12 @@ public class PdRegistrationTest {
         .orElse(null);
   }
 
-  private void awaitStarted(int count) {
+  private void awaitApplied(int count) {
     long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.started().size() < count && System.currentTimeMillis() < deadline) {
+    while (driver.applied().size() < count && System.currentTimeMillis() < deadline) {
       sleep();
     }
-    assertEquals(count, driver.started().size(), "started containers");
+    assertEquals(count, driver.applied().size(), "applied services");
   }
 
   private List<Map<String, Object>> awaitDeployments(String environmentId, int count) {

@@ -8,7 +8,7 @@ build → registration → health-gated cutover). This file is the working conve
 **A clone of this repo alone builds and tests green** — no monorepo, no docker, no prior
 `mvn install` elsewhere, no credentials, **no network**. That is why the poms duplicate versions
 instead of inheriting them, and why every seam that reaches outside the process is faked rather than
-skipped: `FakeDeploymentDriver` behind `DeploymentDriver` (docker), `FakeSpecSource` behind
+skipped: `FakeDeploymentDriver` behind `DeploymentDriver` (the orchestrator), `FakeSpecSource` behind
 `SpecSource` (the git host) and `FakeResourceProvisioner` behind `ResourceProvisioner` (the
 platform's postgres). **Three fakes** — the ancestor's fourth, a stub HTTP server for the topology,
 dissolved when the topology became a repository query.
@@ -77,7 +77,7 @@ Four maven modules, package root `eu.wohlben.qits.platform.deployments`:
   `DeploymentActive` it takes this jar and gets the record plus the bus and no part of the deployer.
   The ci-events and githost-events shape, which is also why the directory carries the repo's name
   rather than a bare role word.
-- **`service/`** (`…api`, `…bus`, `…dockerhost`, `…githost`, `…pghost`) — the adapters. `bus` is the
+- **`service/`** (`…api`, `…bus`, `…swarmhost`, `…githost`, `…pghost`) — the adapters. `bus` is the
   event-bus half: the durable `BuildSuccessful` subscriber, the `DeployEventAnnouncer` that
   publishes this component's own four events, and the native-image registration for what the
   library's own `ObjectMapper` binds. Identity is not a package here: the forward-auth pair
@@ -163,7 +163,7 @@ worker, partly because a `this.`-invocation never crosses the interceptor and a 
 quietly.
 
 The startup sweep (`DeployService.onStart`) settles rows left `QUEUED`/`STARTING` by a crash — see
-"Two orchestrators, one seam" for what settles them — and **deliberately reaps no containers**: a
+"One orchestrator, one seam" for what settles them — and **deliberately reaps no containers**: a
 deployed application outlives its deployer, and whatever was ACTIVE before the restart is still
 serving. Do not "complete" the sweep with a reap.
 
@@ -304,44 +304,45 @@ its shipped default in the suite and `PdDeploymentObservationTest` drives `obser
 `enqueueObservation()` directly, the `PdSweepAdoptionTest` shape. That test also holds the serialization
 claim, off the fake's call log: the pass's `observe:` calls land after the deployment's last one.
 
-## Two orchestrators, one seam
+## One orchestrator, one seam
 
-`qits.platform.deployments.orchestrator` is `docker` (shipped) or `swarm`, and it picks which
-`DeploymentDriver` the whole component runs on. Both paths work, with one asymmetry that is the
-migration itself: **only swarm can deploy this component**. A self-update takes a third party, the
-docker path's was a detached referee container and it is retired, so that path refuses a deployment
-of this component and names swarm on the row. Flipping the default and deleting the docker path is
-the next phase.
+**Docker swarm, and nothing else.** The by-hand docker replace — find the alias holder, stop it, run
+the successor, join it to every other network, poll the gate, roll back on failure — is deleted, and
+`dockerhost/` with it. What is left is `swarmhost/SwarmDeploymentDriver`, the only implementation of
+`DeploymentDriver`, resolved by ordinary injection.
 
-**The seam is two verbs now**: `apply(ServiceSpec)` makes the described service exist at the
-described image, `awaitConverged(name, timeout)` says whether it took. `start`, `stop`, `restart`,
-`connect`, `disconnect`, `aliasHolders`, `handoff`, `isSelf` and `containerId` are gone
-from it — every one of them is a statement about how *docker* replaces a container, and keeping
-them would have made one orchestrator's model look like the contract.
+**`qits.platform.deployments.orchestrator` survives as a GUARD**, not a choice:
+`orchestration/DeploymentDrivers` fails the boot unless it says `swarm`. A deployment still carrying
+`docker` from before the migration names an orchestrator this build does not have, and failing loudly
+naming the key beats deploying the platform with whatever is left. `DeploymentDriversTest` holds it.
+
+**The seam is two verbs**: `apply(ServiceSpec)` makes the described service exist at the described
+image, `awaitConverged(name, timeout)` says whether it took. `start`, `stop`, `restart`, `connect`,
+`disconnect`, `aliasHolders`, `handoff`, `isSelf` and `containerId` went when the second
+orchestrator arrived — every one of them is a statement about how *docker* replaces a container, and
+keeping them would have made one orchestrator's model look like the contract. **Do not put a
+mechanic back on this seam**: `pull` and `networks` are the two verbs here that are not
+swarm-shaped, and each is kept for what it ANSWERS (is anything published; what is the membership),
+never for how.
 
 **So `DeployService.execute` has no branches in it**: resolve → provision → pull (for the
-`IMAGE_MISSING` classification, on both paths) → `apply` → `awaitConverged` → record. The
-predecessor search, the alias union, the stop-before-start, the join loop, the reconciliation and
-the rollback all moved into `dockerhost/DockerDeploymentDriver`. What stayed is the
-bookkeeping, because it is the same on both paths: the row per place, the four announcements, the
-cutover bracket, and the reap **after** the rows (`Convergence.retired()` comes back as data for
-exactly that reason).
+`IMAGE_MISSING` classification) → `apply` → `awaitConverged` → record. What stayed with it is the
+bookkeeping: the row per place, the four announcements, the cutover bracket, and the reap **after**
+the rows (`Convergence.retired()` comes back as data for exactly that reason).
 
 Three things about the shape, each easy to undo by accident:
 
-- **`nameOf(spec)` is asked before `apply`**, and it is the whole of the naming difference: docker
-  names a container per deployment (`qits-pd-<env>-<app>-<id8>`), a swarm service's name IS its
-  address so it is the wire alias, and the row records whichever it is. A name-based check that
-  assumes the first shape breaks the swarm path silently.
+- **`nameOf(spec)` is asked before `apply`**, and it is the wire alias: a swarm service's name IS
+  its address, so a replace is an update of that same service and both rows of a cutover name it.
+  `ServiceSpec.deploymentName` still carries the container-shaped `qits-pd-<env>-<app>-<id8>`,
+  because that is what a person greps the host for — it is not the name of anything.
 - **`ApplyOutcome.HANDED_OFF` is neither success nor failure.** A deployment that replaces this very
   process leaves its row `STARTING` on purpose; the instance that survives records it, from
-  `runningImage`. Only the swarm path answers this way — the docker one has no arbiter and returns
-  `REFUSED` before it stops anything.
-- **`DockerHost` is the docker CLI as its own seam**, and the suite's `@Mock` fake sits there rather
-  than at `DeploymentDriver`. That is what keeps every flow test driving the REAL cutover
-  choreography — the stop, the joins, the reconcile, the rollback — with no docker.
-  `FakeDeploymentDriver` still exists for the state-machine tests and is installed per test with
-  `QuarkusMock`; making it a `@Mock` would take the choreography out of the suite.
+  `runningImage`.
+- **`FakeDeploymentDriver` is the suite's `@Mock`**, at `DeploymentDriver` itself, and that is where
+  it belongs now: there is no choreography above the CLI left to exercise through a booted
+  application. What a deployment does to a daemon is `SwarmDeploymentDriverTest`, plain JUnit over
+  the package-private `Cli` seam, one argv at a time.
 
 **Under swarm the topology is flat and that is a decision, not a simplification**: every
 `--network-add` recreates the task, so a service declares its whole membership at create time —
@@ -353,8 +354,8 @@ of a service is a `service rm` and a redeploy, not a deployment.
 
 **`update_order` in `.config/qits/deployments.yml`** is `start-first` (default) or `stop-first`, per
 repository, and only the repository knows: a published host port, a single-writer store or a held
-config volume each make the overlap impossible. This repo says `stop-first`. The docker path reads
-it and ignores it — its cutover is stop-first by construction.
+config volume each make the overlap impossible. This repo says `stop-first`. It reaches the
+orchestrator as `--update-order`.
 
 **The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
 one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
@@ -382,13 +383,14 @@ read `restarting/unhealthy` once and failed the deployment 18 seconds in — mea
 qits-platform-idp's first PostgreSQL deployment. H2-era applications could never hit it, which is
 why the instant fail survived this long.
 
-**The follow-up this makes optional:** `docker create` → connects → `docker start` would remove the
-race outright. It moves the argv off `run`, grows `StartSpec` with the join set, and drags the
-cutover's call-order assertions with it. Recorded, not done — a patient gate is the fix, it covers
-every other slow first boot too, and the docker path it belongs to is being retired anyway.
+**The race itself left with the docker path**: a swarm service declares its whole membership when
+it is created, so a first boot never runs before its peers are addressable. What survives is the
+patience, and it survives where it still applies — `HealthGate.healthy` is the one reading
+`DeploymentObserver` settles a row on, so restarting and running-but-unhealthy are not a dead
+deployment there either.
 
-The gate lives in the domain module rather than in `dockerhost/` so the suite's fake gate IS the
-shipped gate: `FakeDeploymentDriver.scriptRestartingUntilHealthy` feeds it states and nothing else.
+`HealthGate.await`, the polling loop itself, **has no caller left** and says so in its own javadoc.
+It was the docker cutover's; swarm reaches its own verdict through `UpdateStatus`.
 
 ## The vocabulary rename, and the alias
 
@@ -494,7 +496,7 @@ Two validators, split by the module boundary rather than by taxonomy:
 
 **The health path is the strictest and stays that way.** It is the one value interpolated into a
 string a *shell inside the container* runs (`--health-cmd`), so it gets an allowlist, no exceptions,
-and is re-checked at the last line before the argv (`DockerDeploymentDriver.buildArgv`). Three
+and is re-checked at the last line before the argv (`SwarmDeploymentDriver.healthFlags`). Three
 callers use the same check: the API, the spec parser (repository-authored input) and the argv.
 
 **`health_cmd` is the one value with no charset, and the exception proves the rule.** It is not
@@ -937,7 +939,7 @@ against.
 - Flow tests poll the read surface to a deadline rather than reaching into the service — the same way
   a caller experiences the API, and immune to the worker's timing. Platform deployments are the one
   thing that surface cannot show (`/deployments` takes an environment, and a platform deployment has
-  none), so those tests wait on the driver (`awaitStarted`) and read the row through `/applications`.
+  none), so those tests wait on the driver (`awaitApplied`) and read the row through `/applications`.
 - `OpenApiSchemaExportTest` writes `docs/openapi.yml`. Regenerate and commit when the surface
   changes: `./mvnw -pl service -am test -Dtest=OpenApiSchemaExportTest
   -Dsurefire.failIfNoSpecifiedTests=false`. The intake is `@Operation(hidden = true)` (a wire API);
@@ -999,7 +1001,7 @@ target and names no branch at all: a push to the branch an environment listens t
 A green run announces this component to itself, and **under swarm** it deploys itself: the manager
 arbitrates the succession, the `/platform-deployments` surface blips mid-cutover (this repo's spec
 says `update_order: stop-first`), and a successor that misses its health gate leaves the predecessor
-serving. Under the docker path that deployment is refused.
+serving.
 
 **`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
 *environment* listens to its branch, and what comes out on the platform plane is still

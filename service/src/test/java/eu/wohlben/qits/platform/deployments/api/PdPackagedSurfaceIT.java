@@ -47,8 +47,8 @@ import org.junit.jupiter.api.Test;
  * blocked one. This suite asserts what the SERVER owes — the client is served at the segment, deep
  * links reach it, machine paths never do. See AGENTS.md.
  *
- * <p>No deployment is driven here: that needs docker, and the packaged process carries the real
- * {@link eu.wohlben.qits.platform.deployments.dockerhost.DockerDeploymentDriver}. The container
+ * <p>No deployment is driven here: that needs a swarm, and the packaged process carries the real
+ * {@link eu.wohlben.qits.platform.deployments.swarmhost.SwarmDeploymentDriver}. The container
  * runtime is pointed at a binary that does not exist, which exercises the best-effort seam (an
  * environment must exist even when docker is unreachable) and keeps this IT free of host side
  * effects.

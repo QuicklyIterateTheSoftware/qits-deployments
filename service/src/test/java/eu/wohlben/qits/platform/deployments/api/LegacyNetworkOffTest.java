@@ -1,24 +1,31 @@
 package eu.wohlben.qits.platform.deployments.api;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import static io.restassured.RestAssured.given;
+
+import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import jakarta.inject.Inject;
-import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * What emptying {@code qits.platform.deployments.legacy-network} changes: the dual-home join, and
- * nothing else.
+ * What emptying {@code qits.platform.deployments.legacy-network} changes: the membership a
+ * deployment declares, and nothing else.
+ *
+ * <p>The claim survived the docker path it was written for. There it was a join after the start;
+ * here it is one entry in the network list a service is created with — the same key, the same
+ * decision, read one layer up in {@link
+ * eu.wohlben.qits.platform.deployments.deployments.control.DeployService}, which is where it always
+ * was.
  */
 @QuarkusTest
 @TestProfile(LegacyNetworkOffProfile.class)
@@ -26,7 +33,7 @@ public class LegacyNetworkOffTest {
 
   private static final String SHA = "a".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
 
   @BeforeEach
@@ -36,7 +43,7 @@ public class LegacyNetworkOffTest {
   }
 
   @Test
-  public void anEmptyLegacyNetworkDropsTheDualHomeJoinAndTheSearchOnIt() {
+  public void anEmptyLegacyNetworkDropsItFromTheDeclaredMembership() {
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("name", "flip"))
@@ -46,34 +53,29 @@ public class LegacyNetworkOffTest {
         .statusCode(201);
     given()
         .contentType(ContentType.JSON)
-        .body(
-            Map.of(
-                "repoId", "repo-flip", "branch", "environment/flip", "commitSha", SHA))
+        .body(Map.of("repoId", "repo-flip", "branch", "environment/flip", "commitSha", SHA))
         .when()
         .post("/platform-deployments/api/events/build-succeeded")
         .then()
         .statusCode(202);
 
     long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.started().isEmpty() && System.currentTimeMillis() < deadline) {
+    while (driver.applied().isEmpty() && System.currentTimeMillis() < deadline) {
       try {
         Thread.sleep(50);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
-    if (driver.started().isEmpty()) {
-      fail("nothing was started");
+    if (driver.applied().isEmpty()) {
+      fail("nothing was applied");
     }
 
-    // The container runs on its own network and joins nothing else: no environment names it a
-    // public node, and there is no legacy network left to dual-home onto.
-    assertEquals("qits-env-flip-repo-flip", driver.started().get(0).network());
-    assertEquals(List.of(), driver.connections());
-    // ...and the predecessor search no longer looks there either, which is what makes the flip
-    // the moment a stale container on qits-net stops being anyone's predecessor.
-    assertTrue(
-        driver.aliasSearches().stream().noneMatch(s -> s.contains("qits-net")),
-        "the search is off the legacy network: " + driver.aliasSearches());
+    // The service is declared on its own network and nothing else: no environment names it a public
+    // node, and there is no legacy network left to dual-home onto.
+    DeploymentDriver.ServiceSpec applied = driver.applied().get(0);
+    assertEquals("qits-env-flip-repo-flip", applied.primaryNetwork());
+    assertEquals(1, applied.networks().size(), applied.networks().toString());
+    assertFalse(applied.networks().contains("qits-net"), applied.networks().toString());
   }
 }

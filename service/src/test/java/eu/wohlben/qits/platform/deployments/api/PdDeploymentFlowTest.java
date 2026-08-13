@@ -6,9 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
-import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.control.ResourceProvisioner;
@@ -28,8 +26,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * The deployment loop end to end, against {@link FakeDockerHost}: intake → queued deployment
- * → pull → start → health gate → cutover, and each of the recorded failure shapes. The boundary
+ * The deployment loop end to end, against {@link FakeDeploymentDriver}: intake → queued deployment
+ * → pull → apply → convergence → cutover, and each of the recorded failure shapes. The boundary
  * starts at the build-succeeded POST, not at a CI run — what qits-ci sends and when belongs to that
  * repo's tests (the CiPipelineBoundaryTest stance).
  *
@@ -42,7 +40,7 @@ public class PdDeploymentFlowTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeployService deployService;
@@ -153,16 +151,16 @@ public class PdDeploymentFlowTest {
   }
 
   /** Platform deployments have no environment to read through — wait on the driver instead. */
-  private void awaitStarted(int count) {
+  private void awaitApplied(int count) {
     long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.started().size() < count && System.currentTimeMillis() < deadline) {
+    while (driver.applied().size() < count && System.currentTimeMillis() < deadline) {
       try {
         Thread.sleep(50);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
-    assertEquals(count, driver.started().size(), "started containers");
+    assertEquals(count, driver.applied().size(), "applied services");
   }
 
   @Test
@@ -178,38 +176,35 @@ public class PdDeploymentFlowTest {
     // The run that caused it, straight from the intake and out again on the read surface — this is
     // the whole deployment -> /ci/runs/<runId> click-through.
     assertEquals("run-1", deployment.get("runId"));
-    String containerName = (String) deployment.get("containerName");
-    assertTrue(
-        containerName.startsWith("qits-pd-flow-green-repo-green-"),
-        "container is named after environment, application and deployment: " + containerName);
+    // The row records the name the ORCHESTRATOR gave it, which is the wire alias: a service name
+    // is the address, so a replace is an update of that same service.
+    assertEquals("flow-green-repo-green", deployment.get("containerName"));
 
     // The image reference is DERIVED — the convention is the contract under test.
     assertEquals(
-        List.of("qits-platform-artifacts:8080/qits/repo-green:" + SHA_A), driver.pulledRefs());
-    DockerHost.StartSpec spec = driver.started().get(0);
+        List.of("qits-platform-artifacts:8080/qits/repo-green:" + SHA_A), driver.pulled());
+    DeploymentDriver.ServiceSpec spec = driver.applied().get(0);
     // The primary network is the application's OWN, not the environment's bundle: an ordinary
-    // application is a spoke, and only its own containers are on it.
-    assertEquals("qits-env-flow-green-repo-green", spec.network());
+    // application is a spoke, and only its own services are on it.
+    assertEquals("qits-env-flow-green-repo-green", spec.primaryNetwork());
     assertEquals("repo-green", spec.applicationName());
     assertEquals(PdDeploymentTarget.ENVIRONMENT, spec.target());
-    // ...and it joins the legacy network after the start, which is the transition membership that
-    // keeps today's direct cross-application URLs resolving. The alias it joins UNDER is the
-    // tier-qualified one — the same address the run gave it on its own network, because an alias
-    // that resolved on one network and not the next would be an address that works by luck.
+    // ...and the legacy network is declared with it, which is the transition membership that keeps
+    // today's direct cross-application URLs resolving. It is in the SAME list as the primary one:
+    // an orchestrator that cannot join after the fact has to be told the whole membership at once.
     assertTrue(
-        driver.connections().contains("qits-net:" + containerName + ":flow-green-repo-green"),
-        "the fresh container joins the legacy network under its wire alias: " + driver.connections());
-    // The predecessor search asks about that alias AND the bare name, which is what absorbs every
-    // container started before the qualifier existed instead of running a second copy beside it.
-    assertEquals(
-        List.of(List.of("flow-green-repo-green", "repo-green")),
-        driver.searchedAliases(),
-        "the qualified alias and the bare one: " + driver.searchedAliases());
+        spec.networks().contains("qits-net"),
+        "the legacy network is part of the declared membership: " + spec.networks());
+    // The container-shaped name is still derived — it is what a person greps the host for — even
+    // though it is not what the service is called.
+    assertTrue(
+        spec.deploymentName().startsWith("qits-pd-flow-green-repo-green-"),
+        "named after environment, application and deployment: " + spec.deploymentName());
     // Nothing named a health path, so registration derived the convention one from the name — and
     // that is what the gate curls.
     assertEquals("/repo-green/q/health/ready", spec.healthPath());
     // Nothing was decommissioned — there was nothing before.
-    assertEquals(List.of(), driver.removedContainers());
+    assertEquals(List.of(), driver.reaped());
   }
 
   @Test
@@ -217,17 +212,19 @@ public class PdDeploymentFlowTest {
     String environmentId = createEnvironment("flow-cutover");
     postBuildSucceeded("repo-cutover", "environment/flow-cutover", SHA_A);
     awaitDeployments(environmentId, 1);
-    String firstContainer = driver.started().get(0).containerName();
 
     postBuildSucceeded("repo-cutover", "environment/flow-cutover", SHA_B);
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 2);
 
-    // Newest-first: the sha-B deployment is ACTIVE, the sha-A one decommissioned — and only after
-    // the new one passed the gate was the old container removed.
+    // Newest-first: the sha-B deployment is ACTIVE, the sha-A one decommissioned.
     assertEquals("ACTIVE", deployments.get(0).get("status"));
     assertEquals(SHA_B, deployments.get(0).get("commitSha"));
     assertEquals("DECOMMISSIONED", deployments.get(1).get("status"));
-    assertEquals(List.of(firstContainer), driver.removedContainers());
+    // Both rows name the same service, which is what an in-place replace is — so there is nothing
+    // to reap, and reaping it would remove the deployment that just went live.
+    assertEquals(
+        deployments.get(0).get("containerName"), deployments.get(1).get("containerName"));
+    assertEquals(List.of(), driver.reaped());
   }
 
   @Test
@@ -244,57 +241,38 @@ public class PdDeploymentFlowTest {
     assertTrue(
         detail.contains("qits-platform-artifacts:8080/qits/repo-noimage:" + SHA_A),
         "the detail names the reference nothing published: " + detail);
-    // Nothing was started and nothing removed — the previous state is untouched.
-    assertEquals(List.of(), driver.started());
-    assertEquals(List.of(), driver.removedContainers());
+    // Nothing was applied and nothing reaped — the previous state is untouched.
+    assertEquals(List.of(), driver.applied());
+    assertEquals(List.of(), driver.reaped());
   }
 
   @Test
-  public void aFailedHealthGateRemovesTheFreshContainerAndKeepsTheOldOneServing() {
+  public void aSuccessorThatNeverConvergesLeavesTheOldOneServing() {
     String environmentId = createEnvironment("flow-unhealthy");
     postBuildSucceeded("repo-unhealthy", "environment/flow-unhealthy", SHA_A);
     awaitDeployments(environmentId, 1);
-    String healthyContainer = driver.started().get(0).containerName();
 
-    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
+    driver.scriptConvergence(
+        DeploymentDriver.Convergence.rolledBack("the successor never went healthy"));
     postBuildSucceeded("repo-unhealthy", "environment/flow-unhealthy", SHA_B);
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 2);
 
     assertEquals("FAILED", deployments.get(0).get("status"));
     assertEquals(SHA_B, deployments.get(0).get("commitSha"));
-    // The invariant: the previous deployment is still ACTIVE and its container was never removed;
-    // the fresh container is the one that went.
+    assertTrue(
+        ((String) deployments.get(0).get("detail")).contains("never went healthy"),
+        "the orchestrator's own words are on the row: " + deployments.get(0).get("detail"));
+    // The invariant: the previous deployment is still ACTIVE, and nothing was reaped — a rollback
+    // is the predecessor never having stopped.
     assertEquals("ACTIVE", deployments.get(1).get("status"));
-    String freshContainer = driver.started().get(1).containerName();
-    assertEquals(List.of(freshContainer), driver.removedContainers());
-    assertTrue(!driver.removedContainers().contains(healthyContainer));
+    assertEquals(List.of(), driver.reaped());
   }
 
   @Test
-  public void aContainerThatRestartsIntoHealthBeforeTheDeadlineIsAnActiveDeployment() {
-    // The boot race every PostgreSQL-backed application takes on a pipeline deploy: `docker run`
-    // puts the container on its primary network alone, the joins that make the postgres alias
-    // resolve happen after the start, so the first boot dies on an acquisition timeout and
-    // `--restart unless-stopped` brings it back seconds later with the networks in place.
-    //
-    // The gate used to read `restarting/unhealthy` once and fail a deployment that was about to
-    // work — which is how qits-platform-idp's first PG deployment ended 18 seconds in. Restarting
-    // is PENDING now, and only the deadline fails it.
-    String environmentId = createEnvironment("flow-restarting");
-    driver.scriptRestartingUntilHealthy(4);
-    postBuildSucceeded("repo-restarting", "environment/flow-restarting", SHA_A);
-
-    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
-
-    assertEquals("ACTIVE", deployments.get(0).get("status"));
-    // The container that came back is the one serving: nothing was removed and nothing rolled back.
-    assertEquals(List.of(), driver.removedContainers());
-    assertEquals(List.of(), driver.restartedContainers());
-  }
-
-  @Test
-  public void aRefusedStartIsAFailedDeployment() {
-    driver.scriptStart(new DockerHost.StartResult(false, "docker: connection refused"));
+  public void aRefusedApplyIsAFailedDeployment() {
+    driver.scriptApply(
+        new DeploymentDriver.ApplyResult(
+            DeploymentDriver.ApplyOutcome.REFUSED, "docker: connection refused"));
     String environmentId = createEnvironment("flow-refused");
     postBuildSucceeded("repo-refused", "environment/flow-refused", SHA_A);
 
@@ -303,91 +281,10 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void theReplaceCutoverStopsAliasHoldersBeforeStartingAndRemovesThemAfterTheGate() {
-    // The predecessor here is NOT one of cd's own rows — it is whatever holds the alias, which is
-    // how the compose-seeded originals hand over to cd on their first pipeline deployment.
-    String environmentId = createEnvironment("flow-replace");
-    driver.scriptAliasHolders(List.of(new DockerHost.Holder("c0ffee".repeat(10) + "beef", "seeded-original", null)));
-    postBuildSucceeded("repo-replace", "environment/flow-replace", SHA_A);
-
-    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
-    assertEquals("ACTIVE", deployments.get(0).get("status"));
-    assertEquals(List.of("seeded-original"), driver.stoppedContainers());
-    assertEquals(List.of("seeded-original"), driver.removedContainers());
-    assertEquals(List.of(), driver.restartedContainers());
-    // The order IS the feature: stopped before the fresh start, removed only after the gate.
-    List<String> calls = driver.calls();
-    assertTrue(
-        calls.indexOf("stop:seeded-original") < calls.indexOf("start:" + driver.started().get(0).containerName())
-            && calls.indexOf("remove:seeded-original") > calls.indexOf("start:" + driver.started().get(0).containerName()),
-        "stop < start < remove, got " + calls);
-  }
-
-  @Test
-  public void aFailedGateRestartsWhatTheCutoverStopped() {
-    String environmentId = createEnvironment("flow-rollback");
-    driver.scriptAliasHolders(List.of(new DockerHost.Holder("dead".repeat(16), "previous-app", null)));
-    driver.scriptHealth(new HealthGate.Result(false, "container exited"));
-    postBuildSucceeded("repo-rollback", "environment/flow-rollback", SHA_A);
-
-    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
-    assertEquals("FAILED", deployments.get(0).get("status"));
-    assertEquals(List.of("previous-app"), driver.stoppedContainers());
-    assertEquals(List.of("previous-app"), driver.restartedContainers());
-    // Removed: only the fresh container that failed its gate — never the restarted predecessor.
-    assertEquals(List.of(driver.started().get(0).containerName()), driver.removedContainers());
-  }
-
-  @Test
-  public void aSelfUpdateIsRefusedOnTheDockerPathAndTheRunningInstanceKeepsServing() {
-    // Deploying the application whose alias this very instance holds. The docker path cannot do it:
-    // the process that would stop the predecessor IS the predecessor, and nothing would be left to
-    // await the successor's gate or put the loser back. It used to launch a detached referee
-    // container for exactly that; the referee is retired, so this is a refusal — recorded on the
-    // row, with nothing stopped, started or removed.
-    String environmentId = createEnvironment("flow-self");
-    String selfId = "abcdef123456";
-    driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(
-        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
-    postBuildSucceeded("repo-self", "environment/flow-self", SHA_A);
-
-    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
-
-    assertEquals("FAILED", deployments.get(0).get("status"));
-    String detail = (String) deployments.get(0).get("detail");
-    assertTrue(detail.contains("swarm"), "the row says where a self-update belongs: " + detail);
-    assertEquals(List.of(), driver.started(), "nothing ran");
-    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
-    assertEquals(List.of(), driver.removedContainers());
-  }
-
-  @Test
-  public void aPlatformSelfUpdateIsRefusedTheSameWay() {
-    // The platform plane finds itself through the legacy network and the bare alias, so the
-    // refusal has to hold there too — this is the deployment this component actually takes.
-    createPlatformEnvironment("flow-selfplane");
-    specs.script(
-        "qits-platform-deployments", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
-    String selfId = "abcdef123456";
-    driver.scriptSelfId(selfId);
-    driver.scriptAliasHolders(
-        List.of(new DockerHost.Holder(selfId + "f".repeat(52), "qits-platform-deployments", null)));
-    postBuildSucceeded("qits-platform-deployments", "environment/flow-selfplane", SHA_A);
-    awaitWorkerIdle();
-
-    PdDeployment row = deploymentOf("qits-platform-deployments", null, SHA_A);
-    assertEquals("FAILED", row.status.name());
-    assertTrue(row.detail.contains("swarm"), row.detail);
-    assertEquals(List.of(), driver.started(), "nothing ran");
-    assertEquals(List.of(), driver.stoppedContainers(), "the running instance was not touched");
-  }
-
-  @Test
-  public void aDeclaredResourceIsProvisionedBeforeThePullAndInjectedIntoTheContainer() {
+  public void aDeclaredResourceIsProvisionedBeforeThePullAndInjectedIntoTheService() {
     // The whole mechanism through the front door: the repository says `resources: postgresql:db`,
-    // the role and the database are made to exist before anything docker-side happens, and the
-    // container is started with the generic triple for them.
+    // the role and the database are made to exist before anything runtime-side happens, and the
+    // service is applied with the generic triple for them.
     String environmentId = createEnvironment("flow-resource");
     specs.script(
         "qits-storing",
@@ -410,7 +307,7 @@ public class PdDeploymentFlowTest {
     assertEquals("flow-resource-qits-oci-postgresql", request.host());
     assertNull(request.storedPassword(), "nothing had recorded one yet");
 
-    DockerHost.StartSpec started = driver.started().get(0);
+    DeploymentDriver.ServiceSpec started = driver.applied().get(0);
     assertEquals(1, started.resources().size());
     DeploymentDriver.ResourceBinding binding = started.resources().get(0);
     assertEquals("db", binding.name());
@@ -421,9 +318,9 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void aResourceThatCannotBeProvisionedFailsTheDeploymentBeforeAnythingDockerSide() {
+  public void aResourceThatCannotBeProvisionedFailsTheDeploymentBeforeAnythingRuntimeSide() {
     // The placement of the hook, asserted as behaviour: the row exists to record the failure on,
-    // and nothing was pulled, started or stopped — so whatever was serving is still serving.
+    // and nothing was pulled or applied — so whatever was serving is still serving.
     String environmentId = createEnvironment("flow-resource-refused");
     specs.script(
         "qits-refused",
@@ -443,21 +340,20 @@ public class PdDeploymentFlowTest {
     String detail = (String) deployments.get(0).get("detail");
     assertTrue(detail.contains("resource provisioning failed"), detail);
     assertTrue(detail.contains("too many connections"), "postgres' own words are on the row: " + detail);
-    assertEquals(List.of(), driver.pulledRefs(), "nothing was pulled");
-    assertEquals(List.of(), driver.started(), "and nothing was started");
-    assertEquals(List.of(), driver.stoppedContainers());
+    assertEquals(List.of(), driver.pulled(), "nothing was pulled");
+    assertEquals(List.of(), driver.applied(), "and nothing was applied");
   }
 
   @Test
   public void aRepositoryThatDeclaresNoResourceIsDeployedExactlyAsBefore() {
     // The backward-compatibility half, which is every application on the platform today: the seam
-    // is never called and the container is told about nothing.
+    // is never called and the service is told about nothing.
     String environmentId = createEnvironment("flow-resource-none");
     postBuildSucceeded("repo-nostore", "environment/flow-resource-none", SHA_A);
 
     assertEquals("ACTIVE", awaitDeployments(environmentId, 1).get(0).get("status"));
     assertEquals(List.of(), provisioner.requests());
-    assertEquals(List.of(), driver.started().get(0).resources());
+    assertEquals(List.of(), driver.applied().get(0).resources());
   }
 
   @Test
@@ -468,7 +364,7 @@ public class PdDeploymentFlowTest {
     // 202 (fire-and-forget sender), but nothing was queued or pulled.
     awaitWorkerIdle();
     awaitDeployments(environmentId, 0);
-    assertEquals(List.of(), driver.pulledRefs());
+    assertEquals(List.of(), driver.pulled());
   }
 
   @Test
@@ -503,7 +399,7 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
-  public void aPublicNodeJoinsTheBundleAndEveryApplicationNetworkOfItsEnvironment() {
+  public void aPublicNodeDeclaresTheBundleAndEveryApplicationNetworkOfItsEnvironment() {
     String environmentId = createEnvironment("flow-hub");
     // One application network of this environment already exists — the hub has to end up on it.
     driver.scriptExistingNetwork(
@@ -517,22 +413,21 @@ public class PdDeploymentFlowTest {
     postBuildSucceeded("repo-gw", "environment/flow-hub", SHA_A);
 
     awaitDeployments(environmentId, 1);
-    String container = driver.started().get(0).containerName();
-    assertEquals("qits-env-flow-hub-repo-gw", driver.started().get(0).network());
-    assertTrue(driver.started().get(0).availableOnEnv());
+    DeploymentDriver.ServiceSpec spec = driver.applied().get(0);
+    assertEquals("qits-env-flow-hub-repo-gw", spec.primaryNetwork());
+    assertTrue(spec.availableOnEnv());
     assertTrue(
-        driver.connections().contains("qits-env-flow-hub:" + container + ":flow-hub-repo-gw"),
-        "the public node joins its environment's bundle: " + driver.connections());
+        spec.networks().contains("qits-env-flow-hub"),
+        "the public node is on its environment's bundle: " + spec.networks());
     assertTrue(
-        driver
-            .connections()
-            .contains("qits-env-flow-hub-app-hub-seed:" + container + ":flow-hub-repo-gw"),
-        "and every application network of that environment, under one alias throughout: "
-            + driver.connections());
+        spec.networks().contains("qits-env-flow-hub-app-hub-seed"),
+        "and every application network of that environment: " + spec.networks());
+    // One alias throughout, whichever network it is reached on.
+    assertEquals("flow-hub-repo-gw", spec.wireAlias());
   }
 
   @Test
-  public void aPlatformServiceRunsOnThePlatformNetworkAndJoinsEveryApplicationNetwork() {
+  public void aPlatformServiceRunsOnThePlatformNetworkAndDeclaresEveryApplicationNetwork() {
     String environmentId = createPlatformEnvironment("flow-single");
     driver.scriptExistingNetwork(
         new DeploymentDriver.Network(
@@ -546,30 +441,25 @@ public class PdDeploymentFlowTest {
     // comes out of it is still platform-shaped.
     postBuildSucceeded("repo-idp", "environment/flow-single", SHA_A);
 
-    awaitStarted(1);
-    DockerHost.StartSpec spec = driver.started().get(0);
-    assertEquals("qits-platform", spec.network());
+    awaitApplied(1);
+    DeploymentDriver.ServiceSpec spec = driver.applied().get(0);
+    assertEquals("qits-platform", spec.primaryNetwork());
     assertEquals(PdDeploymentTarget.PLATFORM, spec.target());
     assertNull(spec.environmentId(), "a platform service belongs to no tier");
     assertNull(spec.environmentName());
     assertTrue(
-        spec.containerName().startsWith("qits-pd-repo-idp-"),
-        "no tier segment, because there is no tier: " + spec.containerName());
+        spec.deploymentName().startsWith("qits-pd-repo-idp-"),
+        "no tier segment in the derived name, because there is no tier: " + spec.deploymentName());
     // Its wire alias stays the bare application name — one instance for the whole platform has
-    // nothing to be qualified against — and it is the same on every network it joins.
+    // nothing to be qualified against.
+    assertEquals("repo-idp", spec.wireAlias());
     assertTrue(
-        driver
-            .connections()
-            .contains("qits-env-flow-single-app-single-seed:" + spec.containerName() + ":repo-idp"),
-        "a platform service joins every application network of every environment: "
-            + driver.connections());
+        spec.networks().contains("qits-env-flow-single-app-single-seed"),
+        "a platform service is on every application network of every environment: "
+            + spec.networks());
     assertTrue(
-        driver.connections().contains("qits-net:" + spec.containerName() + ":repo-idp"),
-        "and the legacy network while the transition lasts");
-    assertEquals(
-        List.of(List.of("repo-idp")),
-        driver.searchedAliases(),
-        "one alias to search: the platform spelling IS the bare name");
+        spec.networks().contains("qits-net"),
+        "and the legacy network while the transition lasts: " + spec.networks());
 
     // The environment it is not part of deploys nothing on this event.
     assertEquals(
@@ -596,10 +486,10 @@ public class PdDeploymentFlowTest {
     postBuildSucceeded("repo-pinned", "release", SHA_A);
     postBuildSucceeded("repo-pinned", "environment/flow-pinned", SHA_B);
 
-    awaitStarted(1);
+    awaitApplied(1);
     awaitWorkerIdle();
-    assertEquals(1, driver.started().size(), "only the environment's branch shipped");
-    assertEquals(SHA_B, driver.started().get(0).commitSha());
+    assertEquals(1, driver.applied().size(), "only the environment's branch shipped");
+    assertEquals(SHA_B, driver.applied().get(0).commitSha());
   }
 
   @Test
@@ -616,7 +506,7 @@ public class PdDeploymentFlowTest {
 
     postBuildSucceeded("repo-planegate", "environment/flow-otherplane", SHA_A);
     awaitWorkerIdle();
-    assertEquals(List.of(), driver.started(), "another tier's branch leaves the plane alone");
+    assertEquals(List.of(), driver.applied(), "another tier's branch leaves the plane alone");
     assertTrue(
         given()
             .when()
@@ -631,163 +521,9 @@ public class PdDeploymentFlowTest {
         "and registers nothing — there is no half-registered state");
 
     postBuildSucceeded("repo-planegate", "environment/flow-thisplane", SHA_B);
-    awaitStarted(1);
-    assertEquals(SHA_B, driver.started().get(0).commitSha());
-    assertNull(driver.started().get(0).environmentId(), "still one instance, on no tier");
-  }
-
-  @Test
-  public void aNewApplicationNetworkGetsTheHubAndEveryPlatformContainerJoinedToIt() {
-    // The reconciliation: the network did not exist a moment ago, so nobody is on it. What the
-    // application needs there is the environment's public nodes and every platform service —
-    // found by container label, because docker is the membership bookkeeping.
-    String environmentId = createEnvironment("flow-reconcile");
-    driver.scriptHubContainers(
-        List.of(new DockerHost.Endpoint("hub-id", "qits-gateway")));
-    driver.scriptPlatformContainers(
-        List.of(new DockerHost.Endpoint("idp-id", "qits-idp")));
-    postBuildSucceeded("repo-rec", "environment/flow-reconcile", SHA_A);
-
-    awaitDeployments(environmentId, 1);
-    // Each of them joins under ITS OWN wire alias: the hub is one of this environment's containers,
-    // so the tier qualifies it; the platform service is on no tier and keeps its bare name. The
-    // label carries the application name alone, so the qualifier is put back here.
-    assertTrue(
-        driver
-            .connections()
-            .contains("qits-env-flow-reconcile-repo-rec:hub-id:flow-reconcile-qits-gateway"),
-        driver.connections().toString());
-    assertTrue(
-        driver.connections().contains("qits-env-flow-reconcile-repo-rec:idp-id:qits-idp"),
-        driver.connections().toString());
-  }
-
-  @Test
-  public void anApplicationNetworkThatOutlivedAFailedDeployIsStillReconciled() {
-    // The network is made before the container starts, so a deployment that failed to start leaves
-    // it behind with nobody on it. The next deploy does NOT create it, and if that were the
-    // reconciliation's trigger the application would stay unreachable from the gateway and from
-    // every platform service for as long as no hub happened to redeploy.
-    String environmentId = createEnvironment("flow-reheal");
-    driver.scriptExistingNetwork(
-        new DeploymentDriver.Network(
-            "qits-env-flow-reheal-repo-reheal",
-            environmentId,
-            DeploymentDriver.NetworkKind.APPLICATION,
-            "repo-reheal"));
-    driver.scriptHubContainers(List.of(new DockerHost.Endpoint("hub-id", "qits-gateway")));
-    driver.scriptPlatformContainers(
-        List.of(new DockerHost.Endpoint("pd-id", "qits-platform-deployments")));
-    postBuildSucceeded("repo-reheal", "environment/flow-reheal", SHA_A);
-
-    awaitDeployments(environmentId, 1);
-    assertTrue(
-        driver
-            .connections()
-            .contains("qits-env-flow-reheal-repo-reheal:hub-id:flow-reheal-qits-gateway"),
-        "the hub is put back on a network it should already be on: " + driver.connections());
-    assertTrue(
-        driver
-            .connections()
-            .contains("qits-env-flow-reheal-repo-reheal:pd-id:qits-platform-deployments"),
-        "and so is every platform service: " + driver.connections());
-  }
-
-  @Test
-  public void anUnlabelledAliasHolderIsAdoptedAsThePredecessor() {
-    // The migration case, stated as its own test: a container the previous cd (or the bootstrap's
-    // compose) started carries no environment label at all, and it is exactly the one a deployment
-    // has to replace rather than run beside.
-    String environmentId = createEnvironment("flow-adopt");
-    driver.scriptAliasHolders(
-        List.of(new DockerHost.Holder("aa".repeat(32), "seeded-original", null)));
-    postBuildSucceeded("repo-adopt", "environment/flow-adopt", SHA_A);
-
-    awaitDeployments(environmentId, 1);
-    assertEquals(List.of("seeded-original"), driver.stoppedContainers());
-    assertTrue(driver.removedContainers().contains("seeded-original"));
-  }
-
-  @Test
-  public void anAliasHolderOfThisEnvironmentIsReplacedAndOneOfAnotherIsLeftAlone() {
-    // The union search covers the legacy network, and every tier is on it — so it returns another
-    // environment's copy of the same application, healthy, under the same alias. Stopping that one
-    // would be a deployment of one tier reaching into another; the environment label is what keeps
-    // this deployment to its own.
-    String environmentId = createEnvironment("flow-scope");
-    driver.scriptAliasHolders(
-        List.of(
-            new DockerHost.Holder("bb".repeat(32), "mine", environmentId),
-            new DockerHost.Holder("cc".repeat(32), "another-tiers", "some-other-env-id")));
-    postBuildSucceeded("repo-scope", "environment/flow-scope", SHA_A);
-
-    awaitDeployments(environmentId, 1);
-    assertEquals(List.of("mine"), driver.stoppedContainers(), "only this environment's copy");
-    assertTrue(driver.removedContainers().contains("mine"));
-    assertTrue(
-        driver.stoppedContainers().stream().noneMatch("another-tiers"::equals)
-            && driver.removedContainers().stream().noneMatch("another-tiers"::equals),
-        "the other tier's container is untouched: " + driver.calls());
-  }
-
-  @Test
-  public void aPlatformDeploymentNeverTakesAnEnvironmentsContainerAsItsPredecessor() {
-    // A platform service belongs to no tier, so a container carrying a tier's id is never its
-    // predecessor — while an unlabelled one still is, because that is what its own live migration
-    // off the legacy network depends on.
-    createPlatformEnvironment("flow-plane");
-    specs.script(
-        "repo-plane", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
-    driver.scriptAliasHolders(
-        List.of(
-            new DockerHost.Holder("dd".repeat(32), "an-env-copy", "some-env-id"),
-            new DockerHost.Holder("ee".repeat(32), "the-old-unlabelled-one", null)));
-    postBuildSucceeded("repo-plane", "environment/flow-plane", SHA_A);
-
-    awaitStarted(1);
-    awaitWorkerIdle();
-    assertEquals(List.of("the-old-unlabelled-one"), driver.stoppedContainers());
-    assertTrue(
-        driver.removedContainers().stream().noneMatch("an-env-copy"::equals),
-        "the environment's container is not the platform plane's to take: " + driver.calls());
-  }
-
-  @Test
-  public void aRefusedJoinFailsTheDeploymentAndPutsThePredecessorBack() {
-    // The health gate curls localhost INSIDE the container, so it passes just as happily on a
-    // network nobody else is on: a join cd asked for and did not get can only be caught here. The
-    // rollback is the failed-gate one — the fresh container goes, the predecessor serves again.
-    String environmentId = createEnvironment("flow-nojoin");
-    driver.scriptAliasHolders(
-        List.of(new DockerHost.Holder("ff".repeat(32), "still-serving", environmentId)));
-    driver.scriptRefusedJoin("qits-net", "Error response from daemon: network qits-net not found");
-    postBuildSucceeded("repo-nojoin", "environment/flow-nojoin", SHA_A);
-
-    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
-    assertEquals("FAILED", deployments.get(0).get("status"));
-    assertTrue(
-        ((String) deployments.get(0).get("detail")).contains("network qits-net not found"),
-        "docker's own words are on the row: " + deployments.get(0).get("detail"));
-    String fresh = driver.started().get(0).containerName();
-    assertTrue(driver.removedContainers().contains(fresh), "the fresh container was removed");
-    assertEquals(List.of("still-serving"), driver.restartedContainers());
-    // Never gated: an unreachable container has nothing to prove.
-    assertEquals(List.of(), driver.awaited());
-  }
-
-  @Test
-  public void thePredecessorSearchCoversTheLegacyNetworkTooDuringTheMigration() {
-    // The union IS the migration: today's containers hold their alias on qits-net and on no
-    // per-application network at all, so a search of the new networks alone would start a second
-    // copy beside the one that is serving.
-    String environmentId = createEnvironment("flow-union");
-    postBuildSucceeded("repo-union", "environment/flow-union", SHA_A);
-    awaitDeployments(environmentId, 1);
-
-    assertTrue(
-        driver.aliasSearches().stream()
-            .anyMatch(s -> s.contains("qits-env-flow-union-repo-union") && s.contains("qits-net")),
-        "the search covers the primary and the legacy network: " + driver.aliasSearches());
+    awaitApplied(1);
+    assertEquals(SHA_B, driver.applied().get(0).commitSha());
+    assertNull(driver.applied().get(0).environmentId(), "still one instance, on no tier");
   }
 
   @Test
@@ -802,7 +538,7 @@ public class PdDeploymentFlowTest {
     specs.script(
         "repo-convert", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-convert", "environment/flow-convert", SHA_B);
-    awaitStarted(2);
+    awaitApplied(2);
 
     List<Map<String, Object>> registered =
         given()
@@ -846,7 +582,7 @@ public class PdDeploymentFlowTest {
     specs.script(
         "repo-unflip", new SpecSource.DeploymentSpec(PdDeploymentTarget.PLATFORM, false, null, null, null, null));
     postBuildSucceeded("repo-unflip", "environment/flow-unflip", SHA_A);
-    awaitStarted(1);
+    awaitApplied(1);
 
     // The file goes back to saying `environment`, on the tier's own branch this time.
     specs.script(
@@ -869,7 +605,7 @@ public class PdDeploymentFlowTest {
             .toList();
     assertEquals(1, rows.size(), "still one row, still the platform service: " + rows);
     assertEquals("PLATFORM", rows.get(0).get("target"));
-    assertEquals(1, driver.started().size(), "the refused build started nothing");
+    assertEquals(1, driver.applied().size(), "the refused build deployed nothing");
 
     // ...and the refusal is on the record, naming the flip.
     PdDeployment refused = deploymentOf("repo-unflip", null, SHA_B);
@@ -954,8 +690,8 @@ public class PdDeploymentFlowTest {
         ((String) deployments.get(0).get("detail")).contains("the git host answered 500"),
         "the cause is on the row: " + deployments.get(0).get("detail"));
     // Nothing was pulled and nothing started — cd never guesses a topology.
-    assertEquals(List.of(), driver.pulledRefs());
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.pulled());
+    assertEquals(List.of(), driver.applied());
     // ...and what was serving is still serving.
     assertEquals("ACTIVE", deployments.get(1).get("status"));
   }
@@ -968,7 +704,7 @@ public class PdDeploymentFlowTest {
 
     awaitWorkerIdle();
     awaitDeployments(environmentId, 0);
-    assertEquals(List.of(), driver.pulledRefs());
+    assertEquals(List.of(), driver.pulled());
   }
 
   @Test

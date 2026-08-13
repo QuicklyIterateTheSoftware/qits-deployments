@@ -8,8 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeploymentStatus;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
-import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
@@ -37,7 +35,7 @@ public class PdDeploymentObservationTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeploymentObserver observer;
@@ -111,7 +109,7 @@ public class PdDeploymentObservationTest {
             PdDeploymentStatus.FAILED,
             container,
             "[unexpected: JDBCConnectionException: Unable to acquire JDBC Connection]");
-    driver.scriptContainerState(container, "running/healthy");
+    driver.scriptObservation(container, "running/healthy");
 
     observer.observeOnce();
 
@@ -124,8 +122,8 @@ public class PdDeploymentObservationTest {
     assertTrue(
         row.detail.contains("JDBCConnectionException"),
         "the original failure is kept, not erased — it is the diagnosis: " + row.detail);
-    // Rows only. A recovery is bookkeeping, and this class starts, stops and removes nothing.
-    assertNoContainerWasTouched();
+    // Rows only. A recovery is bookkeeping, and this class applies, reaps and removes nothing.
+    assertNothingWasTouched();
   }
 
   @Test
@@ -139,7 +137,7 @@ public class PdDeploymentObservationTest {
             PdDeploymentStatus.FAILED,
             "qits-pd-prod-obs-foreign-deadbeef",
             "[container exited]");
-    driver.scriptContainerState("qits-pd-prod-obs-foreign-somebodyelse", "running/healthy");
+    driver.scriptObservation("qits-pd-prod-obs-foreign-somebodyelse", "running/healthy");
 
     observer.observeOnce();
 
@@ -170,7 +168,7 @@ public class PdDeploymentObservationTest {
     assertTrue(
         row.detail.contains("qits-pd-prod-obs-vanished-00000001"),
         "and names what it observed: " + row.detail);
-    assertNoContainerWasTouched();
+    assertNothingWasTouched();
   }
 
   @Test
@@ -179,7 +177,7 @@ public class PdDeploymentObservationTest {
     String container = "qits-pd-prod-obs-exited-00000002";
     String active =
         deployment("obs-exited", "env-obs-exited", PdDeploymentStatus.ACTIVE, container, null);
-    driver.scriptContainerState(container, "exited/unhealthy");
+    driver.scriptObservation(container, "exited/unhealthy");
 
     observer.observeOnce();
     observer.observeOnce();
@@ -201,8 +199,8 @@ public class PdDeploymentObservationTest {
             "obs-restarting", "env-obs-patience", PdDeploymentStatus.ACTIVE, restarting, null);
     String unhealthyRow =
         deployment("obs-unhealthy", "env-obs-patience", PdDeploymentStatus.ACTIVE, unhealthy, null);
-    driver.scriptContainerState(restarting, "restarting/unhealthy");
-    driver.scriptContainerState(unhealthy, "running/unhealthy");
+    driver.scriptObservation(restarting, "restarting/unhealthy");
+    driver.scriptObservation(unhealthy, "running/unhealthy");
 
     observer.observeOnce();
     observer.observeOnce();
@@ -228,8 +226,8 @@ public class PdDeploymentObservationTest {
     String newerContainer = "qits-pd-prod-obs-history-00000006";
     String newer =
         deployment("obs-history", "env-obs-history", PdDeploymentStatus.ACTIVE, newerContainer, null);
-    driver.scriptContainerState(olderContainer, "running/healthy");
-    driver.scriptContainerState(newerContainer, "running/healthy");
+    driver.scriptObservation(olderContainer, "running/healthy");
+    driver.scriptObservation(newerContainer, "running/healthy");
 
     observer.observeOnce();
 
@@ -252,7 +250,7 @@ public class PdDeploymentObservationTest {
             PdDeploymentStatus.STARTING,
             "qits-pd-s-00000008",
             null);
-    driver.scriptContainerState("qits-pd-s-00000008", "running/healthy");
+    driver.scriptObservation("qits-pd-s-00000008", "running/healthy");
 
     observer.observeOnce();
     observer.observeOnce();
@@ -278,7 +276,7 @@ public class PdDeploymentObservationTest {
             PdDeploymentStatus.FAILED,
             container,
             "[unexpected: JDBCConnectionException …]");
-    driver.scriptContainerState(container, "running/healthy");
+    driver.scriptObservation(container, "running/healthy");
 
     observer.observeOnce();
 
@@ -287,7 +285,7 @@ public class PdDeploymentObservationTest {
         "DECOMMISSIONED", statusOf(predecessor), "one ACTIVE row per (application, tier), still");
     // ...and its container was NOT reaped. The startup sweep's stance: whatever still holds the
     // alias is absorbed by the next deployment's predecessor search.
-    assertNoContainerWasTouched();
+    assertNothingWasTouched();
   }
 
   @Test
@@ -296,26 +294,21 @@ public class PdDeploymentObservationTest {
     // an uncontended read during a cutover. The deployment here is deliberately slow (a container
     // that restarts its way into health), and the pass is enqueued while it runs: every observation
     // has to land AFTER the deployment's last driver call, not between two of them.
-    String environmentId =
-        given()
-            .contentType(ContentType.JSON)
-            .body(Map.of("name", "obs-serial", "platform", false))
-            .when()
-            .post("/platform-deployments/api/environments")
-            .then()
-            .statusCode(201)
-            .extract()
-            .path("environment.id");
+    given()
+        .contentType(ContentType.JSON)
+        .body(Map.of("name", "obs-serial", "platform", false))
+        .when()
+        .post("/platform-deployments/api/environments")
+        .then()
+        .statusCode(201);
     // Two rows of this test's own, so a pass makes more than one observation and an interleaving
     // would be visible.
     deployment(
         "obs-serial-a", "env-obs-serial", PdDeploymentStatus.ACTIVE, "qits-pd-obs-serial-a", null);
     deployment(
         "obs-serial-b", "env-obs-serial", PdDeploymentStatus.ACTIVE, "qits-pd-obs-serial-b", null);
-    // A predecessor to remove, so the deployment's own last driver call is unambiguous.
-    driver.scriptAliasHolders(
-        List.of(new DockerHost.Holder("ab".repeat(32), "obs-serial-predecessor", environmentId)));
-    driver.scriptRestartingUntilHealthy(40);
+    // The deployment is deliberately slow to converge, so the pass is enqueued while it runs.
+    driver.scriptConvergeDelay(java.time.Duration.ofMillis(400));
 
     given()
         .contentType(ContentType.JSON)
@@ -334,7 +327,14 @@ public class PdDeploymentObservationTest {
     awaitWorkerIdle();
 
     List<String> calls = driver.calls();
-    int lastDeployCall = calls.indexOf("remove:obs-serial-predecessor");
+    // The reap is the deployment's last driver call, and it happens after the rows — empty under
+    // swarm, where a replace is in place, but made all the same.
+    int lastDeployCall = -1;
+    for (int i = 0; i < calls.size(); i++) {
+      if (calls.get(i).startsWith("reap:")) {
+        lastDeployCall = i;
+      }
+    }
     assertTrue(lastDeployCall >= 0, "the deployment ran to its cutover: " + calls);
     List<Integer> observations = new java.util.ArrayList<>();
     for (int i = 0; i < calls.size(); i++) {
@@ -349,14 +349,14 @@ public class PdDeploymentObservationTest {
   }
 
   /**
-   * The reaping stance, asserted rather than trusted: the observer writes rows and does nothing to a
-   * container. It is the startup sweep's rule, and it matters more here — this runs forever, beside a
+   * The reaping stance, asserted rather than trusted: the observer writes rows and touches no
+   * service. It is the startup sweep's rule, and it matters more here — this runs forever, beside a
    * live platform.
    */
-  private void assertNoContainerWasTouched() {
-    assertEquals(List.of(), driver.started(), "nothing was started");
-    assertEquals(List.of(), driver.stoppedContainers(), "nothing was stopped");
-    assertEquals(List.of(), driver.removedContainers(), "nothing was removed");
+  private void assertNothingWasTouched() {
+    assertEquals(List.of(), driver.applied(), "nothing was applied");
+    assertEquals(List.of(), driver.reaped(), "nothing was reaped");
+    assertEquals(List.of(), driver.removedNetworks(), "and no network was touched");
   }
 
   /** Drain the worker — the pass is queued behind the event, so idle means both are done. */

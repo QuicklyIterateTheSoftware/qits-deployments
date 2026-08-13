@@ -28,9 +28,8 @@ import java.util.Set;
  * {@code start-first} overlaps the successor with the predecessor, which is what makes a rollback
  * lossless; {@code stop-first} is the opt-out for an application that cannot be two processes at
  * once — one binder per published host port, one writer per store, one holder of a config volume.
- * The docker path is stop-first by construction and reads the key without using it; under swarm it
- * is {@code --update-order}. A repository that says nothing gets {@code start-first}, so an
- * application that must not overlap has to say so.
+ * It reaches the orchestrator as {@code --update-order}. A repository that says nothing gets
+ * {@code start-first}, so an application that must not overlap has to say so.
  *
  * <p><b>{@code health_cmd} and {@code health_path} are alternatives, and setting both is an
  * error.</b> They are not two settings on one gate: the path names a URL a {@code curl} inside the

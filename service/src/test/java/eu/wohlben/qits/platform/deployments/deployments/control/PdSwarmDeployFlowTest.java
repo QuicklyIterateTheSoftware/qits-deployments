@@ -8,11 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.eventstream.entity.OutboxEvent;
-import eu.wohlben.qits.platform.deployments.swarmhost.SwarmDeploymentDriver;
-import io.quarkus.arc.ClientProxy;
 import io.quarkus.hibernate.orm.PersistenceUnit;
 import io.quarkus.narayana.jta.QuarkusTransaction;
-import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -25,14 +22,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * A deployment on the <b>swarm</b> path, end to end through the real intake and the real worker.
+ * A deployment end to end through the real intake and the real worker, with the seam's own answers
+ * scripted one at a time.
  *
  * <p>What it is about is that there is nothing orchestrator-shaped left in {@link DeployService}:
- * with {@code qits.platform.deployments.orchestrator=swarm} the same four status transitions happen
- * in the same order, the same four events are announced, and the driver is asked exactly the two
- * questions the seam has — apply this spec, did it converge. So the driver here is {@link
- * FakeDeploymentDriver}, installed per test: a fake orchestrator is the sharpest way to assert that
- * the state machine needs no particular one.
+ * the four status transitions happen in the same order whatever the driver says, the four events
+ * are announced, and the driver is asked exactly the two questions the seam has — apply this spec,
+ * did it converge. The three answers {@code apply} and {@code awaitConverged} can give are one test
+ * each, which is what makes this the state machine's own suite rather than swarm's.
  *
  * <p>The bus is on and aimed at a closed port, the {@code PdDeployPublishTest} arrangement: every
  * published event lands as exactly one {@code outbox_event} row with the payload it would have been
@@ -48,7 +45,6 @@ public class PdSwarmDeployFlowTest {
     @Override
     public Map<String, String> getConfigOverrides() {
       return Map.of(
-          "qits.platform.deployments.orchestrator", "swarm",
           "qits.eventstream.enabled", "true",
           // Nothing answers here, so the inline attempt costs no wall time and the event lands in
           // the outbox rather than on a socket.
@@ -59,7 +55,7 @@ public class PdSwarmDeployFlowTest {
   }
 
   @Inject DeployService deployService;
-  @Inject DeploymentDriver driver;
+  @Inject FakeDeploymentDriver fake;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
 
@@ -67,29 +63,17 @@ public class PdSwarmDeployFlowTest {
   @PersistenceUnit("eventstream")
   EntityManager outbox;
 
-  private FakeDeploymentDriver fake;
-
   @BeforeEach
   void reset() {
     specs.reset();
     provisioner.reset();
-    fake = new FakeDeploymentDriver();
+    fake.reset();
     QuarkusTransaction.requiringNew()
         .run(() -> outbox.createQuery("delete from OutboxEvent").executeUpdate());
   }
 
   @Test
-  public void theConfiguredOrchestratorIsTheOneThatDeploys() {
-    // The key is a deployment's answer rather than a build's, so what it selects is worth one
-    // assertion: everything else in this class would pass just as well against the docker driver.
-    assertTrue(
-        ClientProxy.unwrap(driver) instanceof SwarmDeploymentDriver,
-        "orchestrator=swarm selects the swarm driver, got " + ClientProxy.unwrap(driver).getClass());
-  }
-
-  @Test
   public void aGreenBuildAppliesOneServiceAndRecordsItActive() {
-    QuarkusMock.installMockForType(fake, DeploymentDriver.class);
     String environmentId = createEnvironment("swarm-green");
 
     postBuildSucceeded("run-swarm", "repo-swarm-green", "environment/swarm-green");
@@ -104,7 +88,7 @@ public class PdSwarmDeployFlowTest {
     assertEquals(
         List.of("qits-platform-artifacts:8080/qits/repo-swarm-green:" + SHA),
         fake.pulled(),
-        "the missing-image classification is ours on both paths");
+        "the missing-image classification is ours, not the orchestrator's");
     assertEquals(1, fake.applied().size());
     DeploymentDriver.ServiceSpec applied = fake.applied().get(0);
     // The FULL membership in one piece, primary first — an orchestrator that cannot join after the
@@ -135,11 +119,9 @@ public class PdSwarmDeployFlowTest {
 
   @Test
   public void aSecondBuildDecommissionsThePredecessorRowWithoutReapingTheService() {
-    // The half of the cutover that is the same on both paths and the half that is not: the prior
-    // ACTIVE row of this (application, tier) is decommissioned exactly as ever, and NOTHING is
-    // reaped — under swarm the predecessor and the successor are one service, and removing "the old
-    // one" would remove the deployment that just went live.
-    QuarkusMock.installMockForType(fake, DeploymentDriver.class);
+    // The prior ACTIVE row of this (application, tier) is decommissioned, and NOTHING is reaped:
+    // the predecessor and the successor are one service, so removing "the old one" would remove
+    // the deployment that just went live.
     String environmentId = createEnvironment("swarm-cutover");
     postBuildSucceeded("run-a", "repo-swarm-cutover", "environment/swarm-cutover");
     awaitSettled(environmentId, 1);
@@ -160,7 +142,6 @@ public class PdSwarmDeployFlowTest {
   public void aRolledBackUpdateIsAFailedDeploymentCarryingSwarmsOwnWords() {
     // The measured failure path under start-first: the predecessor kept serving, swarm reverted the
     // spec by itself, and what is left for this component to do is the row and the event.
-    QuarkusMock.installMockForType(fake, DeploymentDriver.class);
     fake.scriptConvergence(
         DeploymentDriver.Convergence.rolledBack(
             "swarm rolled dev-repo-swarm-sick back to its predecessor: rollback completed"));
@@ -181,10 +162,9 @@ public class PdSwarmDeployFlowTest {
 
   @Test
   public void aSelfUpdateLeavesTheRowStartingForWhoeverSurvives() {
-    // Under swarm the manager arbitrates: it stops this task, starts the successor and reverts
-    // the spec if the successor never goes healthy. So the driver hands the deployment over, and
-    // this component records nothing — the row is settled by the instance that boots next.
-    QuarkusMock.installMockForType(fake, DeploymentDriver.class);
+    // The manager arbitrates: it stops this task, starts the successor and reverts the spec if the
+    // successor never goes healthy. So the driver hands the deployment over, and this component
+    // records nothing — the row is settled by the instance that boots next.
     fake.scriptApply(
         new DeploymentDriver.ApplyResult(
             DeploymentDriver.ApplyOutcome.HANDED_OFF, "the swarm manager arbitrates"));

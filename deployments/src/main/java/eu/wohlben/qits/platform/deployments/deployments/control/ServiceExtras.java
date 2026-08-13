@@ -13,7 +13,7 @@ import org.eclipse.microprofile.config.Config;
  * What one application needs beyond its image — mounts, published ports, extra groups, extra
  * environment — as deployment config states it, and as a driver reads it.
  *
- * <p><b>This is the contract, and it is structured because there are two orchestrators.</b> It
+ * <p><b>This is the contract, and it is structured rather than free-form.</b> It
  * replaces {@code qits.platform.deployments.run-args.<application>}, a free-form {@code docker run}
  * argv that was whitespace split and appended verbatim. That was justified by "the argv is docker's
  * vocabulary"; it stopped being true the moment a service create had to render the same intent —
@@ -122,10 +122,9 @@ public record ServiceExtras(
    * Read one application's extras. Only keys under its own prefix are looked at, and every one of
    * them has to parse.
    *
-   * <p>Called twice per deployment on the docker path — once to render the argv, once by the
-   * driver's own precheck — and that is deliberate: it is a pure function of config, so the two
-   * agree, and a refusal that arrives before the cutover stops the predecessor is a deployment that
-   * changed nothing.
+   * <p>Called more than once per deployment, and that is deliberate: it is a pure function of
+   * config, so every reading agrees, and a refusal that arrives before anything is applied is a
+   * deployment that changed nothing.
    */
   public static ServiceExtras of(Config config, String application) {
     String prefix = DeploymentDriver.EXTRAS_PREFIX + application + ".";

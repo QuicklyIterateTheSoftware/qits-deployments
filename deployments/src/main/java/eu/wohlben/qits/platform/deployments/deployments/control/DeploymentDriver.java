@@ -11,14 +11,13 @@ import java.util.Optional;
  * {@code service/} owns the implementations, and the suites install a scripted fake so a clone's
  * {@code mvn verify} needs no docker.
  *
- * <p><b>There are two implementations now, chosen by {@code
- * qits.platform.deployments.orchestrator} ({@code docker} — the default — or {@code swarm}).</b>
- * That is what reshaped this interface. It used to be docker's own vocabulary written out: {@code
- * start} one container, {@code stop} and {@code restart} the predecessors, {@code connect} each
- * network after the fact, and a caller in {@link DeployService} that sequenced all of it. Every one of those verbs is a statement about how <i>docker</i> replaces a
- * container, and swarm replaces one by updating a service in place — so keeping them here would
- * have made one orchestrator's model look like the contract, and left the other implementing verbs
- * it has no use for.
+ * <p><b>A second orchestrator is what reshaped this interface, and only one is left.</b> It used
+ * to be docker's own vocabulary written out: {@code start} one container, {@code stop} and {@code
+ * restart} the predecessors, {@code connect} each network after the fact, and a caller in {@link
+ * DeployService} that sequenced all of it. Every one of those verbs is a statement about how one
+ * orchestrator replaces a container rather than about deploying, so keeping them would have made
+ * that model look like the contract. They went, the by-hand path went after them, and the shape
+ * they left is the one worth keeping: a driver states outcomes, never mechanics.
  *
  * <p><b>So the seam is now two verbs and the rest is bookkeeping</b>: {@link #apply(ServiceSpec)}
  * makes the described service exist at the described image, and {@link #awaitConverged} says
@@ -30,7 +29,7 @@ import java.util.Optional;
  * nothing about environments or deployments; it applies a spec, watches it converge, and makes and
  * removes networks.
  *
- * <p><b>Docker is the membership bookkeeping, on both paths.</b> Which service sits on which
+ * <p><b>Docker is the membership bookkeeping.</b> Which service sits on which
  * network is never stored in this component's database — it is read back from the labels below.
  * One record of the truth, and it is the runtime's, so a row cannot describe a topology the
  * runtime does not have.
@@ -45,7 +44,10 @@ import java.util.Optional;
  */
 public interface DeploymentDriver {
 
-  /** The config key that picks the implementation: {@code docker} (default) or {@code swarm}. */
+  /**
+   * The config key that has to say {@code swarm}. It picked between two implementations once and is
+   * a guard now — see {@code orchestration/DeploymentDrivers}.
+   */
   String ORCHESTRATOR_KEY = "qits.platform.deployments.orchestrator";
 
   /**
@@ -101,8 +103,8 @@ public interface DeploymentDriver {
    * labels it has: adopting an unlabelled network made outside this component (the platform's own
    * {@code qits-net}, or one a retired qits-cd labelled) stays supported, deliberately.
    *
-   * <p>The driver decides the network's <b>driver</b>: a local bridge on the docker path, an
-   * attachable overlay under swarm, where a bridge cannot carry a service at all.
+   * <p>The driver decides the network's <b>driver</b>: an attachable overlay, because a bridge
+   * cannot carry a service at all.
    */
   boolean ensureNetwork(Network spec);
 
@@ -117,12 +119,11 @@ public interface DeploymentDriver {
    * them.
    *
    * <p>It is one call rather than the {@code platformContainers} + {@code disconnect} pair it
-   * replaces, because the pair was docker's answer and not the question. The question is "these
-   * networks are about to go; the platform plane is on them and does not belong to the tier that
-   * owns them". On the docker path that is a {@code network disconnect} per platform container; a
-   * swarm service declares its networks when it is created and a teardown does not reshape one, so
-   * there the honest answer is to do nothing and let the removal's own retry loop wait for the
-   * tasks to go.
+   * replaces, because the pair was one orchestrator's answer and not the question. The question is
+   * "these networks are about to go; the platform plane is on them and does not belong to the tier
+   * that owns them". A swarm service declares its networks when it is created and a teardown does
+   * not reshape one, so the honest answer today is to do nothing and let the removal's own retry
+   * loop wait for the tasks to go. It stays a verb because the question outlives the answer.
    */
   void detachPlatformPlane(List<String> networks);
 
@@ -132,10 +133,10 @@ public interface DeploymentDriver {
   /**
    * Pull the reference so a missing image is its own recorded outcome.
    *
-   * <p><b>It survives the move to swarm even though swarm pulls on its own</b>: the pull is not how
-   * the image gets to the host, it is how "nothing published this application yet" is told apart
-   * from "the deployment failed". A service create would report the same condition as a task that
-   * never starts, minutes later, with the registry's words buried in a task error.
+   * <p><b>It survives even though swarm pulls on its own</b>: the pull is not how the image gets
+   * to the host, it is how "nothing published this application yet" is told apart from "the
+   * deployment failed". A service create would report the same condition as a task that never
+   * starts, minutes later, with the registry's words buried in a task error.
    */
   PullResult pull(String imageRef);
 
@@ -144,11 +145,11 @@ public interface DeploymentDriver {
    * deployment row records, and what {@link #awaitConverged}, {@link #observe} and {@link #reap}
    * are asked about afterwards.
    *
-   * <p><b>The two answers differ, and the difference is the migration in one line.</b> Docker names
-   * a fresh container per deployment ({@code qits-pd-<env>-<app>-<id8>}) because a replace is two
-   * containers that must not collide, and the address peers dial is a {@code --network-alias} on
-   * top. A swarm service's name <b>is</b> the address — {@code container_name} does not exist there
-   * — so the name is the wire alias and a replace is an update of that one service.
+   * <p><b>A swarm service's name IS the address</b> — {@code container_name} does not exist there
+   * — so the name is the wire alias and a replace is an update of that one service. The by-hand
+   * path named a fresh container per deployment instead ({@code qits-pd-<env>-<app>-<id8>}),
+   * because a replace was two containers that must not collide; that name is still derived and
+   * still on the spec, because it is what a person greps the host for.
    *
    * <p>It is asked <b>before</b> {@link #apply}, because the row has to name the thing before
    * anything starts: a crash between the two leaves a {@code STARTING} row the startup sweep can
@@ -160,11 +161,11 @@ public interface DeploymentDriver {
    * Make the described service exist, at the described image, on the described networks — creating
    * it or updating it in place, and idempotent either way.
    *
-   * <p><b>This is where each orchestrator's replace lives.</b> The docker implementation runs the
-   * whole hand-rolled cutover behind this one call (find whoever holds the alias, stop it, run the
-   * fresh container, join it to every other network, reconcile the hubs); the swarm one is a
-   * single {@code service create}-or-{@code update} carrying the full network list, because
-   * declaring membership at create time is the only way to have it without a task restart.
+   * <p><b>This is where the replace lives.</b> It is a single {@code service create}-or-{@code
+   * update} carrying the full network list, because declaring membership at create time is the only
+   * way to have it without a task restart. Anything an orchestrator does by hand instead — find
+   * whoever holds the alias, stop it, join the successor to every network, put the loser back —
+   * belongs behind this one call and never above it.
    *
    * <p>Returning is not success: {@link #awaitConverged} is where the outcome is. What returning
    * <i>does</i> settle is whether this deployment is still this process's to finish — see {@link
@@ -175,11 +176,9 @@ public interface DeploymentDriver {
   /**
    * Park until the applied service is serving, is back on its predecessor, or the deadline passes.
    *
-   * <p>The verdict is the orchestrator's own: docker's health gate polled by this component
-   * ({@link HealthGate}, with the rollback of a failed gate performed by the driver that stopped
-   * the predecessor), or swarm's {@code UpdateStatus} — {@code completed}, {@code
-   * rollback_completed}, {@code paused} — where the rollback already happened without anybody
-   * asking.
+   * <p>The verdict is the orchestrator's own — swarm's {@code UpdateStatus}: {@code completed},
+   * {@code rollback_completed}, {@code paused}, where the rollback already happened without
+   * anybody asking.
    *
    * <p>A failed convergence leaves the world as it was: whatever was serving before is serving
    * again by the time this returns. The caller's remaining job is the row.
@@ -188,10 +187,10 @@ public interface DeploymentDriver {
 
   /**
    * <b>One</b> observation of the named service — docker's {@code <status>/<health>} string, or the
-   * statement that the runtime has no such thing. The same reading {@link #awaitConverged} polls
-   * through on the docker path, and deliberately the same type: {@link DeploymentObserver} settles
-   * a row on {@link HealthGate#healthy}, so "healthy" means to an observation exactly what it means
-   * to a gate, and "gone" is a structural fact rather than a wording match.
+   * statement that the runtime has no such thing. Deliberately the health gate's own type: {@link
+   * DeploymentObserver} settles a row on {@link HealthGate#healthy}, so "healthy" means to an
+   * observation exactly what it means to a gate, and "gone" is a structural fact rather than a
+   * wording match.
    *
    * <p>It exists because a deployment's status used to be written once and never read back against
    * the world. Asking by the <b>name the row itself carries</b> is the point: only the service a
@@ -210,7 +209,9 @@ public interface DeploymentDriver {
    *
    * <p>Under swarm this has nothing to do, and the reason is worth stating rather than
    * discovering: a replace is in place, so the predecessor and the successor are one service and
-   * removing "the old one" would remove the deployment that just went live.
+   * removing "the old one" would remove the deployment that just went live. It stays a verb
+   * because the rows still name what a cutover retired, and an orchestrator that replaced by
+   * creating something new would have that list to act on.
    */
   void reap(List<String> names);
 
@@ -231,7 +232,7 @@ public interface DeploymentDriver {
    *
    * <p><b>The image is the check; {@code detail} is only wording.</b> Swarm's {@code UpdateStatus}
    * holds the most recent update alone, so a later deployment overwrites the verdict of the one a
-   * row is about. Null on the docker path, which has no such field.
+   * row is about.
    */
   Optional<RunningImage> runningImage(String name);
 
@@ -249,13 +250,11 @@ public interface DeploymentDriver {
    * <p>{@code networks} is the <b>full membership</b>, primary first, and declaring it whole is
    * what lets an orchestrator that cannot join afterwards do the job at all: every swarm {@code
    * --network-add} recreates the task, so a hub-and-spoke model built out of joins would turn one
-   * deployment into a restart storm. The docker path still starts on {@code networks.get(0)} and
-   * joins the rest, because {@code docker run} takes exactly one.
+   * deployment into a restart storm.
    *
-   * <p>{@code deploymentName} and {@code wireAlias} are both here because they are two different
-   * facts and only one orchestrator uses each as the name — see {@link #nameOf}. The alias is the
-   * address peers dial and is derived in one place ({@code PdNetworks}) so the run, the joins and
-   * the predecessor search cannot disagree.
+   * <p>{@code deploymentName} and {@code wireAlias} are two different facts and only the second is
+   * the name — see {@link #nameOf}. The alias is the address peers dial and is derived in one place
+   * ({@code PdNetworks}) so nothing that has to agree about an address can disagree.
    *
    * <p>{@code environmentId} and {@code environmentName} are null on a platform service, which is
    * what leaves it without an environment label — an environment teardown reaps by that label, and
@@ -265,8 +264,8 @@ public interface DeploymentDriver {
    * the health path rather than adding to it: an image with no HTTP surface has no path to fetch.
    * Null is every service that has one.
    *
-   * <p>{@code updateOrder} is the repository's, and it is the one field the docker path reads and
-   * ignores: docker's cutover is stop-first by construction. See {@link UpdateOrder}.
+   * <p>{@code updateOrder} is the repository's, and it reaches the orchestrator as {@code
+   * --update-order}. See {@link UpdateOrder}.
    *
    * <p>{@code resources} is what {@code ResourceProvisioning} made exist a moment ago, one entry
    * per resource the repository declared. Empty for every application that stores nothing, which is
@@ -370,10 +369,10 @@ public interface DeploymentDriver {
      * whichever instance is alive to record it — the row stays {@code STARTING} on purpose.
      *
      * <p>Neither instance can arbitrate its own succession: the old is about to stop and the new
-     * cannot boot until it has, so it takes a third party. Swarm has one — the manager lives in the
-     * daemon rather than in a container this process owns — and the docker path has none, which is
-     * why it {@link #REFUSED refuses} a self-update instead. The caller returns without a verdict,
-     * and the next boot's sweep settles the row from what is running ({@link #runningImage}).
+     * cannot boot until it has, so it takes a third party. Swarm has one — the manager lives in
+     * the daemon rather than in a container this process owns — which is what makes a deployment
+     * of this component possible at all. The caller returns without a verdict, and the next boot's
+     * sweep settles the row from what is running ({@link #runningImage}).
      */
     HANDED_OFF,
     /** Nothing runs that did not run before, and {@code detail} says why. */
@@ -395,11 +394,10 @@ public interface DeploymentDriver {
   /**
    * The verdict, and what it left for the caller to clean up.
    *
-   * <p>{@code retired} is what the driver stopped and is done with — the alias holders a docker
-   * cutover replaced. It comes back as data rather than being removed inside the driver so the
-   * order the component has always had survives: <b>rows first, containers after</b>. Empty on a
-   * failure (nothing was retired — it is serving again) and empty under swarm (a replace is in
-   * place).
+   * <p>{@code retired} is what the driver stopped and is done with. It comes back as data rather
+   * than being removed inside the driver so the order the component has always had survives:
+   * <b>rows first, services after</b>. Empty on a failure (nothing was retired — it is serving
+   * again) and empty under swarm, where a replace is in place.
    */
   record Convergence(ConvergenceOutcome outcome, String detail, List<String> retired) {
 

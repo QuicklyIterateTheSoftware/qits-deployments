@@ -31,7 +31,7 @@ partition of the **code**, which is where the partition was always useful.
     deployments/    the execution domain — deployment rows, the deploy orchestration, the rollback
                     pins, the resource registry, the strict spec parser, and the three SEAMS it
                     cannot implement itself.
-    service/        the adapters — JAX-RS for both domains, the docker driver, the git-host spec
+    service/        the adapters — JAX-RS for both domains, the swarm driver, the git-host spec
                     reader, the postgres provisioner, the build-succeeded intake, and the web
                     client.
 
@@ -146,19 +146,17 @@ replayed event can be *older* than one already deployed, the subscriber deploys 
 still the newest for its `(repoId, branch)` and logs the skip otherwise. The POST is deliberately
 not guarded that way: posting a commit is choosing it.
 
-**The cutover invariant.** Whatever holds the application's alias is *stopped* — not removed —
-before the fresh container starts, and *removed* only after the new one passed its health gate. A
-failed deployment (image missing, docker refused, gate expired, a network join refused) removes the
-fresh container and **restarts** what was stopped, so the previous deployment stays `ACTIVE` and
-serving. Stop-before-start is what makes stateful applications deployable at all: one binder per
-published port, one process per single-writer store. The pull happens before the stop, so replacing the OCI
-registry's own application does not depend on it being up mid-cutover.
+**The cutover invariant.** A replace is an update of the service the predecessor already is, so
+there is no second copy to arbitrate between and no predecessor to hunt for: the name IS the
+address. A successor that never goes healthy is reverted by the orchestrator itself
+(`--update-failure-action rollback`), which leaves the previous deployment `ACTIVE` and serving —
+and under `start-first` it never stopped serving at all. `update_order: stop-first` is the opt-out
+for an application that cannot be two processes at once: one binder per published port, one process
+per single-writer store. The pull happens first, so replacing the OCI registry's own application
+does not depend on it being up mid-cutover.
 
-The predecessor is whatever **holds the alias** on any network the fresh container is about to be
-on, including the legacy one — so a container the bootstrap seeded outside any deployer, or one the
-retired qits-cd started, is adopted rather than run beside. The search asks about the wire alias
-*and* the bare application name, because every container started before the tier qualifier existed
-holds only the latter. Every removal is a decision recorded on a deployment row.
+A failed deployment — image missing, the daemon refused, the update never converged — leaves the
+world as it was and says why on the row.
 
 **A status is written by the deployment that earned it, and then observed.** Every thirty seconds
 (`qits.platform.deployments.observe-interval-seconds`, `0` to switch it off) the **latest** row of
@@ -195,10 +193,11 @@ platform service is one instance for the whole platform, so there is nothing to 
 and its repository name carries the plane already (`qits-platform-idp`). Container names follow the
 same shape: `qits-pd-<env>-<app>-<id8>`, and `qits-pd-<app>-<id8>` on the platform plane.
 
-`docker run` takes one network, so everything else is a `network connect --alias <wire alias>` after
-the start — the same alias, so the address resolves on every network the container is on and not
-just the first — and the set is recomputed from docker on every deployment rather than remembered,
-which makes it the self-heal too. **No membership is ever stored in the database.** It is written as
+**Under swarm that model collapses to two overlays**, and deliberately: every `--network-add`
+recreates the task, so a membership joined after the fact would turn one deployment into a restart
+storm. A service declares its whole membership when it is created — the flat attachable overlay
+plus `qits-platform` for the plane — and the per-application networks the state machine still
+computes are dropped, out loud. **No membership is ever stored in the database.** It is written as
 labels under one namespace — `qits.platform.deployments.` + `environment`, `application`,
 `deployment`, `target`, `available-on-env`, `app-name`; networks carry
 `qits.platform.deployments.network=bundle|application|platform` — and read back with
@@ -218,9 +217,11 @@ that can settle it, and the startup sweep does that from what is running: the se
 carrying the row's sha is this deployment serving, another sha is a rollback or a later deployment,
 nothing at all is a deployment a restart interrupted.
 
-**The docker path refuses a self-update** and says so on the row. It used to launch a detached
-referee container to arbitrate; the referee is retired, and this component updates itself under
-`qits.platform.deployments.orchestrator=swarm`.
+**A self-update needs an arbiter outside both instances**, and the swarm manager is one: it lives in
+the daemon rather than in a container this process owns. The by-hand docker path had no such thing —
+it launched a detached referee container, then refused the deployment outright once the referee was
+retired — and it is deleted. `qits.platform.deployments.orchestrator` must say `swarm` or the boot
+fails.
 
 ## What it answers
 

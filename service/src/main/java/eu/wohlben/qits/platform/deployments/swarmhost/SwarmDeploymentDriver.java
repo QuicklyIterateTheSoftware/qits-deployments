@@ -6,10 +6,8 @@ import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdenti
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
-import eu.wohlben.qits.platform.deployments.dockerhost.DockerHost;
 import eu.wohlben.qits.platform.deployments.environments.control.PdIdentifiers;
 import eu.wohlben.qits.platform.deployments.environments.control.PdNetworks;
-import eu.wohlben.qits.platform.deployments.orchestration.Orchestrated;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
@@ -30,13 +28,12 @@ import org.jboss.logging.Logger;
  * The swarm implementation of {@link DeploymentDriver}: a deployed application is a <b>service</b>,
  * and a replace is {@code docker service update --image} on it.
  *
- * <p><b>Almost everything the docker driver does by hand is a flag here.</b> {@code
- * --update-order start-first} is the overlap, {@code --update-monitor} is the gate window, {@code
- * --update-failure-action rollback} is the rollback, and a task does not enter DNS until its
- * healthcheck passes — measured on this host: while a task was {@code Starting}, {@code getent
- * hosts} answered nothing for its name while the VIP already existed. So there is no predecessor to
- * find, nothing to stop, nothing to restart and nobody to referee: this class issues one command
- * and then reads a verdict.
+ * <p><b>The whole cutover is flags.</b> {@code --update-order start-first} is the overlap, {@code
+ * --update-monitor} is the gate window, {@code --update-failure-action rollback} is the rollback,
+ * and a task does not enter DNS until its healthcheck passes — measured on this host: while a task
+ * was {@code Starting}, {@code getent hosts} answered nothing for its name while the VIP already
+ * existed. So there is no predecessor to find, nothing to stop, nothing to restart and nobody to
+ * referee: this class issues one command and then reads a verdict.
  *
  * <p><b>The name is the address, and that is the one thing to keep in mind reading this.</b> {@code
  * container_name} does not exist in swarm — a task container is {@code
@@ -46,10 +43,10 @@ import org.jboss.logging.Logger;
  * the environment teardown) is a service query, never a container name match.
  *
  * <p><b>The topology collapses to two overlays, and it is not a simplification for its own
- * sake.</b> {@code service update --network-add} recreates the task, so the docker path's
- * hub-and-spoke — one network per application, joined after the fact by every hub and every
- * platform service — would turn a single deployment into a restart storm across the platform. So a
- * service declares its whole membership at create time: {@code
+ * sake.</b> {@code service update --network-add} recreates the task, so a hub-and-spoke topology —
+ * one network per application, joined after the fact by every hub and every platform service —
+ * would turn a single deployment into a restart storm across the platform. So a service declares
+ * its whole membership at create time: {@code
  * qits.platform.deployments.swarm.flat-network} (attachable, so plain {@code docker run} containers
  * — CI steps, workspaces, agents — keep working on it) plus {@code qits-platform} for a platform
  * service. The per-application networks the caller asks for are dropped, deliberately and out loud.
@@ -60,10 +57,10 @@ import org.jboss.logging.Logger;
  * is therefore a {@code service rm} and a redeploy, which is the honest reading of it: a change of
  * shape is not a deployment.
  *
- * <p><b>Two verbs are borrowed from the docker seam rather than reimplemented</b>, and neither is
- * swarm-shaped: {@code docker pull} classifies a missing image (swarm pulls on its own, but a task
- * that never starts is a much worse way to learn that nothing published this build), and {@code
- * docker network ls} is the same command whatever created the networks.
+ * <p><b>Two verbs here are not swarm-shaped at all</b>, and they are kept for what they answer:
+ * {@code docker pull} classifies a missing image (swarm pulls on its own, but a task that never
+ * starts is a much worse way to learn that nothing published this build), and {@code docker network
+ * ls} reads the membership bookkeeping back whatever created the networks.
  *
  * <p><b>What a deployment adds beyond its image</b> — mounts, published ports, groups, environment
  * — is {@link ServiceExtras}, stated in deployment config and rendered here in swarm's own words.
@@ -77,7 +74,6 @@ import org.jboss.logging.Logger;
  * rolled-back one.
  */
 @ApplicationScoped
-@Orchestrated(Orchestrated.Kind.SWARM)
 public class SwarmDeploymentDriver implements DeploymentDriver {
 
   private static final Logger LOG = Logger.getLogger(SwarmDeploymentDriver.class);
@@ -142,8 +138,25 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   private static final Set<String> TERMINAL_TASK_STATES =
       Set.of("failed", "rejected", "shutdown", "orphaned", "complete", "remove");
 
+  /**
+   * What docker says when the registry answered "no such image". Matched case-insensitively over
+   * the pull's combined output — brittle by nature (docker's wording is not an API), so the match
+   * errs toward {@code ERROR}: an unrecognized failure is a failed deployment, never a false
+   * "nothing published an image".
+   */
+  private static final List<String> IMAGE_MISSING_MARKERS =
+      List.of(
+          "manifest unknown",
+          "not found",
+          "name unknown",
+          "repository does not exist",
+          "pull access denied");
+
   @ConfigProperty(name = "qits.platform.deployments.container-runtime")
   String runtime;
+
+  @ConfigProperty(name = "qits.platform.deployments.pull-timeout-seconds")
+  long pullTimeoutSeconds;
 
   @ConfigProperty(name = "qits.platform.deployments.health-interval-seconds")
   long healthIntervalSeconds;
@@ -165,9 +178,6 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
 
   /** Looked up per key rather than {@code @ConfigProperty}: the key carries the application name. */
   @Inject Config config;
-
-  /** The two verbs that are the same command under swarm — see the class javadoc. */
-  @Inject DockerHost docker;
 
   /**
    * One docker CLI call. A seam so the suite can script the conversation: the argv IS the contract
@@ -247,7 +257,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       return new ApplyResult(ApplyOutcome.REFUSED, result.output());
     }
     if (self) {
-      // The self-update, and this is the arbiter the docker path never had: the manager lives in
+      // The self-update, and the arbiter is what makes it possible at all: the manager lives in
       // the daemon rather than in a container this process owns, so it can stop this task, start the
       // successor and revert the spec if the successor never goes healthy. Nothing here waits for
       // that — this process is what is being replaced.
@@ -373,8 +383,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * <p>The mapping is swarm's task state, and it carries the health in it rather than beside it: a
    * task is {@code Starting} until its healthcheck passes and {@code Running} afterwards, so
    * {@code running/healthy} and {@code starting/unhealthy} are exact rather than approximate. A
-   * service the daemon does not have is {@code gone}, which is the same structural fact a missing
-   * container is on the docker path.
+   * service the daemon does not have is {@code gone}, which is a structural fact rather than a
+   * wording match.
    */
   @Override
   public HealthGate.Poll observe(String name) {
@@ -568,7 +578,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * <p>A per-application or per-environment network would be a network no service is ever on: the
    * membership is declared at create time and a later join costs a task restart, so building the
    * hub-and-spoke topology under swarm would be paying that price on every deployment. The caller
-   * still asks for them (it is the same state machine on both paths), and the answer here is a
+   * still asks for them (the state machine computes a membership without knowing who runs it),
+   * and the answer here is a
    * debug line rather than an overlay nothing uses.
    */
   @Override
@@ -580,8 +591,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       return false;
     }
     if (run(List.of(runtime, "network", "inspect", spec.name()), CLEANUP_TIMEOUT).exitCode() == 0) {
-      // Already there, labels and all — including one the bootstrap made. Adopting rather than
-      // insisting on labelling is the docker path's stance and holds for the same reason.
+      // Already there, labels and all — including one the bootstrap made. The labels are how this
+      // component FINDS the networks it made, not a claim of ownership over every network.
       return false;
     }
     PdProcess.Result created = run(buildNetworkCreateArgv(spec), CLEANUP_TIMEOUT);
@@ -648,10 +659,74 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     }
   }
 
-  /** {@code docker network ls} is the same command whatever created the networks — see the class javadoc. */
+  /**
+   * Every network this component labelled, read back from the daemon.
+   *
+   * <p>{@code network ls} is the same command whatever created the networks — a bridge a retired
+   * docker path made and an overlay this class made answer it alike — so the labels stay the one
+   * record of the membership.
+   */
   @Override
   public List<Network> networks() {
-    return docker.networks();
+    PdProcess.Result listed =
+        run(
+            List.of(
+                runtime,
+                "network",
+                "ls",
+                "--filter",
+                "label=" + NETWORK_LABEL,
+                "--format",
+                "{{.Name}}|{{.Labels}}"),
+            CLEANUP_TIMEOUT);
+    if (listed.exitCode() != 0) {
+      LOG.debugf("Could not list this component's networks: %s", listed.output());
+      return List.of();
+    }
+    return parseNetworks(listed.output());
+  }
+
+  /** Package-private for the parsing test: one {@code name|k=v,k=v} line per network. */
+  static List<Network> parseNetworks(String output) {
+    List<Network> networks = new ArrayList<>();
+    for (String line : safe(output).split("\\R")) {
+      String[] parts = line.trim().split("\\|", 2);
+      if (parts.length < 2 || parts[0].isEmpty()) {
+        continue;
+      }
+      String environmentId = null;
+      String applicationName = null;
+      NetworkKind kind = null;
+      for (String label : parts[1].split(",")) {
+        int equals = label.indexOf('=');
+        if (equals < 0) {
+          continue;
+        }
+        String key = label.substring(0, equals).trim();
+        String value = label.substring(equals + 1).trim();
+        switch (key) {
+          case ENVIRONMENT_LABEL -> environmentId = value;
+          case APP_NAME_LABEL -> applicationName = value;
+          case NETWORK_LABEL -> kind = kind(value);
+          default -> {
+            /* someone else's label */
+          }
+        }
+      }
+      if (kind != null) {
+        networks.add(new Network(parts[0], environmentId, kind, applicationName));
+      }
+    }
+    return List.copyOf(networks);
+  }
+
+  private static NetworkKind kind(String value) {
+    for (NetworkKind candidate : NetworkKind.values()) {
+      if (candidate.name().equalsIgnoreCase(value)) {
+        return candidate;
+      }
+    }
+    return null;
   }
 
   /**
@@ -691,10 +766,23 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     return ids.size();
   }
 
-  /** Classifying a missing image is ours on both paths — see the class javadoc. */
+  /**
+   * Classifying a missing image is ours, not swarm's — see the class javadoc.
+   *
+   * <p>The wording match is deliberately narrow: anything it does not recognise is {@code ERROR},
+   * so a daemon that is down never reads as "nothing published this build".
+   */
   @Override
   public PullResult pull(String imageRef) {
-    return docker.pull(imageRef);
+    PdProcess.Result result =
+        run(List.of(runtime, "pull", imageRef), Duration.ofSeconds(pullTimeoutSeconds));
+    if (result.exitCode() == 0 && !result.timedOut()) {
+      return new PullResult(PullOutcome.OK, null);
+    }
+    String output = safe(result.output());
+    String lowered = output.toLowerCase(Locale.ROOT);
+    boolean missing = IMAGE_MISSING_MARKERS.stream().anyMatch(lowered::contains);
+    return new PullResult(missing ? PullOutcome.IMAGE_MISSING : PullOutcome.ERROR, output);
   }
 
   // --- the argv ------------------------------------------------------------------------------
@@ -725,8 +813,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--network");
       argv.add(network);
     }
-    // A deployed application outlives the daemon's restart, which is what `unless-stopped` says on
-    // the docker path.
+    // A deployed application outlives the daemon's restart.
     argv.add("--restart-condition");
     argv.add("any");
     for (String label : labels(spec)) {
@@ -785,8 +872,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add(variable);
     }
     for (String variable : ServiceExtras.of(config, spec.applicationName()).env()) {
-      // After this component's own, for the precedence rule the docker path has: the last
-      // assignment of a key wins, so what config says outranks what this component defaults.
+      // After this component's own, which is the precedence rule: the last assignment of a key
+      // wins, so what config says outranks what this component defaults.
       argv.add("--env-add");
       argv.add(variable);
     }
@@ -795,14 +882,13 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
-   * The gate, enforced by docker inside the container exactly as on the docker path — either the
-   * repository's own command, passed through as ONE argv element, or the curl template over an
-   * allowlist-validated path.
+   * The gate, enforced by docker inside the container — either the repository's own command,
+   * passed through as ONE argv element, or the curl template over an allowlist-validated path.
    *
-   * <p>The three timings are the docker path's own keys, and the reason they are shared is that
-   * they describe the same probe. What is <i>not</i> shared is the deadline: under swarm the window
-   * is these plus {@code --update-monitor}, and both want measuring per application rather than
-   * deriving from one platform-wide number.
+   * <p>The three timings are the {@code qits.platform.deployments.health-*} keys, and they describe
+   * the probe alone. The deadline is not among them: the window is these plus {@code
+   * --update-monitor}, and both want measuring per application rather than deriving from one
+   * platform-wide number.
    */
   private void healthFlags(List<String> argv, ServiceSpec spec, String cmdFlag) {
     // Re-validated here, at the last line before the argv, because this is the value that lands
@@ -832,8 +918,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * The cutover, as three flags.
    *
    * <p>{@code --update-failure-action rollback} is not configurable and is not meant to be: a
-   * successor that never goes healthy must leave the platform running whatever it replaced, which
-   * is the invariant the docker path spends a stop and a restart on.
+   * successor that never goes healthy must leave the platform running whatever it replaced.
    */
   private void updateFlags(List<String> argv, ServiceSpec spec, String orderFlag) {
     argv.add(orderFlag);
@@ -845,9 +930,9 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   }
 
   /**
-   * The bookkeeping labels — the same six the docker path writes, because everything that reads
-   * them (the environment teardown, the reconciliation's lookups, a person on the host) reads them
-   * by name and does not care what created them.
+   * The bookkeeping labels — six, and everything that reads them (the environment teardown, a
+   * person on the host) reads them by name and does not care what created them, which is what lets
+   * a container the bootstrap seeded and a service this class made be found the same way.
    */
   private static List<String> labels(ServiceSpec spec) {
     List<String> labels = new ArrayList<>();
@@ -899,8 +984,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
 
   /**
    * {@link ServiceExtras} in {@code service create}'s vocabulary. Only this application's own keys
-   * are read, which is the security property the docker path states the same way: one
-   * application's socket bind cannot ride along on a sibling's deployment.
+   * are read, and that is the security property: one application's socket bind cannot ride along
+   * on a sibling's deployment.
    */
   private void extras(List<String> argv, ServiceExtras extras) {
     for (ServiceExtras.Mount mount : extras.mounts()) {

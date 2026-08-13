@@ -85,15 +85,15 @@ public class EnvironmentOperations {
    * would leave a failed teardown with no row to retry it from. Deleting last means a half-finished
    * teardown is still addressable.
    *
-   * <p>The docker half is best-effort otherwise: a teardown must succeed even when docker already
-   * lost the containers.
+   * <p>The runtime half is best-effort otherwise: a teardown must succeed even when the daemon
+   * already lost the services.
    *
    * <p>The order between the container reap and the network removal is load-bearing too. Platform
    * services live on this environment's per-application networks without belonging to the
    * environment, so they survive the reap and would then hold every network open — docker refuses
    * to remove a network with an endpoint on it. The plane is detached first ({@link
-   * DeploymentDriver#detachPlatformPlane}, which is a disconnect per container on the docker path
-   * and nothing at all under swarm), and only the networks THIS environment owns (its bundle plus
+   * DeploymentDriver#detachPlatformPlane}, which is nothing at all under swarm, where a service's
+   * networks are declared rather than joined), and only the networks THIS environment owns (its bundle plus
    * everything labelled with its id) are removed, so a platform service keeps every other
    * environment it serves.
    *

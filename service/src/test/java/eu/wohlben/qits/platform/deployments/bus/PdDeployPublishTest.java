@@ -12,8 +12,7 @@ import eu.wohlben.qits.eventstream.CausationHeader;
 import eu.wohlben.qits.eventstream.entity.OutboxEvent;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import io.quarkus.hibernate.orm.PersistenceUnit;
@@ -68,7 +67,7 @@ public class PdDeployPublishTest {
     }
   }
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject FakeResourceProvisioner provisioner;
   @Inject DeployService deployService;
@@ -121,9 +120,9 @@ public class PdDeployPublishTest {
       assertEquals(cause, event.parentId, "every event of one deployment names the same cause");
     }
 
-    // The container name is the one fact only the deployer holds — built from the deployment id,
-    // never from the sha, so re-deploying a commit does not collide with what it replaces.
-    String containerName = driver.started().get(0).containerName();
+    // The name is the one fact only the deployer holds: under swarm it is the wire alias, so the
+    // event names the address peers dial rather than something only this host could resolve.
+    String containerName = driver.applied().get(0).wireAlias();
     assertTrue(active.payload.contains("\"containerName\":\"" + containerName + "\""),
         active.payload);
     assertFalse(queued.payload.contains("containerName"), queued.payload);
@@ -160,18 +159,19 @@ public class PdDeployPublishTest {
   }
 
   @Test
-  public void aDeploymentThatFailsItsHealthGateAnnouncesTheGatesOwnWords() {
+  public void aDeploymentThatNeverConvergesAnnouncesTheOrchestratorsOwnWords() {
     String environmentId = createEnvironment("pub-sick");
-    driver.scriptHealth(
-        new HealthGate.Result(false, "container still restarting after 60s"));
+    driver.scriptConvergence(
+        DeploymentDriver.Convergence.failed(
+            "service pub-sick-repo-pub-sick was still updating after 60s"));
 
     postBuildSucceeded("run-pub-sick", "repo-pub-sick", "environment/pub-sick", null);
     awaitSettled(environmentId, 1);
 
     OutboxEvent failed = only("DeploymentFailed");
     assertTrue(failed.payload.contains("\"status\":\"FAILED\""), failed.payload);
-    assertTrue(failed.payload.contains("container still restarting"), failed.payload);
-    assertNull(only("DeploymentActive", 0), "a failed gate leaves the predecessor serving");
+    assertTrue(failed.payload.contains("was still updating"), failed.payload);
+    assertNull(only("DeploymentActive", 0), "a failed convergence leaves the predecessor serving");
   }
 
   // --- helpers ----------------------------------------------------------------------------------

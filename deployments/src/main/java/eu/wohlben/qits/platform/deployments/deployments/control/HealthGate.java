@@ -4,8 +4,16 @@ import java.time.Duration;
 import java.util.function.Supplier;
 
 /**
- * The health gate's semantics, apart from the docker calls that feed it: poll a container's state
- * until it is healthy, until the deadline, or until the container is gone.
+ * The health gate's semantics, apart from the runtime calls that feed it: read a service's state
+ * and say whether it is healthy — and, for a caller that has to wait for one itself, poll until it
+ * is healthy, until the deadline, or until it is gone.
+ *
+ * <p><b>{@link #await} has no caller left</b>, and knowing why saves the next reader a search: it
+ * was the docker path's cutover, which polled a fresh container itself. Swarm reaches its own
+ * verdict ({@code UpdateStatus}), so the seam asks {@code awaitConverged} instead. What the
+ * component still reads is {@link Poll} and {@link #healthy} — {@link DeploymentObserver} settles a
+ * row on exactly that reading. The loop is kept because the patience below is a decision worth not
+ * re-deriving, not because something needs it today.
  *
  * <p><b>Everything short of healthy is PENDING, and that is the whole of this class.</b> The gate
  * used to end the moment docker reported anything other than {@code running/…}: a {@code
@@ -26,19 +34,17 @@ import java.util.function.Supplier;
  * ({@code qits.platform.deployments.health-timeout-seconds}); this change does not extend it by a
  * second, it only stops spending it early.
  *
- * <p><b>The follow-up this makes optional rather than urgent</b>: {@code docker create} → {@code
- * network connect} for every join → {@code docker start} would put the container on all its
- * networks before its first boot, so the race would not happen at all. It is a restructure across
- * the driver seam — the argv stops being a {@code run}, {@code StartSpec} grows the join set, and
- * the cutover's call-order assertions move with it — and a patient gate makes the race self-heal
- * without any of that. Recorded, not done, and the docker path it belongs to is being retired.
+ * <p><b>The race itself is gone with the path.</b> A swarm service declares its whole membership
+ * when it is created, so a first boot never runs before its peers are addressable. The patience
+ * survives it: the same states are read one at a time by the observer, and a container that is
+ * restarting or answering its probe with a failure is still not a dead deployment.
  */
 public final class HealthGate {
 
   private HealthGate() {}
 
   /**
-   * One observation of the container: docker's {@code <status>/<health>} string, or the reason it
+   * One observation of the service: docker's {@code <status>/<health>} string, or the reason it
    * could not be inspected at all.
    *
    * <p>The two are deliberately separate fields rather than a sentinel state string: "gone" is the
@@ -59,10 +65,9 @@ public final class HealthGate {
   /**
    * What a completed gate says: healthy, or why it gave up.
    *
-   * <p>It lives here rather than on a driver interface because the gate is the domain's — the
-   * docker path polls it, and an orchestrator that gates for itself (swarm) never builds one. It
-   * was {@code DeploymentDriver.HealthResult} while docker was the only orchestrator and the seam
-   * carried docker's own vocabulary.
+   * <p>It lives here rather than on a driver interface because the gate is the domain's, and an
+   * orchestrator that gates for itself never builds one. It was {@code
+   * DeploymentDriver.HealthResult} while the seam carried docker's own vocabulary.
    */
   public record Result(boolean healthy, String detail) {}
 

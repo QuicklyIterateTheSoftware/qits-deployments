@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import eu.wohlben.qits.eventstream.CausationHeader;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.entity.PdDeployment;
 import eu.wohlben.qits.platform.deployments.deployments.persistence.PdDeploymentRepository;
@@ -48,7 +48,7 @@ public class PdCausationTest {
 
   private static final String SHA = "c".repeat(40);
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
   @Inject PdBuildSuccessfulSubscriber subscriber;
@@ -69,7 +69,7 @@ public class PdCausationTest {
 
     subscriber.onFrame(
         frame(eventId, Instant.now(), "repo-cause-bus", "environment/cause-bus", SHA));
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals(
         UUID.fromString(eventId),
@@ -89,7 +89,7 @@ public class PdCausationTest {
 
     subscriber.onFrame(
         frame("not-a-uuid", Instant.now(), "repo-cause-odd", "environment/cause-odd", SHA));
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertNull(causeOfDeployment("repo-cause-odd"));
   }
@@ -118,7 +118,7 @@ public class PdCausationTest {
         .post("/platform-deployments/api/events/build-succeeded")
         .then()
         .statusCode(202);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertEquals(UUID.fromString(cause), causeOfDeployment("repo-cause-http"));
   }
@@ -144,7 +144,7 @@ public class PdCausationTest {
         .post("/platform-deployments/api/events/build-succeeded")
         .then()
         .statusCode(202);
-    awaitStarted(1);
+    awaitApplied(1);
 
     assertNull(causeOfDeployment("repo-cause-none"));
   }
@@ -226,16 +226,16 @@ public class PdCausationTest {
         .statusCode(201);
   }
 
-  private void awaitStarted(int count) {
+  private void awaitApplied(int count) {
     long deadline = System.currentTimeMillis() + 15_000;
-    while (driver.started().size() < count && System.currentTimeMillis() < deadline) {
+    while (driver.applied().size() < count && System.currentTimeMillis() < deadline) {
       try {
         Thread.sleep(50);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
-    assertEquals(count, driver.started().size(), "started containers");
+    assertEquals(count, driver.applied().size(), "applied services");
     try {
       deployService.awaitIdle();
     } catch (Exception e) {

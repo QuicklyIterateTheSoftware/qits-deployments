@@ -8,7 +8,7 @@ import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.control.DurableFunnel;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.eventstream.control.EventStreamSubscriber;
-import eu.wohlben.qits.platform.deployments.dockerhost.FakeDockerHost;
+import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
@@ -52,7 +52,7 @@ public class PdEventstreamDarknessTest {
 
   @Inject DurableFunnel funnel;
 
-  @Inject FakeDockerHost driver;
+  @Inject FakeDeploymentDriver driver;
 
   @Inject @Any Instance<QitsDurableEventListener> durableListeners;
 
@@ -78,7 +78,7 @@ public class PdEventstreamDarknessTest {
         DurableFunnel.Result.SKIPPED,
         funnel.offer(theSubscriber(), frame),
         "the funnel is closed while the module is dark — no claim row, no handler");
-    assertEquals(List.of(), driver.started());
+    assertEquals(List.of(), driver.applied());
   }
 
   @Test

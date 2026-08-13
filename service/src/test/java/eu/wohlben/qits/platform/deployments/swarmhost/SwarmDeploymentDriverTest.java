@@ -29,13 +29,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The {@code docker service} argv as assembled, and the verdicts read back out of it — plain JUnit
- * over a scripted process seam, the {@link
- * eu.wohlben.qits.platform.deployments.dockerhost.DockerCliTest} stance: the argv IS the contract
- * with swarm, and asserting it needs no swarm.
+ * over a scripted process seam: the argv IS the contract with swarm, and asserting it needs no
+ * swarm.
  *
- * <p>What is worth testing here is exactly what the docker driver does <i>not</i> do, because swarm
- * does it: the whole membership declared at create time, the update policy that is the cutover, and
- * an {@code UpdateStatus} that already says whether the rollback happened.
+ * <p><b>It is the whole of what a booted application no longer covers.</b> While a hand-rolled
+ * replace lived above this seam, the {@code @QuarkusTest} flow tests drove that choreography for
+ * real against a faked CLI. There is no choreography left — the whole membership is declared at
+ * create time, the update policy IS the cutover, and {@code UpdateStatus} already says whether the
+ * rollback happened — so what a deployment does to a daemon is settled here, one argv at a time.
  */
 class SwarmDeploymentDriverTest {
 
@@ -67,7 +68,7 @@ class SwarmDeploymentDriverTest {
 
   /**
    * An ordinary tier application, asked for the docker-shaped membership the state machine computes
-   * on both paths: its own network first, then the legacy one and its environment's bundle.
+   * without knowing who runs it: its own network first, then the legacy one and its bundle.
    */
   private DeploymentDriver.ServiceSpec spec() {
     return spec(PdDeploymentTarget.ENVIRONMENT, DeploymentDriver.UpdateOrder.START_FIRST, List.of());
@@ -127,7 +128,7 @@ class SwarmDeploymentDriverTest {
     assertTrue(argv.contains("--no-resolve-image"));
     assertTrue(argv.containsAll(List.of("--network", "qits-net")));
     assertTrue(argv.containsAll(List.of("--restart-condition", "any")));
-    // The gate is docker's own healthcheck, exactly as on the docker path.
+    // The gate is docker's own healthcheck, enforced inside the container.
     assertTrue(argv.contains("curl -fsS http://localhost:8080/q/health/ready || exit 1"));
     assertTrue(argv.containsAll(List.of("--health-interval", "3s")));
     assertTrue(argv.containsAll(List.of("--health-retries", "3")));
@@ -160,8 +161,8 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void theTopologyCollapsesToTheFlatOverlayAndTheDeclaredSetIsWhatTheServiceGets() {
-    // §4.1: every `service update --network-add` recreates the task, so the docker path's
-    // per-application networks would make one deployment a restart storm. What survives is the flat
+    // §4.1: every `service update --network-add` recreates the task, so a per-application network
+    // per deployment would make one deployment a restart storm. What survives is the flat
     // attachable overlay — and qits-platform for the plane that needs it.
     SwarmDeploymentDriver driver = driver();
     cli.script("--format {{.ID}}", result(1, "no such service"));
@@ -220,8 +221,8 @@ class SwarmDeploymentDriverTest {
                 "dev-qits-gateway");
 
     assertTrue(argv.containsAll(List.of("--update-order", "stop-first")), argv.toString());
-    // It still rolls back — it just has a gap in service, which is what those applications have on
-    // the docker path anyway.
+    // It still rolls back — it just has a gap in service, which is what those applications have
+    // today anyway.
     assertTrue(argv.containsAll(List.of("--update-failure-action", "rollback")));
   }
 
@@ -318,10 +319,9 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void extrasOfAnotherApplicationDoNotLeakIn() {
-    // The absence is the assertion that matters, and it is the same one the docker path makes: only
-    // the deployed application's own keys reach its argv, so one application's socket bind cannot
-    // ride along on a sibling's deployment — including a sibling whose name merely starts with
-    // this one's.
+    // The absence is the assertion that matters: only the deployed application's own keys reach
+    // its argv, so one application's socket bind cannot ride along on a sibling's deployment —
+    // including a sibling whose name merely starts with this one's.
     SwarmDeploymentDriver driver =
         driver(
             Map.of(
@@ -383,7 +383,7 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void aHostileHealthPathCannotReachTheShellString() {
-    // The belt at the argv, on both paths for the same reason: this is the one value interpolated
+    // The belt at the argv, and the reason is that this is the one value interpolated
     // into a string a shell inside the container runs.
     DeploymentDriver.ServiceSpec hostile =
         new DeploymentDriver.ServiceSpec(
@@ -536,7 +536,7 @@ class SwarmDeploymentDriverTest {
   @Test
   void onlyTheCollapsedNetworksAreEverMade() {
     // The caller asks for a per-application network on every deployment, because it is the same
-    // state machine on both paths. Making one would be an overlay no service is ever on.
+    // state machine. Making one would be an overlay no service is ever on.
     SwarmDeploymentDriver driver = driver();
 
     assertFalse(
@@ -591,9 +591,9 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void aSelfUpdateIsHandedToTheManagerRatherThanAwaited() {
-    // Swarm arbitrates a succession the docker path cannot: the manager lives in the daemon, so it
-    // can stop this task, start the successor and revert the spec if the successor never goes
-    // healthy. Nothing here waits for that — this process is what is being replaced.
+    // Swarm arbitrates a succession no process can arbitrate for itself: the manager lives in the
+    // daemon, so it can stop this task, start the successor and revert the spec if the successor
+    // never goes healthy. Nothing here waits for that — this process is what is being replaced.
     SwarmDeploymentDriver driver = driver();
     driver.hostnameFile = hostnameFile("this-task-container");
     cli.script("--format {{.ID}}", result(0, "svc123"));

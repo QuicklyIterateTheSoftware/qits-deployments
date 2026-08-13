@@ -1,24 +1,35 @@
 package eu.wohlben.qits.platform.deployments.deployments.control;
 
+import io.quarkus.test.Mock;
+import jakarta.enterprise.context.ApplicationScoped;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * A scripted stand-in for a whole orchestrator — what {@link DeployService} sees, with no
- * orchestrator behind it.
+ * A scripted stand-in for the orchestrator — what {@link DeployService} sees, with no orchestrator
+ * behind it. {@code @Mock} makes it the {@link DeploymentDriver} for every {@code @QuarkusTest} in
+ * this module, which is what keeps a clone's {@code mvn verify} docker-free.
  *
- * <p><b>It is not the suite's default fake and is not a {@code @Mock}</b>, which is the difference
- * between this and {@code FakeDockerHost}. The docker path is faked one layer lower, at the docker
- * CLI, so every {@code @QuarkusTest} runs the real cutover choreography; this one is installed per
- * test with {@code QuarkusMock} by the tests that are about the state machine itself — the four
- * status transitions, the four announcements and the reap — rather than about either
- * orchestrator's way of getting there.
+ * <p><b>It sat one layer lower for a release, at the docker CLI</b>, so the flow tests drove the
+ * hand-rolled cutover — the stop, the joins, the reconcile, the rollback — for real. That
+ * choreography is gone with the docker path: a replace is one {@code service update} and the
+ * verdict swarm already reached, so there is nothing left above the CLI worth exercising through a
+ * booted application. What the argv says and what is read back out of it is
+ * {@code SwarmDeploymentDriverTest}'s, in plain JUnit, and what remains here is the state machine —
+ * the four status transitions, the four announcements and the reap.
  *
- * <p>State is read through <b>methods only</b>: an injected or installed reference is a CDI client
- * proxy, and a field read on a proxy sees the proxy's fields, never the bean's.
+ * <p>Application-scoped and therefore shared across tests: reset it in {@code @BeforeEach} and use
+ * distinct environment names per test. State is read through <b>methods only</b>: an injected
+ * reference is a CDI client proxy, and a field read on a proxy sees the proxy's fields, never the
+ * bean's.
  */
+@Mock
+@ApplicationScoped
 public class FakeDeploymentDriver implements DeploymentDriver {
 
   private final List<ServiceSpec> applied = Collections.synchronizedList(new ArrayList<>());
@@ -26,22 +37,58 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   private final List<String> reaped = Collections.synchronizedList(new ArrayList<>());
   private final List<String> pulled = Collections.synchronizedList(new ArrayList<>());
   private final List<Network> ensured = Collections.synchronizedList(new ArrayList<>());
-  private final java.util.Map<String, String> runningImages =
-      new java.util.concurrent.ConcurrentHashMap<>();
+  private final List<Network> existing = Collections.synchronizedList(new ArrayList<>());
+  private final List<String> removedNetworks = Collections.synchronizedList(new ArrayList<>());
+  private final List<String> removedEnvironments = Collections.synchronizedList(new ArrayList<>());
+  private final List<String> detached = Collections.synchronizedList(new ArrayList<>());
+
+  /** Every driver call in arrival order, tagged {@code kind:target} — the ORDERING assertions. */
+  private final List<String> calls = Collections.synchronizedList(new ArrayList<>());
+
+  /** What {@link #runningImage} answers per name — the startup sweep's evidence. */
+  private final Map<String, String> runningImages = new ConcurrentHashMap<>();
+
+  /**
+   * What {@link #observe} answers per name. A name nothing scripted is <b>gone</b>: this fake runs
+   * nothing, so the only services there can be are the ones a test said exist.
+   */
+  private final Map<String, HealthGate.Poll> observations = new ConcurrentHashMap<>();
 
   private volatile PullResult nextPull = new PullResult(PullOutcome.OK, null);
   private volatile ApplyResult nextApply = new ApplyResult(ApplyOutcome.APPLIED, null);
   private volatile Convergence nextConvergence = Convergence.converged(List.of());
 
+  /** How long {@link #awaitConverged} parks — a deployment slow enough to enqueue work behind. */
+  private volatile Duration convergeDelay = Duration.ZERO;
+
   /**
-   * The names this fake answers with: the wire alias, which is swarm's answer. It is the more
-   * interesting of the two here — the row, the convergence and the reap all have to agree on a name
-   * that is the SAME across deployments, which is where an in-place replace differs.
+   * Runs INSIDE {@link #removeEnvironmentContainers}, so a test can observe the world at the moment
+   * the teardown happens. It is how the "the runtime first, rows last" order is asserted: with one
+   * service the only place the ordering is visible from is inside a driver call.
    */
-  @Override
-  public String nameOf(ServiceSpec spec) {
-    return spec.wireAlias();
+  private volatile Runnable duringContainerReap = () -> {};
+
+  public void reset() {
+    applied.clear();
+    awaited.clear();
+    reaped.clear();
+    pulled.clear();
+    ensured.clear();
+    existing.clear();
+    removedNetworks.clear();
+    removedEnvironments.clear();
+    detached.clear();
+    calls.clear();
+    runningImages.clear();
+    observations.clear();
+    nextPull = new PullResult(PullOutcome.OK, null);
+    nextApply = new ApplyResult(ApplyOutcome.APPLIED, null);
+    nextConvergence = Convergence.converged(List.of());
+    convergeDelay = Duration.ZERO;
+    duringContainerReap = () -> {};
   }
+
+  // --- scripting ---------------------------------------------------------------------------------
 
   public void scriptPull(PullResult result) {
     nextPull = result;
@@ -54,6 +101,41 @@ public class FakeDeploymentDriver implements DeploymentDriver {
   public void scriptConvergence(Convergence convergence) {
     nextConvergence = convergence;
   }
+
+  /** Make the applied deployment take this long to converge. See {@link #convergeDelay}. */
+  public void scriptConvergeDelay(Duration delay) {
+    convergeDelay = delay;
+  }
+
+  /** What the startup sweep is told is running, per name. Nothing scripted means no such service. */
+  public void scriptRunningImage(String name, String imageRef) {
+    runningImages.put(name, imageRef);
+  }
+
+  /**
+   * The state {@link #observe} reports for this service, in the {@code <status>/<health>} spelling
+   * the gate and the observer both read ({@code running/healthy}, {@code starting/unhealthy}).
+   */
+  public void scriptObservation(String name, String state) {
+    observations.put(name, HealthGate.Poll.of(state));
+  }
+
+  /** The service the runtime cannot answer about at all — gone underneath a row that names it. */
+  public void scriptObservationGone(String name, String detail) {
+    observations.put(name, HealthGate.Poll.gone(detail));
+  }
+
+  /** A network the runtime already has when the test starts — {@link #networks} returns it. */
+  public void scriptExistingNetwork(Network network) {
+    existing.add(network);
+  }
+
+  /** What to run while the environment's services are being reaped. See the field. */
+  public void scriptDuringContainerReap(Runnable hook) {
+    duringContainerReap = hook;
+  }
+
+  // --- what was recorded -------------------------------------------------------------------------
 
   public List<ServiceSpec> applied() {
     return List.copyOf(applied);
@@ -75,70 +157,125 @@ public class FakeDeploymentDriver implements DeploymentDriver {
     return List.copyOf(ensured);
   }
 
+  public List<String> ensuredNetworks() {
+    return ensured().stream().map(Network::name).toList();
+  }
+
+  public List<String> removedNetworks() {
+    return List.copyOf(removedNetworks);
+  }
+
+  public List<String> removedEnvironments() {
+    return List.copyOf(removedEnvironments);
+  }
+
+  /** The networks the platform plane was asked to release, one entry per network. */
+  public List<String> detached() {
+    return List.copyOf(detached);
+  }
+
+  public List<String> calls() {
+    return List.copyOf(calls);
+  }
+
+  // --- the seam ----------------------------------------------------------------------------------
+
+  /**
+   * The wire alias, which is swarm's answer: the service name IS the address, so the row, the
+   * convergence and the reap all have to agree on a name that stays the same across deployments.
+   */
+  @Override
+  public String nameOf(ServiceSpec spec) {
+    return spec.wireAlias();
+  }
+
+  @Override
+  public PullResult pull(String imageRef) {
+    pulled.add(imageRef);
+    calls.add("pull:" + imageRef);
+    return nextPull;
+  }
+
   @Override
   public ApplyResult apply(ServiceSpec spec) {
     applied.add(spec);
+    calls.add("apply:" + spec.wireAlias());
     return nextApply;
   }
 
   @Override
   public Convergence awaitConverged(String name, Duration timeout) {
     awaited.add(name);
+    calls.add("await:" + name);
+    Duration delay = convergeDelay;
+    if (!delay.isZero()) {
+      try {
+        Thread.sleep(delay.toMillis());
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
     return nextConvergence;
   }
 
   @Override
   public void reap(List<String> names) {
     reaped.addAll(names);
-  }
-
-  /** What the startup sweep is told is running, per name. Nothing scripted means no such service. */
-  public void scriptRunningImage(String name, String imageRef) {
-    runningImages.put(name, imageRef);
+    calls.add("reap:" + names);
   }
 
   @Override
-  public java.util.Optional<RunningImage> runningImage(String name) {
+  public Optional<RunningImage> runningImage(String name) {
+    calls.add("runningImage:" + name);
     String image = runningImages.get(name);
-    return image == null
-        ? java.util.Optional.empty()
-        : java.util.Optional.of(new RunningImage(image, null));
+    return image == null ? Optional.empty() : Optional.of(new RunningImage(image, null));
+  }
+
+  /**
+   * Recorded in the call log like every other call, which is what lets a test assert that an
+   * observation pass and a deployment never interleave: both run on the one deploy worker, so the
+   * pass's observations form a block rather than sitting between a deployment's calls.
+   */
+  @Override
+  public HealthGate.Poll observe(String name) {
+    calls.add("observe:" + name);
+    HealthGate.Poll scripted = observations.get(name);
+    return scripted == null ? HealthGate.Poll.gone("no such service: " + name) : scripted;
   }
 
   @Override
   public boolean ensureNetwork(Network spec) {
     ensured.add(spec);
-    return true;
+    calls.add("ensureNetwork:" + spec.name());
+    boolean known = existing.stream().anyMatch(n -> n.name().equals(spec.name()));
+    if (!known) {
+      existing.add(spec);
+    }
+    return !known;
   }
 
   @Override
   public void removeNetwork(String network) {
-    // nothing to remove: this fake never made one
+    removedNetworks.add(network);
+    calls.add("removeNetwork:" + network);
   }
 
   @Override
   public List<Network> networks() {
-    return List.of();
+    return List.copyOf(existing);
   }
 
   @Override
   public void detachPlatformPlane(List<String> networks) {
-    // nothing holds them
+    detached.addAll(networks);
+    calls.add("detachPlatformPlane:" + networks);
   }
 
   @Override
   public int removeEnvironmentContainers(String environmentId) {
+    removedEnvironments.add(environmentId);
+    calls.add("removeEnvironmentContainers:" + environmentId);
+    duringContainerReap.run();
     return 0;
-  }
-
-  @Override
-  public PullResult pull(String imageRef) {
-    pulled.add(imageRef);
-    return nextPull;
-  }
-
-  @Override
-  public HealthGate.Poll observe(String name) {
-    return HealthGate.Poll.gone("this fake runs nothing, so it has no " + name);
   }
 }
