@@ -366,6 +366,46 @@ field holds the most recent update, so a later deployment overwrites the verdict
 about. It replaced "is this row's name me", which cannot tell a completed succession from a
 rolled-back one — under swarm the service keeps its name across both.
 
+### `UpdateStatus` does not say WHICH update, and `awaitConverged` had to (2026-08-13)
+
+The sweep's caution above is the whole story, and reading the field *during* a cutover was the same
+mistake in a worse place. `service update --detach` returns before the daemon has replaced
+`UpdateStatus`, so the first poll after an update reads either the **previous** cutover's terminal
+state or, in the window where swarm has cleared it, **nothing at all**. Both were read as an answer.
+Measured on qits-docs: the deployer logged "Deployed" 43ms after issuing the update, off a
+`completed` an earlier deployment had left, wrote the row `ACTIVE` with an empty detail and
+decommissioned the predecessor that was serving — while swarm spent the next 25 seconds rolling the
+successor back (`rollback_completed`, and the row never said so).
+
+So the driver records, per service name, **when it issued the update**, and matches
+`.UpdateStatus.StartedAt` against it. Four things hold it up:
+
+- **`apply` and `awaitConverged` land on one `@ApplicationScoped` bean**, which is the carry the
+  retired docker driver used for its in-flight cutover state. The map is written only on the update
+  arm (a create has no `UpdateStatus` to confuse and *clears* the key), pruned on write, and
+  consumed by the verdict in a `finally` — an issue instant that outlived its answer would make the
+  next question about that service wait for an update nobody issued.
+- **A status older than the issue instant, an empty status and an unreadable stamp are all
+  PENDING** — never a verdict, never a crash. In particular the empty arm no longer falls through
+  to the task check: under `start-first` the *predecessor's* task is still `Running`, so that
+  fallback answered "converged" about the deployment being replaced. It stays what it always was
+  for a **fresh create**, where there is no predecessor to mistake.
+- **The tolerance is 5s and the asymmetry is the argument.** In real time the daemon stamps
+  `StartedAt` after the CLI returned, so only clock skew can make this deployment's own status look
+  early — milliseconds on one host, a second or two for a remote daemon. What it must reject is the
+  *previous cutover*, which is minutes to months away. Nothing plausible sits between.
+- **The deadline still bounds everything.** An update whose status never appears fails at the health
+  timeout with a detail naming what was last seen, rather than passing.
+
+**The timestamp has two spellings and only one of them is RFC3339** — measured on docker 29.7.2:
+`service inspect --format` prints Go's own `time.Time.String()`
+(`2026-08-13 10:21:12.655795838 +0000 UTC`), while the JSON body of the same inspect says
+`2026-08-13T10:21:12.655795838Z`. `parseStartedAt` takes both and answers null to everything else
+(`<nil>`, `<no value>`), which is what makes an unreadable stamp patience instead of an exception.
+`UPDATE_STATUS_FORMAT` is `State|StartedAt|Message` in that order for one reason: the message is
+free text from the daemon and is read as the remainder of the line, so a field behind it would be
+whatever the message left over. `RUNNING_IMAGE_FORMAT` embeds it and its parser skips the stamp.
+
 ## FAILED was five outcomes, and now it is one
 
 `PdDeploymentStatus` is the single source of the words — an entity enum, a `varchar(32)` with **no

@@ -12,14 +12,21 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -106,12 +113,17 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   private static final String LOG_TAIL_LINES = "200";
 
   /**
-   * What swarm calls the update it is in the middle of, and what it says about it. A service that
-   * has never been updated has no {@code UpdateStatus} at all, which is why the format prints an
-   * empty state rather than failing — see {@link #awaitConverged}.
+   * What swarm calls the update it is in the middle of, what it says about it, and <b>when it
+   * started</b>. A service that has never been updated has no {@code UpdateStatus} at all, which is
+   * why the format prints an empty state rather than failing — see {@link #awaitConverged}.
+   *
+   * <p><b>{@code StartedAt} sits in the middle on purpose.</b> The message is free text from the
+   * daemon and is the one field that could contain a {@code |}, so it is read as the remainder of
+   * the line; a timestamp behind it would be whatever the message left over.
    */
   static final String UPDATE_STATUS_FORMAT =
-      "{{if .UpdateStatus}}{{.UpdateStatus.State}}|{{.UpdateStatus.Message}}{{else}}|{{end}}";
+      "{{if .UpdateStatus}}{{.UpdateStatus.State}}|{{.UpdateStatus.StartedAt}}"
+          + "|{{.UpdateStatus.Message}}{{else}}||{{end}}";
 
   /**
    * The startup sweep's evidence: what the service runs, then the same update status as wording.
@@ -119,6 +131,57 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    */
   static final String RUNNING_IMAGE_FORMAT =
       "{{.Spec.TaskTemplate.ContainerSpec.Image}}|" + UPDATE_STATUS_FORMAT;
+
+  /**
+   * How far an update's {@code StartedAt} may sit <i>before</i> the moment this process issued it
+   * and still be believed to be that update.
+   *
+   * <p>Five seconds, and the asymmetry is the argument. In real time the daemon stamps {@code
+   * StartedAt} <b>after</b> the CLI returned, so the only thing that can make it look earlier is
+   * the two clocks disagreeing — an NTP-disciplined host is inside milliseconds and a daemon
+   * reached over the network is inside a second or two. What this tolerance has to stay well under
+   * is the distance to the update it must reject: the <i>previous</i> cutover of the same service,
+   * which is another deployment and therefore minutes to months old. Five seconds is far above the
+   * first number and far below the second, so no plausible skew makes a fresh status look stale and
+   * no stale status can pass as fresh.
+   */
+  private static final Duration ISSUE_SKEW = Duration.ofSeconds(5);
+
+  /**
+   * How long an issued update is remembered when nobody ever came back for the verdict. Only a
+   * deployment that never reached {@link #awaitConverged} can leave one behind (a crash between the
+   * two calls), so this is a leak stop rather than a working value — an hour is far beyond any
+   * health timeout, and pruning on write is what keeps the map bounded without a sweeper.
+   */
+  private static final Duration ISSUE_RETENTION = Duration.ofHours(1);
+
+  /**
+   * When this process issued the update swarm is now running, per service name — written by {@link
+   * #apply}, read and cleared by {@link #awaitConverged}, which is the same "one orchestrator, one
+   * seam" carry the retired docker driver used for its in-flight cutover state: both calls land on
+   * this one {@code @ApplicationScoped} bean.
+   *
+   * <p>Concurrent because a bean is shared, not because the callers race: deployments run one at a
+   * time on {@code pd-deploy-worker}.
+   */
+  private final Map<String, Instant> issuedUpdates = new ConcurrentHashMap<>();
+
+  /**
+   * The clock the issue instant is read from. A field so the suite can pin it — a test that
+   * compared a scripted {@code StartedAt} against the wall clock would be timing the build host.
+   */
+  Clock clock = Clock.systemUTC();
+
+  /**
+   * Go's {@code time.Time.String()}, which is what {@code docker service inspect --format} prints
+   * for {@code .UpdateStatus.StartedAt} — measured on docker 29.7.2: {@code 2026-08-13
+   * 10:21:12.655795838 +0000 UTC}. <b>The JSON body of the same inspect says RFC3339 instead</b>
+   * ({@code 2026-08-13T10:21:12.655795838Z}), so the parser takes both and this is only the first
+   * of the two. The trailing zone name — and Go's monotonic {@code m=+...} suffix, which a value
+   * decoded from the API never carries — are matched and dropped.
+   */
+  private static final Pattern GO_TIMESTAMP =
+      Pattern.compile("^(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?) ([+-]\\d{2}:?\\d{2})(?:\\s.*)?$");
 
   /** The label swarm itself puts on a task container, naming the service it belongs to. */
   private static final String SWARM_SERVICE_LABEL = "com.docker.swarm.service.name";
@@ -256,6 +319,17 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       LOG.warnf("Could not %s service %s: %s", exists ? "update" : "create", name, result.output());
       return new ApplyResult(ApplyOutcome.REFUSED, result.output());
     }
+    if (exists && !self) {
+      // WHICH update the verdict is about, recorded the only place that knows. See
+      // `awaitConverged`: a service that has been cut over before answers with the PREVIOUS
+      // update's terminal state until the daemon has replaced it, and one poll of that is a
+      // deployment declared live 43 milliseconds after it was issued.
+      rememberIssued(target);
+    } else if (!exists) {
+      // A create has no update to wait for, and a service that was removed and made again must not
+      // inherit the removed one's issue instant — its empty status would then never settle.
+      issuedUpdates.remove(target);
+    }
     if (self) {
       // The self-update, and the arbiter is what makes it possible at all: the manager lives in
       // the daemon rather than in a container this process owns, so it can stop this task, start the
@@ -289,71 +363,169 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * service create}, and swarm records an update status only from the first {@code update} onward.
    * So an empty state falls through to the task itself — a task is {@code Running} only once its
    * healthcheck has passed, which is the same statement the field would have made.
+   *
+   * <p><b>The field says nothing about WHICH update it describes, and reading it as though it did
+   * was a live defect.</b> {@code UpdateStatus} holds the most recent update of the service, and
+   * {@code service update --detach} returns before the daemon has replaced it — so the first poll
+   * after an update reads either the PREVIOUS cutover's terminal state or, in the window where
+   * swarm has cleared it, nothing at all. Both were read as an answer: qits-docs was recorded
+   * {@code ACTIVE} 43ms after its update was issued, off a {@code completed} left by an earlier
+   * deployment, and its predecessor was decommissioned while swarm was still rolling the successor
+   * back. The empty arm was as wrong for the same reason — under {@code start-first} the
+   * predecessor's task is still {@code Running}, so the task fallback answered "converged" about
+   * the deployment being replaced.
+   *
+   * <p>So an update this process ISSUED is matched by {@code StartedAt}: a status stamped before
+   * the issue instant (less {@link #ISSUE_SKEW}) belongs to the update before this one and is
+   * <b>pending</b>, an absent or unreadable stamp is <b>pending</b>, and the task fallback is
+   * reached only where it is still true — a service this process has just created. Nothing here
+   * waits forever: the caller's deadline ends it either way, and the timeout detail names what was
+   * last seen, so an update whose status never arrives fails as an update rather than passing as
+   * one.
    */
   @Override
   public Convergence awaitConverged(String name, Duration timeout) {
     long deadline = System.nanoTime() + timeout.toNanos();
+    // Null when nothing issued an update for this service — the first deployment of an
+    // application, or an instance that did not perform the update it is asking about.
+    Instant issued = issuedUpdates.get(name);
     String last = "(never inspected)";
-    while (true) {
-      PdProcess.Result inspected =
-          run(
-              List.of(runtime, "service", "inspect", "--format", UPDATE_STATUS_FORMAT, name),
-              INSPECT_TIMEOUT);
-      if (inspected.exitCode() != 0) {
-        // Not a state at all: swarm has no such service. There is nothing to keep waiting for.
-        return Convergence.failed("no service " + name + ": " + safe(inspected.output()));
-      }
-      String[] parts = safe(inspected.output()).strip().split("\\|", 2);
-      String state = parts[0].strip().toLowerCase(Locale.ROOT);
-      String message = parts.length > 1 ? parts[1].strip() : "";
-      last = state.isEmpty() ? "created" : state;
-      switch (state) {
-        case "completed" -> {
-          return Convergence.converged(List.of());
+    try {
+      while (true) {
+        PdProcess.Result inspected =
+            run(
+                List.of(runtime, "service", "inspect", "--format", UPDATE_STATUS_FORMAT, name),
+                INSPECT_TIMEOUT);
+        if (inspected.exitCode() != 0) {
+          // Not a state at all: swarm has no such service. There is nothing to keep waiting for.
+          return Convergence.failed("no service " + name + ": " + safe(inspected.output()));
         }
-        case "rollback_completed" -> {
-          return Convergence.rolledBack(
-              "swarm rolled "
-                  + name
-                  + " back to its predecessor: "
-                  + (message.isBlank() ? "the successor never went healthy" : message));
-        }
-        case "paused", "rollback_paused" -> {
-          return Convergence.failed(
-              "swarm paused the update of " + name + ": " + message + "\n" + tasks(name));
-        }
-        case "" -> {
-          // A service nothing has updated yet — the first deployment of this application.
-          Convergence fresh = freshCreateVerdict(name);
-          if (fresh != null) {
-            return fresh;
+        String[] parts = safe(inspected.output()).strip().split("\\|", 3);
+        String state = parts[0].strip().toLowerCase(Locale.ROOT);
+        String startedAt = parts.length > 1 ? parts[1].strip() : "";
+        String message = parts.length > 2 ? parts[2].strip() : "";
+        String stale = issued == null ? null : notThisUpdate(state, startedAt, issued);
+        if (stale != null) {
+          // Somebody else's update, or not this one yet. Keep waiting, and remember the wording so
+          // the timeout can say what it kept seeing.
+          last = stale;
+        } else {
+          last = state.isEmpty() ? "created" : state;
+          switch (state) {
+            case "completed" -> {
+              return Convergence.converged(List.of());
+            }
+            case "rollback_completed" -> {
+              return Convergence.rolledBack(
+                  "swarm rolled "
+                      + name
+                      + " back to its predecessor: "
+                      + (message.isBlank() ? "the successor never went healthy" : message));
+            }
+            case "paused", "rollback_paused" -> {
+              return Convergence.failed(
+                  "swarm paused the update of " + name + ": " + message + "\n" + tasks(name));
+            }
+            case "" -> {
+              // A service nothing has updated yet — the first deployment of this application.
+              Convergence fresh = freshCreateVerdict(name);
+              if (fresh != null) {
+                return fresh;
+              }
+            }
+            default -> {
+              /* updating, rollback_started: keep waiting */
+            }
           }
         }
-        default -> {
-          /* updating, rollback_started: keep waiting */
+        if (System.nanoTime() >= deadline) {
+          break;
+        }
+        try {
+          Thread.sleep(CONVERGE_POLL.toMillis());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return Convergence.failed("interrupted while waiting for " + name + " to converge");
         }
       }
-      if (System.nanoTime() >= deadline) {
-        break;
-      }
-      try {
-        Thread.sleep(CONVERGE_POLL.toMillis());
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        return Convergence.failed("interrupted while waiting for " + name + " to converge");
-      }
+      return Convergence.failed(
+          "service "
+              + name
+              + " was still "
+              + last
+              + " after "
+              + timeout.toSeconds()
+              + "s\n"
+              + tasks(name)
+              + "\n"
+              + logs(name));
+    } finally {
+      // The verdict is reached, however it went: this update is nobody's in-flight state now.
+      issuedUpdates.remove(name);
     }
-    return Convergence.failed(
-        "service "
-            + name
-            + " was still "
-            + last
-            + " after "
-            + timeout.toSeconds()
-            + "s\n"
-            + tasks(name)
-            + "\n"
-            + logs(name));
+  }
+
+  /**
+   * Why this {@code UpdateStatus} is not the verdict of the update that was issued at {@code
+   * issued} — or null when it is, and may be read.
+   *
+   * <p>Every arm here is a reason to keep waiting rather than to fail: the caller's deadline is
+   * what ends the wait, and it carries the returned wording into the failure detail.
+   */
+  private static String notThisUpdate(String state, String startedAt, Instant issued) {
+    if (state.isEmpty()) {
+      // Swarm clears the field while it takes the update in. The task fallback is NOT reachable
+      // here: under start-first the predecessor is still Running, so it would answer "converged"
+      // about the deployment being replaced.
+      return "not started yet (no update status)";
+    }
+    Instant stamped = parseStartedAt(startedAt);
+    if (stamped == null) {
+      // Never a crash and never a verdict: a stamp this cannot read is a stamp it cannot match, and
+      // the raw text is what a person needs to see in the timeout.
+      return state + " with an unreadable StartedAt '" + startedAt + "'";
+    }
+    if (stamped.isBefore(issued.minus(ISSUE_SKEW))) {
+      return state + " from the earlier update started " + startedAt;
+    }
+    return null;
+  }
+
+  /**
+   * Docker's two spellings of the same instant — Go's {@code time.Time.String()} from {@code
+   * --format} and RFC3339 from the JSON body — or null for anything else, {@code <nil>} and {@code
+   * <no value>} included.
+   *
+   * <p>Package-private for the parsing test.
+   */
+  static Instant parseStartedAt(String value) {
+    String raw = safe(value).strip();
+    if (raw.isEmpty()) {
+      return null;
+    }
+    Matcher go = GO_TIMESTAMP.matcher(raw);
+    if (go.matches()) {
+      String offset = go.group(3);
+      if (offset.length() == 5) {
+        offset = offset.substring(0, 3) + ":" + offset.substring(3); // +0000 -> +00:00
+      }
+      raw = go.group(1) + "T" + go.group(2) + offset;
+    }
+    try {
+      return OffsetDateTime.parse(raw).toInstant();
+    } catch (RuntimeException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Record that this process just issued an update of {@code service}, pruning whatever an earlier
+   * deployment left behind — see {@link #ISSUE_RETENTION}.
+   */
+  private void rememberIssued(String service) {
+    Instant now = clock.instant();
+    issuedUpdates.entrySet().removeIf(entry -> entry.getValue().isBefore(now.minus(ISSUE_RETENTION)));
+    issuedUpdates.put(service, now);
   }
 
   /**
@@ -471,13 +643,16 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     if (inspected.exitCode() != 0) {
       return Optional.empty(); // swarm has no such service under either name
     }
-    String[] parts = safe(inspected.output()).strip().split("\\|", 3);
+    // image | state | startedAt | message — the sweep wants the first two words and the last; WHEN
+    // the update started is `awaitConverged`'s business, and reading past it here is what keeps the
+    // message whole.
+    String[] parts = safe(inspected.output()).strip().split("\\|", 4);
     String image = parts[0].strip();
     if (image.isEmpty()) {
       return Optional.empty();
     }
     String state = parts.length > 1 ? parts[1].strip() : "";
-    String message = parts.length > 2 ? parts[2].strip() : "";
+    String message = parts.length > 3 ? parts[3].strip() : "";
     return Optional.of(
         new RunningImage(image, state.isEmpty() ? null : (state + ": " + message).strip()));
   }

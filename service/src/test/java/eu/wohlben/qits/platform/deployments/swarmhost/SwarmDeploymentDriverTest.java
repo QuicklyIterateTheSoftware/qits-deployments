@@ -17,7 +17,11 @@ import io.smallrye.config.SmallRyeConfigBuilder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,7 +46,31 @@ class SwarmDeploymentDriverTest {
 
   private static final String IMAGE = "qits-platform-artifacts:8080/qits/qits-gateway:abc1234";
 
+  /** When the scripted deployment issued its update — the qits-docs incident's own instant. */
+  private static final Instant ISSUED = Instant.parse("2026-08-13T10:21:12.698Z");
+
+  private static final DateTimeFormatter GO_TIME =
+      DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSSSSS");
+
   private ScriptedCli cli;
+
+  /** A StartedAt as {@code service inspect --format} prints it: Go's own {@code time.Time}. */
+  private static String stamp(Instant instant) {
+    return GO_TIME.format(instant.atOffset(ZoneOffset.UTC)) + " +0000 UTC";
+  }
+
+  /**
+   * A driver that has just updated {@code dev-qits-gateway} at {@link #ISSUED} — which is what
+   * makes the difference between this deployment's UpdateStatus and the previous one's readable.
+   */
+  private SwarmDeploymentDriver driverThatIssuedAnUpdate() {
+    SwarmDeploymentDriver driver = driver();
+    driver.clock = Clock.fixed(ISSUED, ZoneOffset.UTC);
+    cli.script("--format {{.ID}} dev-qits-gateway", result(0, "svc123"));
+    cli.script("--format {{.ID}} qits_dev-qits-gateway", result(1, "no such service"));
+    assertEquals(DeploymentDriver.ApplyOutcome.APPLIED, driver.apply(spec()).outcome());
+    return driver;
+  }
 
   private SwarmDeploymentDriver driver() {
     return driver(Map.of());
@@ -412,8 +440,11 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void aCompletedUpdateIsAConvergedDeployment() {
-    SwarmDeploymentDriver driver = driver();
-    cli.script(".UpdateStatus", result(0, "updating|update in progress"), result(0, "completed|"));
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus",
+        result(0, "updating|" + stamp(ISSUED) + "|update in progress"),
+        result(0, "completed|" + stamp(ISSUED) + "|"));
 
     DeploymentDriver.Convergence converged =
         driver.awaitConverged("dev-qits-gateway", Duration.ofSeconds(30));
@@ -427,9 +458,9 @@ class SwarmDeploymentDriverTest {
   void aRollbackIsAFailedDeploymentWithSwarmsOwnMessageOnIt() {
     // The measured failure path: under start-first the predecessor kept serving for the whole
     // window while the unhealthy successor sat in Starting, and swarm reverted the spec by itself.
-    SwarmDeploymentDriver driver = driver();
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
     cli.script(
-        ".UpdateStatus", result(0, "rollback_completed|rollback completed"));
+        ".UpdateStatus", result(0, "rollback_completed|" + stamp(ISSUED) + "|rollback completed"));
 
     DeploymentDriver.Convergence converged =
         driver.awaitConverged("dev-qits-gateway", Duration.ofSeconds(30));
@@ -441,8 +472,9 @@ class SwarmDeploymentDriverTest {
 
   @Test
   void aPausedUpdateIsAFailureRatherThanSomethingToKeepWaitingOn() {
-    SwarmDeploymentDriver driver = driver();
-    cli.script(".UpdateStatus", result(0, "paused|update paused due to failure"));
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus", result(0, "paused|" + stamp(ISSUED) + "|update paused due to failure"));
 
     DeploymentDriver.Convergence converged =
         driver.awaitConverged("dev-qits-gateway", Duration.ofSeconds(30));
@@ -452,12 +484,141 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void thePreviousUpdatesVerdictIsNotThisDeploymentsVerdict() {
+    // The live defect, in one test. qits-docs had a `completed` from an earlier cutover, and
+    // `service update --detach` returns before the daemon has replaced the field — so the first
+    // poll answered "completed" 43ms after the update was issued and the deployer wrote the row
+    // ACTIVE while swarm was still rolling the successor back. StartedAt is what tells the two
+    // updates apart.
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus",
+        result(0, "completed|" + stamp(ISSUED.minusSeconds(3600)) + "|update completed"),
+        result(0, "rollback_completed|" + stamp(ISSUED.plusMillis(120)) + "|rollback completed"));
+
+    DeploymentDriver.Convergence converged =
+        driver.awaitConverged("dev-qits-gateway", Duration.ofSeconds(30));
+
+    assertEquals(DeploymentDriver.ConvergenceOutcome.ROLLED_BACK, converged.outcome());
+    assertTrue(converged.detail().contains("rollback completed"), converged.detail());
+  }
+
+  @Test
+  void aVerdictStampedAfterTheUpdateWasIssuedIsThisDeploymentsOwn() {
+    // The other half: waiting through a stale status must still end in the real answer, or the fix
+    // would have turned every second deployment into a timeout.
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus",
+        result(0, "completed|" + stamp(ISSUED.minusSeconds(3600)) + "|update completed"),
+        result(0, "completed|" + stamp(ISSUED.plusMillis(120)) + "|update completed"));
+
+    DeploymentDriver.Convergence converged =
+        driver.awaitConverged("dev-qits-gateway", Duration.ofSeconds(30));
+
+    assertEquals(DeploymentDriver.ConvergenceOutcome.CONVERGED, converged.outcome());
+  }
+
+  @Test
+  void anUpdateWhoseStatusNeverArrivesFailsAtTheDeadlineRatherThanReadingTheTasks() {
+    // Swarm clears UpdateStatus while it takes the update in, and the task check is no answer
+    // there: under start-first the PREDECESSOR is still Running, so falling through to it would
+    // declare the deployment being replaced a success. The deadline is what ends this.
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(".UpdateStatus", result(0, "||"));
+    cli.script("service ps", result(0, "Running 4 minutes ago"));
+
+    DeploymentDriver.Convergence converged =
+        driver.awaitConverged("dev-qits-gateway", Duration.ZERO);
+
+    assertEquals(DeploymentDriver.ConvergenceOutcome.FAILED, converged.outcome());
+    assertTrue(converged.detail().contains("not started yet"), converged.detail());
+  }
+
+  @Test
+  void theSkewToleranceIsFiveSecondsAndItIsAnEdgeRatherThanAFeeling() {
+    // The daemon stamps StartedAt after the CLI returned, so only a clock disagreement can make
+    // this deployment's own status look earlier than its issue instant. Five seconds is above any
+    // such skew and far below the distance to the previous cutover.
+    SwarmDeploymentDriver inside = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus", result(0, "completed|" + stamp(ISSUED.minusSeconds(5)) + "|done"));
+
+    assertEquals(
+        DeploymentDriver.ConvergenceOutcome.CONVERGED,
+        inside.awaitConverged("dev-qits-gateway", Duration.ZERO).outcome());
+
+    SwarmDeploymentDriver outside = driverThatIssuedAnUpdate();
+    cli.script(
+        ".UpdateStatus", result(0, "completed|" + stamp(ISSUED.minusSeconds(6)) + "|done"));
+
+    DeploymentDriver.Convergence stale =
+        outside.awaitConverged("dev-qits-gateway", Duration.ZERO);
+    assertEquals(DeploymentDriver.ConvergenceOutcome.FAILED, stale.outcome());
+    assertTrue(stale.detail().contains("earlier update"), stale.detail());
+  }
+
+  @Test
+  void aStampThisCannotReadIsPendingRatherThanAVerdictOrACrash() {
+    // Docker's wording is not an API. An unreadable stamp cannot be matched, so it cannot be
+    // believed — and the raw text goes into the timeout, which is what makes the next one findable.
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(".UpdateStatus", result(0, "completed|<nil>|update completed"));
+
+    DeploymentDriver.Convergence converged =
+        driver.awaitConverged("dev-qits-gateway", Duration.ZERO);
+
+    assertEquals(DeploymentDriver.ConvergenceOutcome.FAILED, converged.outcome());
+    assertTrue(converged.detail().contains("<nil>"), converged.detail());
+  }
+
+  @Test
+  void bothOfDockersTimestampSpellingsAreReadAndNothingElseIs() {
+    // Measured on docker 29.7.2: `service inspect --format` prints Go's own time.Time.String(),
+    // while the JSON body of the same inspect says RFC3339. Both are docker's, so both parse.
+    Instant expected = Instant.parse("2026-08-13T10:21:12.655795838Z");
+    assertEquals(
+        expected, SwarmDeploymentDriver.parseStartedAt("2026-08-13 10:21:12.655795838 +0000 UTC"));
+    assertEquals(
+        expected, SwarmDeploymentDriver.parseStartedAt("2026-08-13T10:21:12.655795838Z"));
+    assertEquals(
+        expected, SwarmDeploymentDriver.parseStartedAt("2026-08-13 12:21:12.655795838 +0200 CEST"));
+    assertNull(SwarmDeploymentDriver.parseStartedAt("<nil>"));
+    assertNull(SwarmDeploymentDriver.parseStartedAt("<no value>"));
+    assertNull(SwarmDeploymentDriver.parseStartedAt(""));
+    assertNull(SwarmDeploymentDriver.parseStartedAt(null));
+  }
+
+  @Test
+  void theInFlightUpdateDoesNotOutliveItsVerdict() {
+    // The issue instant is state carried between two calls on one bean, so it has to be consumed
+    // by the answer: a deployment that kept it would make the NEXT question about this service
+    // wait for an update nobody issued.
+    SwarmDeploymentDriver driver = driverThatIssuedAnUpdate();
+    cli.script(".UpdateStatus", result(0, "completed|" + stamp(ISSUED) + "|update completed"));
+
+    assertEquals(
+        DeploymentDriver.ConvergenceOutcome.CONVERGED,
+        driver.awaitConverged("dev-qits-gateway", Duration.ZERO).outcome());
+
+    cli.script(
+        ".UpdateStatus", result(0, "completed|" + stamp(ISSUED.minusSeconds(3600)) + "|done"));
+    assertEquals(
+        DeploymentDriver.ConvergenceOutcome.CONVERGED,
+        driver.awaitConverged("dev-qits-gateway", Duration.ZERO).outcome(),
+        "nothing is in flight now, so the field is read the way the sweep reads it");
+  }
+
+  @Test
   void aFreshlyCreatedServiceHasNoUpdateStatusAndIsJudgedByItsTask() {
     // The first deployment of an application is a `service create`, and swarm records an update
     // status only from the first update onward. A task is Running only once its healthcheck passed,
-    // which is the same statement the missing field would have made.
+    // which is the same statement the missing field would have made — and, unlike an update, there
+    // is no predecessor whose task could answer instead.
     SwarmDeploymentDriver driver = driver();
-    cli.script(".UpdateStatus", result(0, "|"));
+    cli.script("--format {{.ID}}", result(1, "no such service"));
+    assertEquals(DeploymentDriver.ApplyOutcome.APPLIED, driver.apply(spec()).outcome());
+    cli.script(".UpdateStatus", result(0, "||"));
     cli.script(
         "service ps",
         result(0, "Starting less than a second ago"),
@@ -472,7 +633,7 @@ class SwarmDeploymentDriverTest {
   @Test
   void aFirstDeploymentWhoseTaskDiesIsAFailedDeployment() {
     SwarmDeploymentDriver driver = driver();
-    cli.script(".UpdateStatus", result(0, "|"));
+    cli.script(".UpdateStatus", result(0, "||"));
     cli.script("service ps", result(0, "Failed 1 second ago"));
 
     DeploymentDriver.Convergence converged =
@@ -667,7 +828,7 @@ class SwarmDeploymentDriverTest {
     SwarmDeploymentDriver driver = driver();
     cli.script(
         "Spec.TaskTemplate.ContainerSpec.Image",
-        result(0, IMAGE + "|rollback_completed|rollback completed\n"));
+        result(0, IMAGE + "|rollback_completed|" + stamp(ISSUED) + "|rollback completed\n"));
 
     DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
 
@@ -692,7 +853,9 @@ class SwarmDeploymentDriverTest {
     // settled a succeeded self-update as "interrupted".
     SwarmDeploymentDriver driver = driver();
     cli.script("{{end}} dev-qits-gateway", result(1, "Error: no such service: dev-qits-gateway"));
-    cli.script("{{end}} qits_dev-qits-gateway", result(0, IMAGE + "|completed|update completed\n"));
+    cli.script(
+        "{{end}} qits_dev-qits-gateway",
+        result(0, IMAGE + "|completed|" + stamp(ISSUED) + "|update completed\n"));
 
     DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
 
@@ -713,7 +876,7 @@ class SwarmDeploymentDriverTest {
   @Test
   void aServiceNothingHasUpdatedYetCarriesItsImageAndNoWords() {
     SwarmDeploymentDriver driver = driver();
-    cli.script("Spec.TaskTemplate.ContainerSpec.Image", result(0, IMAGE + "||\n"));
+    cli.script("Spec.TaskTemplate.ContainerSpec.Image", result(0, IMAGE + "|||\n"));
 
     DeploymentDriver.RunningImage running = driver.runningImage("dev-qits-gateway").orElseThrow();
 
