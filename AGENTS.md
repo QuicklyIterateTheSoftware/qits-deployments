@@ -276,12 +276,12 @@ whose container died an hour after the gate passed, with nothing ever noticing.
   nothing about it. `QUEUED`/`STARTING` belong to the worker's state machine and to the startup sweep
   — a self-update sits in `STARTING` with a healthy successor **on purpose** —
   and `DECOMMISSIONED` is another deployment's decision.
-- **`FAILED` → `ACTIVE`** when the container **the row itself names** is healthy by
+- **`FAILED` or `GONE` → `ACTIVE`** when the container **the row itself names** is healthy by
   `HealthGate.healthy` (the gate's own verdict, extracted so there is one spelling of it). Only the
   row's own container: the seam asks by container **name**, never by alias, so a healthy container of
   somebody else's deployment cannot resurrect a foreign row. The detail **appends** — the original
   failure text is the diagnosis and is what made the bug findable in the first place.
-- **`ACTIVE` → `FAILED`** only when the container is **absent or terminally exited/dead**, and only
+- **`ACTIVE` → `GONE`** only when the container is **absent or terminally exited/dead**, and only
   when **two consecutive** passes agree. Both halves are the health gate's patience restated:
   restarting is not dead, running-but-unhealthy is not dead (that is the postgres-alias boot race the
   gate already tolerates), and one `docker inspect` that could not answer must not flip a deployment
@@ -359,12 +359,47 @@ orchestrator as `--update-order`.
 
 **The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
 one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
-the prior actives of that place decommissioned, another sha is `FAILED` as superseded (swarm's
-`UpdateStatus` supplies the wording), and no such service is the interrupted-by-a-restart failure
-every other in-flight row takes. The **image** is the check and `UpdateStatus` is only wording: that
+the prior actives of that place decommissioned, another sha is `SUPERSEDED` (swarm's `UpdateStatus`
+supplies the wording), and no such service is the interrupted-by-a-restart `FAILED` every other
+in-flight row takes. The **image** is the check and `UpdateStatus` is only wording: that
 field holds the most recent update, so a later deployment overwrites the verdict of the one a row is
 about. It replaced "is this row's name me", which cannot tell a completed succession from a
 rolled-back one — under swarm the service keeps its name across both.
+
+## FAILED was five outcomes, and now it is one
+
+`PdDeploymentStatus` is the single source of the words — an entity enum, a `varchar(32)` with **no
+check constraint** (V1 says why), so the vocabulary grows without a migration and every historical
+row keeps the word it was written with. **Nothing is backfilled and nothing is relabelled.**
+
+Three of the five outcomes `FAILED` used to cover have their own word, one writer each:
+
+| status | meaning | written by |
+| --- | --- | --- |
+| `ROLLED_BACK` | the successor never converged and the orchestrator put the predecessor back — it is serving | `DeployService.execute`, off `ConvergenceOutcome.ROLLED_BACK` |
+| `SUPERSEDED` | a restart interrupted this in-flight row and a newer sha is serving its place | the startup sweep's verdict |
+| `GONE` | a formerly `ACTIVE` row whose container two observation passes found absent | `DeploymentObserver.demote` |
+| `FAILED` | the attempt ended and **nothing is known to serve the place** | everything else — refused apply, image pull error, convergence failure with no rollback, interrupted row with no successor |
+
+Four things that are decisions rather than details:
+
+- **The driver already knew.** `awaitConverged` has returned a distinct `ROLLED_BACK` verdict since
+  the swarm migration; `execute` flattened it to `FAILED` on `!converged.converged()`. The refinement
+  is reading the answer that was already there.
+- **The four events stay four.** A `ROLLED_BACK` outcome still announces `DeploymentFailed` —
+  consumers care that it did not go live — and rides the record's existing `status` **string**, which
+  is exactly what a string on the wire was for. No vocabulary-jar change, no `EventWireReflection`
+  entry. `SUPERSEDED` and `GONE` announce nothing, because the sweep and the observer announce
+  nothing.
+- **`GONE` recovers.** The observer's `FAILED` → `ACTIVE` arm heals `GONE` too: a demotion that
+  self-heals must heal whatever word the demotion wrote, or the observation could write a status it
+  could never take back.
+- **The rollback pins are untouched, and that is verified rather than assumed.** `RollbackPins.SERVED`
+  is `{ACTIVE, DECOMMISSIONED}` and the serving scan keys on `ACTIVE` — a demoted row was excluded as
+  `FAILED` before the word existed and is excluded as `GONE` now. Same for `listActiveByApplication`
+  and the sweep's `listByStatus(QUEUED|STARTING)`: every status query here is a **positive** list, so
+  a new word leaks into none of them. Keep it that way — a `status != ACTIVE` filter would be the
+  regression.
 
 ## The health gate is patient, and that is not a tuning choice
 

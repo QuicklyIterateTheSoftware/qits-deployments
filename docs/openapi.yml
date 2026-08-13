@@ -144,6 +144,9 @@ components:
       - ACTIVE
       - IMAGE_MISSING
       - FAILED
+      - ROLLED_BACK
+      - SUPERSEDED
+      - GONE
       - DECOMMISSIONED
     PdDeploymentTarget:
       type: string

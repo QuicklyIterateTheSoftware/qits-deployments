@@ -44,12 +44,12 @@ import org.jboss.logging.Logger;
  * <p><b>Two transitions, and each is deliberately narrow.</b>
  *
  * <ul>
- *   <li>{@code FAILED} → {@code ACTIVE} when the container <b>the row itself names</b> exists, runs
+ *   <li>{@code FAILED} or {@code GONE} → {@code ACTIVE} when the container <b>the row itself names</b> exists, runs
  *       and is healthy by {@link HealthGate#healthy} — the gate's own verdict, so a recovery cannot
  *       mean something a health gate would have refused. Only the row's own container counts: a
  *       healthy container of some other deployment must never resurrect a foreign row, which is why
  *       this asks docker about {@code containerName} rather than about the alias.
- *   <li>{@code ACTIVE} → {@code FAILED} when the container is <b>absent or terminally exited</b> on
+ *   <li>{@code ACTIVE} → {@code GONE} when the container is <b>absent or terminally exited</b> on
  *       {@value #STRIKES_TO_DEMOTE} consecutive passes. Patience is inherited from the health gate
  *       rather than reinvented: <b>restarting is not dead</b> and <b>running-but-unhealthy is not
  *       dead</b> — that is the postgres-alias boot race the gate already tolerates, and a container
@@ -125,7 +125,8 @@ public class DeploymentObserver {
       // Outside every transaction: a docker call is a child process, and no bracket of this
       // component's own may span one.
       HealthGate.Poll observed = driver.observe(candidate.containerName());
-      if (candidate.status() == PdDeploymentStatus.FAILED) {
+      if (candidate.status() != PdDeploymentStatus.ACTIVE) {
+        // FAILED or GONE — a demotion heals whatever word the demotion wrote.
         if (HealthGate.healthy(observed)) {
           recover(candidate, observed);
         }
@@ -152,7 +153,8 @@ public class DeploymentObserver {
 
   /**
    * The latest row of each (application, tier) that a container's state can say anything about: an
-   * {@code ACTIVE} one that should still be serving, or a {@code FAILED} one that named a container.
+   * {@code ACTIVE} one that should still be serving, or a demoted one — {@code FAILED} or {@code
+   * GONE} — that named a container.
    *
    * <p>The whole history is read and reduced here rather than asked of SQL, which is the same trade
    * {@code RollbackPins} makes: one ordered scan of a table with one row per deployment ever, and
@@ -171,7 +173,9 @@ public class DeploymentObserver {
       if (row.containerName == null || row.containerName.isBlank()) {
         continue; // nothing to observe: this row never got as far as a `docker run`
       }
-      if (row.status == PdDeploymentStatus.ACTIVE || row.status == PdDeploymentStatus.FAILED) {
+      if (row.status == PdDeploymentStatus.ACTIVE
+          || row.status == PdDeploymentStatus.FAILED
+          || row.status == PdDeploymentStatus.GONE) {
         candidates.add(
             new Candidate(
                 row.id, row.applicationName, row.environmentId, row.status, row.containerName,
@@ -182,9 +186,15 @@ public class DeploymentObserver {
   }
 
   /**
-   * A {@code FAILED} row whose container is in fact serving. The original failure text is
-   * <b>appended, never erased</b> — it is the diagnosis of what went wrong at deploy time, and
-   * eaa34fbc is exactly the row where that text is the whole reason anybody found the bug.
+   * A demoted row — {@code FAILED} or {@code GONE} — whose container is in fact serving. The
+   * original failure text is <b>appended, never erased</b> — it is the diagnosis of what went wrong
+   * at deploy time, and eaa34fbc is exactly the row where that text is the whole reason anybody
+   * found the bug.
+   *
+   * <p>Both words recover, and that is the rule rather than a convenience: {@code GONE} is this
+   * class's own demotion, so a container that comes back has to be able to undo it. A recovery arm
+   * that healed only {@code FAILED} would leave the observation able to demote a row it could never
+   * put back.
    */
   private void recover(Candidate candidate, HealthGate.Poll observed) {
     Instant at = Instant.now();
@@ -193,7 +203,9 @@ public class DeploymentObserver {
             "The observed recovery of deployment " + candidate.deploymentId(),
             () -> {
               PdDeployment row = deployments.findById(candidate.deploymentId());
-              if (row == null || row.status != PdDeploymentStatus.FAILED) {
+              if (row == null
+                  || (row.status != PdDeploymentStatus.FAILED
+                      && row.status != PdDeploymentStatus.GONE)) {
                 return List.<String>of(); // deleted, or already settled by a deployment
               }
               List<String> stale = new ArrayList<>();
@@ -219,14 +231,21 @@ public class DeploymentObserver {
             },
             CUTOVER_BUDGET);
     LOG.infof(
-        "Recovered deployment %s by observation: %s is %s, so the row that said FAILED was wrong%s",
+        "Recovered deployment %s by observation: %s is %s, so the row that said %s was wrong%s",
         candidate.deploymentId(),
         candidate.containerName(),
         describe(observed),
         retired.isEmpty() ? "" : " (retired " + retired.size() + " row(s) it never decommissioned)");
   }
 
-  /** An {@code ACTIVE} row whose container two passes agree is gone. */
+  /**
+   * An {@code ACTIVE} row whose container two passes agree is gone.
+   *
+   * <p><b>It writes {@code GONE} rather than {@code FAILED}</b>, and the distinction is the whole
+   * reason the word exists: this deployment succeeded — it passed its gate and served — and what
+   * failed is the place, minutes or hours later. Spelled {@code FAILED} it read as an indictment of
+   * a build that was fine, beside rows where the build really was the problem.
+   */
   private void demote(Candidate candidate, HealthGate.Poll observed) {
     Instant at = Instant.now();
     DbRetry.runInNewTx(
@@ -236,14 +255,14 @@ public class DeploymentObserver {
           if (row == null || row.status != PdDeploymentStatus.ACTIVE) {
             return; // deleted, or replaced by a deployment while this pass ran
           }
-          row.status = PdDeploymentStatus.FAILED;
+          row.status = PdDeploymentStatus.GONE;
           row.detail = failureDetail(candidate, observed, at);
           row.finishedAt = at;
           deployments.flush(); // statement phase, so a lost connection is retriable — see recover()
         },
         CUTOVER_BUDGET);
     LOG.warnf(
-        "Deployment %s was ACTIVE, but %s is %s on %d consecutive observations — recorded FAILED."
+        "Deployment %s was ACTIVE, but %s is %s on %d consecutive observations — recorded GONE."
             + " No container was touched: whatever still holds the alias is the next deployment's"
             + " predecessor.",
         candidate.deploymentId(), candidate.containerName(), describe(observed), STRIKES_TO_DEMOTE);
@@ -265,7 +284,7 @@ public class DeploymentObserver {
   }
 
   private static String failureDetail(Candidate candidate, HealthGate.Poll observed, Instant at) {
-    return "[failed by observation at "
+    return "[gone by observation at "
         + at
         + ": container "
         + candidate.containerName()

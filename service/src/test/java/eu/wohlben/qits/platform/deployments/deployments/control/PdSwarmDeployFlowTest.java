@@ -139,9 +139,12 @@ public class PdSwarmDeployFlowTest {
   }
 
   @Test
-  public void aRolledBackUpdateIsAFailedDeploymentCarryingSwarmsOwnWords() {
+  public void aRolledBackUpdateEndsTheRowRolledBackCarryingSwarmsOwnWords() {
     // The measured failure path under start-first: the predecessor kept serving, swarm reverted the
     // spec by itself, and what is left for this component to do is the row and the event.
+    //
+    // The row says ROLLED_BACK rather than FAILED, because the orchestrator answered the question a
+    // reader actually has — the place is still served — and FAILED threw that answer away.
     fake.scriptConvergence(
         DeploymentDriver.Convergence.rolledBack(
             "swarm rolled dev-repo-swarm-sick back to its predecessor: rollback completed"));
@@ -150,12 +153,14 @@ public class PdSwarmDeployFlowTest {
     postBuildSucceeded("run-sick", "repo-swarm-sick", "environment/swarm-sick");
     List<Map<String, Object>> deployments = awaitSettled(environmentId, 1);
 
-    assertEquals("FAILED", deployments.get(0).get("status"));
+    assertEquals("ROLLED_BACK", deployments.get(0).get("status"));
     assertTrue(
         ((String) deployments.get(0).get("detail")).contains("rollback completed"),
         "swarm's own words are on the row: " + deployments.get(0).get("detail"));
+    // Still DeploymentFailed — the four events stay four, and the refined word rides its status
+    // field, which is what a string on the wire was for.
     OutboxEvent failed = only("DeploymentFailed");
-    assertTrue(failed.payload.contains("\"status\":\"FAILED\""), failed.payload);
+    assertTrue(failed.payload.contains("\"status\":\"ROLLED_BACK\""), failed.payload);
     assertTrue(failed.payload.contains("rollback completed"), failed.payload);
     assertNull(only("DeploymentActive", 0), "nothing was cut over");
   }

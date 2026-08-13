@@ -128,14 +128,17 @@ public class PdSweepAdoptionTest {
 
     deployService.sweepInFlight();
 
-    assertEquals("FAILED", statusOf(superseded));
+    assertEquals(
+        "SUPERSEDED",
+        statusOf(superseded),
+        "a newer sha is serving this place, which is the one interrupted row that is not a FAILED");
     String detail = detailOf(superseded);
     assertTrue(detail.contains("superseded"), detail);
     assertTrue(detail.contains(OTHER_SHA), detail);
   }
 
   @Test
-  public void aStartingRowWhoseServiceIsGoneStillFails() {
+  public void aStartingRowWithNoSuccessorStillFails() {
     String interrupted =
         deployment("qits-platform-deployments", "env-sweep-fail", PdDeploymentStatus.STARTING, "vanished");
     // Nothing scripted for "vanished": the runtime has no such service, so there is no evidence
@@ -143,7 +146,10 @@ public class PdSweepAdoptionTest {
 
     deployService.sweepInFlight();
 
-    assertEquals("FAILED", statusOf(interrupted));
+    assertEquals(
+        "FAILED",
+        statusOf(interrupted),
+        "nothing is known to serve the place, so this is the narrowed FAILED and not SUPERSEDED");
     assertTrue(detailOf(interrupted).contains("interrupted"), detailOf(interrupted));
   }
 

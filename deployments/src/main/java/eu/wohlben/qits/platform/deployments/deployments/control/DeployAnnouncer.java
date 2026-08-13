@@ -47,8 +47,9 @@ import java.util.UUID;
  * and the next; anything slower than that does not belong behind this port.
  *
  * <p><b>What deliberately does NOT announce, yet.</b> {@link DeploymentObserver}'s later corrections
- * (an {@code ACTIVE} row whose container died, a {@code FAILED} row whose container is healthy
- * after all) and the startup sweep's adoptions write the same statuses and publish nothing: they
+ * (an {@code ACTIVE} row demoted to {@code GONE}, a demoted row whose container is healthy after
+ * all) and the startup sweep's verdicts — {@code ACTIVE} or {@code SUPERSEDED} — publish nothing:
+ * they
  * restate a deployment's outcome minutes or hours later, and a consumer would need to know that the
  * second statement supersedes the first before either is useful. That is a second design and it is
  * not this one.
@@ -64,6 +65,10 @@ public interface DeployAnnouncer {
   /** The cutover was recorded: this deployment is what serves now. */
   void onActive(DeploymentActive event, UUID cause);
 
-  /** The deployment ended {@code FAILED} or {@code IMAGE_MISSING}; nothing was cut over. */
+  /**
+   * The deployment did not go live — {@code FAILED}, {@code IMAGE_MISSING} or {@code ROLLED_BACK},
+   * carried on the event as a string. Nothing was cut over, and on a rollback the predecessor is
+   * serving still.
+   */
   void onFailed(DeploymentFailed event, UUID cause);
 }

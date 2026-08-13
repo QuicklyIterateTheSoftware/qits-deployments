@@ -127,6 +127,36 @@ public class PdDeploymentObservationTest {
   }
 
   @Test
+  public void aGoneRowWhoseContainerCameBackIsRecoveredToo() {
+    // The demotion's own word. A container absent for two passes and back on the third is the
+    // restart nobody watched, and a recovery arm that healed only FAILED would leave the
+    // observation able to write a status it could never take back.
+    String container = "qits-pd-prod-obs-returned-00000009";
+    String gone =
+        deployment(
+            "obs-returned",
+            "env-obs-returned",
+            PdDeploymentStatus.GONE,
+            container,
+            "[gone by observation at 2026-08-12T00:00:00Z: container "
+                + container
+                + " is gone on 2 consecutive observations]");
+    driver.scriptObservation(container, "running/healthy");
+
+    observer.observeOnce();
+
+    PdDeployment row = rowOf(gone);
+    assertEquals(PdDeploymentStatus.ACTIVE, row.status);
+    assertTrue(
+        row.detail.contains("recovered by observation"),
+        "the detail says an observation did this: " + row.detail);
+    assertTrue(
+        row.detail.contains("gone by observation"),
+        "and the demotion it undid is kept under it: " + row.detail);
+    assertNothingWasTouched();
+  }
+
+  @Test
   public void aHealthyContainerOfAnotherDeploymentDoesNotResurrectAFailedRow() {
     // The row names the container that was removed when its deployment failed; something else on the
     // host is healthy. Only the row's OWN container may settle the row.
@@ -161,9 +191,12 @@ public class PdDeploymentObservationTest {
 
     observer.observeOnce();
     PdDeployment row = rowOf(active);
-    assertEquals(PdDeploymentStatus.FAILED, row.status);
+    assertEquals(
+        PdDeploymentStatus.GONE,
+        row.status,
+        "the deployment succeeded and the place died afterwards — that is GONE, not FAILED");
     assertTrue(
-        row.detail.contains("failed by observation"),
+        row.detail.contains("gone by observation"),
         "the detail says an observation did this: " + row.detail);
     assertTrue(
         row.detail.contains("qits-pd-prod-obs-vanished-00000001"),
@@ -183,7 +216,7 @@ public class PdDeploymentObservationTest {
     observer.observeOnce();
 
     PdDeployment row = rowOf(active);
-    assertEquals(PdDeploymentStatus.FAILED, row.status);
+    assertEquals(PdDeploymentStatus.GONE, row.status);
     assertTrue(row.detail.contains("exited/unhealthy"), "docker's own words: " + row.detail);
   }
 

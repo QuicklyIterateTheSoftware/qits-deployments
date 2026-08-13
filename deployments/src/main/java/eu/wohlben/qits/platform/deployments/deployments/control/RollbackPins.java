@@ -44,10 +44,16 @@ import java.util.TreeSet;
  *       what is already running and drop the only thing a rollback could pull.
  *   <li><b>One rollback step, not the whole history.</b> Keeping every sha a row ever named
  *       reclaims nothing.
- *   <li><b>A row that never served is not a rollback target.</b> {@code FAILED}, {@code
- *       IMAGE_MISSING}, {@code QUEUED} and {@code STARTING} rows are skipped rather than ending the
- *       search: an attempt that never passed a health gate is not a version to go back to, and
- *       going back to it is not what {@link DeployService} does.
+ *   <li><b>A row that is not serving is not a rollback target.</b> Every status but {@code ACTIVE}
+ *       and {@code DECOMMISSIONED} is skipped rather than ending the search: an attempt that never
+ *       passed a health gate is not a version to go back to, and going back to it is not what
+ *       {@link DeployService} does.
+ *       <p>The refined failure vocabulary changes nothing here, and that is worth stating because
+ *       one of the words looks like it should. {@code ROLLED_BACK} and {@code SUPERSEDED} never
+ *       served, exactly as the {@code FAILED} they used to be spelled as. {@code GONE} <em>did</em>
+ *       serve — and is still skipped, because a pin keeps an image the platform can go back to and
+ *       a row whose container is confirmed absent has nothing left to go back to. It was excluded
+ *       as {@code FAILED} before the word existed, so naming it did not move the answer.
  *   <li><b>Per application <em>name</em>, across every environment.</b> One service in two
  *       environments is two histories sharing one image name, since every pull is {@code
  *       <repository>/<name>:<sha>} ({@link ImageRefs}). Both tiers' shas pin that image; naming one

@@ -257,7 +257,10 @@ public class PdDeploymentFlowTest {
     postBuildSucceeded("repo-unhealthy", "environment/flow-unhealthy", SHA_B);
     List<Map<String, Object>> deployments = awaitDeployments(environmentId, 2);
 
-    assertEquals("FAILED", deployments.get(0).get("status"));
+    assertEquals(
+        "ROLLED_BACK",
+        deployments.get(0).get("status"),
+        "the orchestrator put the predecessor back, and the word says so");
     assertEquals(SHA_B, deployments.get(0).get("commitSha"));
     assertTrue(
         ((String) deployments.get(0).get("detail")).contains("never went healthy"),
@@ -270,6 +273,8 @@ public class PdDeploymentFlowTest {
 
   @Test
   public void aRefusedApplyIsAFailedDeployment() {
+    // Nothing was applied and nothing rolled anything back, so nothing is known to serve — the
+    // narrowed FAILED, and the reference point for the three words beside it.
     driver.scriptApply(
         new DeploymentDriver.ApplyResult(
             DeploymentDriver.ApplyOutcome.REFUSED, "docker: connection refused"));

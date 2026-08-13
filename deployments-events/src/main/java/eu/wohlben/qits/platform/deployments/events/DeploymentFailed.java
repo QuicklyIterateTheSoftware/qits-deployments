@@ -10,12 +10,22 @@ import java.util.UUID;
  *
  * <p>Its common fields are {@link DeploymentQueued}'s, argued there.
  *
- * <p><b>{@code status} is a string carrying the deployer's own terminal state</b> — {@code FAILED}
- * or {@code IMAGE_MISSING} — rather than two event types or a boolean. The two are one thing to a
- * consumer ("this did not go live") and different things to a person: an image the registry does not
- * have yet is the expected outcome for an application nothing publishes, and folding it into {@code
- * FAILED} would page somebody for it. A string rather than an enum because an enum on the wire is a
- * shared type, and cross-context references here are plain values.
+ * <p><b>{@code status} is a string carrying the deployer's own terminal state</b> — {@code FAILED},
+ * {@code IMAGE_MISSING} or {@code ROLLED_BACK} — rather than one event type per outcome or a
+ * boolean. They are one thing to a consumer ("this did not go live") and different things to a
+ * person: an image the registry does not have yet is the expected outcome for an application
+ * nothing publishes, and a rollback means the predecessor is still serving. Folding either into
+ * {@code FAILED} would page somebody for it.
+ *
+ * <p><b>That the field is a string is what let the vocabulary grow without a fifth event.</b> A
+ * word added here reaches every consumer as data; one that switches on the value learns a new one
+ * and one that only cares "not live" is untouched. An enum on the wire would have been a shared
+ * type, and cross-context references here are plain values.
+ *
+ * <p>Two of the deployer's words never arrive on this event, deliberately: {@code SUPERSEDED} is
+ * written by the startup sweep and {@code GONE} by the periodic observation, and neither announces
+ * anything — both restate an outcome minutes or hours after the fact, which a consumer would first
+ * have to know supersedes the earlier statement.
  *
  * <p><b>{@code detail} is docker's own output or this component's own sentence, and it is
  * nullable.</b> It is a diagnosis for a person, never something to parse — the wording is whatever

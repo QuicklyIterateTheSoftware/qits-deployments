@@ -65,7 +65,7 @@ public class PdPinApiTest {
   public void aFailedGateLeavesThePinsWhereItLeavesTheApplication() {
     // The anchor to the real rollback: a successor that never converges is reverted by the
     // orchestrator, so the previous deployment is still ACTIVE and serving
-    // (PdSwarmDeployFlowTest.aRolledBackUpdateIsAFailedDeploymentCarryingSwarmsOwnWords). The pins
+    // (PdSwarmDeployFlowTest.aRolledBackUpdateEndsTheRowRolledBackCarryingSwarmsOwnWords). The pins
     // say exactly that — the serving sha, and no rollback target, because nothing ever served
     // before it. The failed sha is pinned by nothing: nothing was ever created from it.
     String environmentId = createEnvironment("pins-gate");

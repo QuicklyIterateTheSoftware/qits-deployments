@@ -211,8 +211,8 @@ public class DeployService implements BuildAnnouncements {
 
   /**
    * A deployment left {@code QUEUED} or {@code STARTING} by a crash can never make progress — the
-   * worker queue does not survive the JVM — so it would show as forever-deploying. Fail those once
-   * at startup, except where the runtime says otherwise: see {@link #sweepInFlight()}. The
+   * worker queue does not survive the JVM — so it would show as forever-deploying. Settle those
+   * once at startup, from what the runtime says: see {@link #sweepInFlight()}. The
    * containers are deliberately NOT reaped: a deployed application outlives its deployer, and
    * whatever was {@code ACTIVE} before the restart is still serving.
    */
@@ -314,8 +314,13 @@ public class DeployService implements BuildAnnouncements {
    *   <tr><td>{@code STARTING}</td><td>an image carrying this row's sha</td>
    *       <td>{@code ACTIVE}, prior actives of the place decommissioned</td></tr>
    *   <tr><td>{@code STARTING}</td><td>an image carrying another sha</td>
-   *       <td>{@code FAILED}: superseded — a rollback, or a later deployment</td></tr>
+   *       <td>{@code SUPERSEDED}: a rollback, or a later deployment, took the place</td></tr>
    * </table>
+   *
+   * <p><b>The last two rows used to be one word, and telling them apart is the point.</b> An
+   * interrupted row with no evidence leaves nobody known to be serving, which is {@code FAILED};
+   * a row whose place a newer sha is already serving is {@code SUPERSEDED}, and nothing is owed
+   * about it. The sweep is the only writer of that word.
    *
    * <p><b>An adopted row is not a claim that the gate passed</b>, and it does not need to be: on
    * what carries the row's image is what is serving under the row's name, and a
@@ -331,7 +336,7 @@ public class DeployService implements BuildAnnouncements {
   void sweepInFlight() {
     List<InFlight> rows = QuarkusTransaction.requiringNew().call(this::inFlight);
     int adopted = 0;
-    int failed = 0;
+    int settled = 0;
     for (InFlight row : rows) {
       Verdict verdict = verdictOn(row);
       QuarkusTransaction.requiringNew().run(() -> record(row, verdict));
@@ -341,11 +346,14 @@ public class DeployService implements BuildAnnouncements {
             "Adopted deployment %s at startup: %s is running its image",
             row.deploymentId(), row.containerName());
       } else {
-        failed++;
+        settled++;
       }
     }
-    if (failed > 0) {
-      LOG.infof("Marked %d deployment(s) left in flight by a previous shutdown as FAILED", failed);
+    if (settled > 0) {
+      LOG.infof(
+          "Settled %d deployment(s) left in flight by a previous shutdown — SUPERSEDED where a"
+              + " newer sha is serving the place, FAILED where nothing is",
+          settled);
     }
     if (adopted > 0) {
       LOG.infof("Adopted %d deployment(s) the previous instance could not record", adopted);
@@ -361,8 +369,18 @@ public class DeployService implements BuildAnnouncements {
       String containerName,
       String commitSha) {}
 
-  /** Adopt this row, or fail it with this detail. */
-  private record Verdict(boolean adopt, String detail) {}
+  /**
+   * What settles this row: the status to write, and the detail that argues it. It carries the word
+   * rather than a boolean because the sweep has three answers now — adopt, superseded, failed — and
+   * a boolean could only spell two of them.
+   */
+  private record Verdict(PdDeploymentStatus status, String detail) {
+
+    /** Adoption is the one verdict with bookkeeping of its own: the prior actives of the place. */
+    boolean adopt() {
+      return status == PdDeploymentStatus.ACTIVE;
+    }
+  }
 
   private List<InFlight> inFlight() {
     List<PdDeployment> rows = new ArrayList<>(deployments.listByStatus(PdDeploymentStatus.QUEUED));
@@ -383,18 +401,19 @@ public class DeployService implements BuildAnnouncements {
   /** The decision table above, asked of the runtime. */
   private Verdict verdictOn(InFlight row) {
     if (row.status() != PdDeploymentStatus.STARTING || row.containerName() == null) {
-      return new Verdict(false, INTERRUPTED);
+      return new Verdict(PdDeploymentStatus.FAILED, INTERRUPTED);
     }
     DeploymentDriver.RunningImage running = driver.runningImage(row.containerName()).orElse(null);
     if (running == null) {
-      return new Verdict(false, INTERRUPTED);
+      return new Verdict(PdDeploymentStatus.FAILED, INTERRUPTED);
     }
     if (ImageRefs.carries(running.imageRef(), row.commitSha())) {
       return new Verdict(
-          true, "[adopted at startup: " + row.containerName() + " is running this deployment]");
+          PdDeploymentStatus.ACTIVE,
+          "[adopted at startup: " + row.containerName() + " is running this deployment]");
     }
     return new Verdict(
-        false,
+        PdDeploymentStatus.SUPERSEDED,
         "[superseded: "
             + row.containerName()
             + " runs "
@@ -418,7 +437,7 @@ public class DeployService implements BuildAnnouncements {
         previous.finishedAt = Instant.now();
       }
     }
-    deployment.status = verdict.adopt() ? PdDeploymentStatus.ACTIVE : PdDeploymentStatus.FAILED;
+    deployment.status = verdict.status();
     deployment.detail = verdict.detail();
     deployment.finishedAt = Instant.now();
   }
@@ -1167,9 +1186,21 @@ public class DeployService implements BuildAnnouncements {
     DeploymentDriver.Convergence converged =
         driver.awaitConverged(name, Duration.ofSeconds(healthTimeoutSeconds));
     if (!converged.converged()) {
-      // Nothing runs that did not run before: the driver removed the successor and put the
-      // predecessor back (docker), or the orchestrator reverted the spec itself (swarm).
-      finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(converged.detail()));
+      // Nothing runs that did not run before: the orchestrator reverted the spec itself, and the
+      // predecessor is serving again by the time this returns.
+      //
+      // ROLLED_BACK is that verdict kept rather than flattened. The orchestrator already answered
+      // the question a reader has ("is anything serving this place?") and FAILED threw the answer
+      // away — a rolled-back deployment and a refused apply asked for very different reactions and
+      // read identically on the row. A convergence that failed WITHOUT a rollback keeps FAILED,
+      // because there nothing is known to serve.
+      finish(
+          deploymentId,
+          target,
+          converged.outcome() == DeploymentDriver.ConvergenceOutcome.ROLLED_BACK
+              ? PdDeploymentStatus.ROLLED_BACK
+              : PdDeploymentStatus.FAILED,
+          safe(converged.detail()));
       return;
     }
 
@@ -1323,6 +1354,10 @@ public class DeployService implements BuildAnnouncements {
    * status is not {@code ACTIVE} — the same test the WARN already made, and nothing calls this with
    * {@code ACTIVE} today; the happy path announces from the cutover, which knows things this does
    * not.
+   *
+   * <p><b>The word travels.</b> {@code DeploymentFailed} already carries the status as a string, so
+   * a {@code ROLLED_BACK} outcome announces that word and consumers that only care "this did not go
+   * live" are unaffected — which is why refining the vocabulary needed no fifth event.
    *
    * <p><b>No row, no event.</b> A deployment whose environment was torn down mid-deploy has nothing
    * to record and nothing to announce: the bracket returns null and this returns without publishing.
