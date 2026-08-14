@@ -352,6 +352,33 @@ per-application networks the state machine still computes are dropped by the swa
 loud. A service update keeps the mounts, networks and ports it was created with: changing the shape
 of a service is a `service rm` and a redeploy, not a deployment.
 
+### Network aliases: the vhost names docker's DNS cannot make up
+
+**`qits.platform.deployments.extras.<app>.aliases[N]`** is a plain DNS name the application also
+answers to on the **shared** network — the flat overlay every service joins. It exists because the
+edge proxy carries the platform's vhost names (`registry.dev.localhost` and its siblings) and
+docker's embedded DNS **cannot synthesize a `*.localhost`**: a container asking for one gets
+NXDOMAIN unless the edge holds the name as a network alias. It is deployment config rather than a
+repository's spec for the reason the rest of the family is — where a name resolves is a property of
+the platform, not of the code.
+
+Four things about the rendering, each easy to undo by accident:
+
+- **With no aliases the argv is byte-identical to what it always was**: `--network <net>`, the short
+  form. One alias or more turns *that one attachment* into the long form, `--network
+  name=<net>,alias=<a1>,alias=<a2>`. `aServiceWithNoAliasesGetsTheShortFormItAlwaysGot` pins it —
+  the two spellings mean the same thing to swarm, so nothing but the test keeps the diff honest.
+- **Only the shared network carries them.** An alias is an address and has to be on the network the
+  platform's names resolve on; `qits-platform` and anything else a spec declares keep the short form.
+- **Aliases with no shared network to hold them are a REFUSED deployment**, the publish-with-an-ip
+  stance: a name asked for and quietly not registered is a peer resolving nothing, hours later and
+  somewhere else.
+- **`buildUpdateArgv` stays network-free, so an alias change is not a deployment** — the ports
+  doctrine exactly. Swarm has no add-an-alias and `--network-add` of a network the service is
+  already on is an error, so a live service gains or loses one by hand (`service update --network-rm
+  <net> --network-add name=<net>,alias=…`, which recreates the task) or by a `service rm` and a
+  redeploy. A declared alias reaches a service only on its next **create**.
+
 **`update_order` in `.config/qits/deployments.yml`** is `start-first` (default) or `stop-first`, per
 repository, and only the repository knows: a published host port, a single-writer store or a held
 config volume each make the overlap impossible. This repo says `stop-first`. It reaches the
@@ -652,8 +679,8 @@ than escaping it cleverly.
 Argvs are assembled for `ProcessBuilder`, which never re-splits — but do not lean on that:
 validation stays at the boundary and the belt stays at the argv.
 
-Mounts, published ports, groups and extra env in a *started* container's argv come from the
-**deployment's own config and nowhere else** (`qits.platform.deployments.extras.<application>.*`,
+Mounts, published ports, groups, network aliases and extra env in a *started* container's argv come
+from the **deployment's own config and nowhere else** (`qits.platform.deployments.extras.<application>.*`,
 read by `ServiceExtras`). Nothing arriving over HTTP may contribute a token to a `docker run`; the
 API is deliberately open on the platform's networks, and config is the trust domain that already
 holds the socket. `ServiceExtrasTest.anotherApplicationsKeysAreNeverRead`, plus

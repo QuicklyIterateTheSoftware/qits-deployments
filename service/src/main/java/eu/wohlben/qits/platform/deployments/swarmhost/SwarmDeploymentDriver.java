@@ -1014,6 +1014,9 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * registry can resolve them to a digest.
    */
   List<String> buildCreateArgv(ServiceSpec spec, String name, List<String> networks) {
+    // Read once: the same refusal would otherwise be reached twice, and the aliases belong to the
+    // membership while everything else belongs to the flags below it.
+    ServiceExtras extras = ServiceExtras.of(config, spec.applicationName());
     List<String> argv =
         new ArrayList<>(
             List.of(
@@ -1028,10 +1031,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
                 "--no-resolve-image"));
     registryAuthFlag(argv);
     // The FULL membership, here and nowhere else: every later --network-add recreates the task.
-    for (String network : networks) {
-      argv.add("--network");
-      argv.add(network);
-    }
+    networkFlags(argv, networks, extras.aliases());
     // A deployed application outlives the daemon's restart.
     argv.add("--restart-condition");
     argv.add("any");
@@ -1049,9 +1049,50 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--env");
       argv.add(variable);
     }
-    extras(argv, ServiceExtras.of(config, spec.applicationName()), spec.publishMode());
+    extras(argv, extras, spec.publishMode());
     argv.add(spec.imageRef());
     return List.copyOf(argv);
+  }
+
+  /**
+   * The membership, and the aliases that ride the shared network's attachment.
+   *
+   * <p><b>The short form is what a service with no aliases gets, byte for byte.</b> {@code
+   * --network <net>} and {@code --network name=<net>} mean the same thing to swarm, but only one of
+   * them is what every service on this platform was created with, and a shape change with no
+   * intent behind it is a diff a reader has to rule out.
+   *
+   * <p><b>Only the flat network carries them.</b> An alias is an address, and the address has to be
+   * on the network the platform's names are resolved on — the one every service joins. {@code
+   * qits-platform} is the plane's own network and keeps the short form.
+   *
+   * <p><b>Aliases with no flat network to hold them are a REFUSAL</b>, the publish-with-an-ip
+   * stance: a name that was asked for and quietly not registered is a peer resolving nothing, and
+   * that failure surfaces as somebody else's outage hours later.
+   */
+  private void networkFlags(List<String> argv, List<String> networks, List<String> aliases) {
+    String shared = flatNetwork == null ? "" : flatNetwork.strip();
+    boolean carried = false;
+    for (String network : networks) {
+      argv.add("--network");
+      if (aliases.isEmpty() || !network.equals(shared)) {
+        argv.add(network);
+        continue;
+      }
+      StringBuilder attachment = new StringBuilder("name=").append(network);
+      for (String alias : aliases) {
+        attachment.append(",alias=").append(alias);
+      }
+      argv.add(attachment.toString());
+      carried = true;
+    }
+    if (!aliases.isEmpty() && !carried) {
+      throw new ServiceExtras.Refused(
+          "aliases "
+              + aliases
+              + " are declared, and this service joins no shared network to hold them: an alias is"
+              + " an address on qits.platform.deployments.swarm.flat-network");
+    }
   }
 
   /**
@@ -1066,6 +1107,14 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * repository that starts saying {@code publish_mode: ingress} is describing a different shape of
    * service, and an existing service keeps the mode it was created with until it is removed and
    * created again — the {@code service rm} and redeploy every shape change here takes.
+   *
+   * <p><b>The network ALIASES ride with the networks, so changing them is not a deployment
+   * either.</b> An attachment is restated as a whole or not at all: swarm has no add-an-alias, and
+   * {@code --network-add} of a network the service is already on is an error. So a service that is
+   * gaining or losing an alias takes {@code service update --network-rm <net> --network-add
+   * name=<net>,alias=…} by hand — which recreates the task — or the {@code service rm} and redeploy.
+   * A deployment after that keeps whatever the service holds, which is why an alias declared in
+   * config reaches a LIVE service only on its next create.
    *
    * <p><b>The environment is the exception, and it is re-stated in full</b> — this component's own
    * variables and the deployment config's alike. A variable is a value rather than a shape: config

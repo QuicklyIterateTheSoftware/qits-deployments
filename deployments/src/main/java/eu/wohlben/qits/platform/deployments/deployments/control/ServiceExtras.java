@@ -28,12 +28,20 @@ import org.eclipse.microprofile.config.Config;
  *                                                                 | bind:&lt;host-path&gt;:&lt;target&gt;[:ro]
  * qits.platform.deployments.extras.&lt;application&gt;.publishes[&lt;i&gt;] = [&lt;ip&gt;:]&lt;host-port&gt;:&lt;port&gt;[/tcp|/udp]
  * qits.platform.deployments.extras.&lt;application&gt;.groups[&lt;i&gt;]    = &lt;gid&gt;
+ * qits.platform.deployments.extras.&lt;application&gt;.aliases[&lt;i&gt;]   = &lt;dns-name&gt;
  * qits.platform.deployments.extras.&lt;application&gt;.env.&lt;KEY&gt;      = &lt;value&gt;
  * </pre>
  *
  * <p>The index orders a list and means nothing else. Environment is keyed by the variable instead,
  * because a variable is named once by definition — and because a generated file that renumbers
  * twenty entries to add one is a file nobody edits safely.
+ *
+ * <p><b>An alias is a second DNS name for this application on the shared network</b>, and it exists
+ * because the edge proxy answers for vhost names ({@code registry.dev.localhost} and its siblings)
+ * that docker's embedded DNS cannot synthesize: a container asking for one gets NXDOMAIN unless the
+ * edge holds it as a network alias. It is deployment config rather than a repository's own spec for
+ * the reason every other member of this family is — where a name resolves is a property of the
+ * platform an application is deployed onto, not of the code.
  *
  * <p><b>An unknown or malformed key is a refused deployment, not a warning.</b> Config is typed
  * now, so garbage in it is a bug — and the failure it used to produce was the worst kind: a
@@ -51,13 +59,18 @@ import org.eclipse.microprofile.config.Config;
  * already holds the docker socket, and it is the only source.
  */
 public record ServiceExtras(
-    List<Mount> mounts, List<Publish> publishes, List<String> groups, List<String> env) {
+    List<Mount> mounts,
+    List<Publish> publishes,
+    List<String> groups,
+    List<String> env,
+    List<String> aliases) {
 
   /** The application that stated nothing — most of them. */
   public static final ServiceExtras NONE =
-      new ServiceExtras(List.of(), List.of(), List.of(), List.of());
+      new ServiceExtras(List.of(), List.of(), List.of(), List.of(), List.of());
 
-  private static final Pattern INDEXED = Pattern.compile("(mounts|publishes|groups)\\[(\\d{1,4})]");
+  private static final Pattern INDEXED =
+      Pattern.compile("(mounts|publishes|groups|aliases)\\[(\\d{1,4})]");
 
   /** The env spelling, so a value cannot forge a second variable out of its key. */
   private static final Pattern ENV_KEY = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
@@ -71,6 +84,7 @@ public record ServiceExtras(
     publishes = List.copyOf(publishes);
     groups = List.copyOf(groups);
     env = List.copyOf(env);
+    aliases = List.copyOf(aliases);
   }
 
   /** A named volume or a host path, and the two are not interchangeable to any orchestrator. */
@@ -121,7 +135,11 @@ public record ServiceExtras(
 
   /** Whether this application stated anything at all. */
   public boolean isEmpty() {
-    return mounts.isEmpty() && publishes.isEmpty() && groups.isEmpty() && env.isEmpty();
+    return mounts.isEmpty()
+        && publishes.isEmpty()
+        && groups.isEmpty()
+        && env.isEmpty()
+        && aliases.isEmpty();
   }
 
   /**
@@ -137,6 +155,7 @@ public record ServiceExtras(
     Map<Integer, Mount> mounts = new TreeMap<>();
     Map<Integer, Publish> publishes = new TreeMap<>();
     Map<Integer, String> groups = new TreeMap<>();
+    Map<Integer, String> aliases = new TreeMap<>();
     // Sorted by variable name, so one application's argv is the same argv every time it is built.
     Map<String, String> env = new TreeMap<>();
     for (String name : config.getPropertyNames()) {
@@ -159,12 +178,14 @@ public record ServiceExtras(
       if (!indexed.matches()) {
         throw refuse(
             name,
-            "no such element — this family is env.<KEY>, mounts[i], publishes[i] and groups[i]");
+            "no such element — this family is env.<KEY>, mounts[i], publishes[i], groups[i] and"
+                + " aliases[i]");
       }
       int index = Integer.parseInt(indexed.group(2));
       switch (indexed.group(1)) {
         case "mounts" -> mounts.put(index, mount(name, required(name, value)));
         case "publishes" -> publishes.put(index, publish(name, required(name, value)));
+        case "aliases" -> aliases.put(index, alias(name, required(name, value)));
         default -> groups.put(index, group(name, required(name, value)));
       }
     }
@@ -174,7 +195,8 @@ public record ServiceExtras(
         List.copyOf(mounts.values()),
         List.copyOf(publishes.values()),
         List.copyOf(groups.values()),
-        assignments);
+        assignments,
+        List.copyOf(aliases.values()));
   }
 
   private static Mount mount(String key, String value) {
@@ -244,6 +266,23 @@ public record ServiceExtras(
       throw refuse(key, value + " is not a port number");
     }
     return port;
+  }
+
+  /**
+   * One DNS name, and the two characters it may never carry are the two that would make it more
+   * than one thing. A renderer states an alias inside a comma-separated attachment ({@code
+   * name=<net>,alias=<a>}), so a comma in the value forges a second field; whitespace makes a name
+   * nothing resolves — an argv element is never re-split, so the space would simply be part of the
+   * name. Everything else is left to the daemon, which is the authority on what it will register.
+   */
+  private static String alias(String key, String value) {
+    if (value.indexOf(',') >= 0) {
+      throw refuse(key, "'" + value + "' has a comma in it, and an alias is one name");
+    }
+    if (value.chars().anyMatch(Character::isWhitespace)) {
+      throw refuse(key, "'" + value + "' has whitespace in it, and an alias is one name");
+    }
+    return value;
   }
 
   private static String group(String key, String value) {

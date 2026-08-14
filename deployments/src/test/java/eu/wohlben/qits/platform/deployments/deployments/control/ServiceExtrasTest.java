@@ -48,6 +48,8 @@ class ServiceExtrasTest {
                 P + "qits-ci.publishes[0]", "127.0.0.1:8081:8080",
                 P + "qits-ci.publishes[1]", "5353:8053/udp",
                 P + "qits-ci.groups[0]", "988",
+                P + "qits-ci.aliases[0]", "registry.dev.localhost",
+                P + "qits-ci.aliases[1]", "mirror.dev.localhost",
                 P + "qits-ci.env.QITS_EVENTS_URL", "http://dev-qits-events:8080"));
 
     assertEquals(
@@ -62,7 +64,27 @@ class ServiceExtrasTest {
             new ServiceExtras.Publish(null, 5353, 8053, "udp")),
         extras.publishes());
     assertEquals(List.of("988"), extras.groups());
+    assertEquals(
+        List.of("registry.dev.localhost", "mirror.dev.localhost"),
+        extras.aliases(),
+        "the index orders them, and a plain name is the whole value");
     assertEquals(List.of("QITS_EVENTS_URL=http://dev-qits-events:8080"), extras.env());
+  }
+
+  @Test
+  void anAliasIsOneNameAndAnythingThatWouldMakeItTwoIsRefused() {
+    // A renderer states an alias inside a comma-separated attachment, so a comma forges a second
+    // field; whitespace makes a name nothing ever resolves, because an argv element is not re-split.
+    refused(Map.of(P + "qits-ci.aliases[0]", ""));
+    refused(Map.of(P + "qits-ci.aliases[0]", "   "));
+    assertTrue(
+        refused(Map.of(P + "qits-ci.aliases[0]", "registry.dev.localhost,mirror.dev.localhost"))
+            .getMessage()
+            .contains("comma"));
+    assertTrue(
+        refused(Map.of(P + "qits-ci.aliases[0]", "registry.dev.localhost mirror.dev.localhost"))
+            .getMessage()
+            .contains("whitespace"));
   }
 
   @Test
