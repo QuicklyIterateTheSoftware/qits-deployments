@@ -264,6 +264,87 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void nothingCarriesARegistryCredentialUntilTheKeySaysSo() {
+    // The shipped state, and it is stated rather than assumed: reads on the platform's registry are
+    // anonymous today, so both argvs are what they were byte for byte.
+    assertFalse(
+        driver()
+            .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+            .contains("--with-registry-auth"));
+    assertFalse(
+        driver().buildUpdateArgv(spec(), "dev-qits-gateway").contains("--with-registry-auth"));
+  }
+
+  @Test
+  void theCredentialRidesBothArgvsSoTheAGENTSPullIsAuthenticatedToo() {
+    // The flag serialises the CLI's credential into the service spec, which is what the swarm agent
+    // pulls with. The warm-up `docker pull` is this process's own and proves nothing about the node
+    // — so a create that carried it and an update that did not would authenticate the first
+    // deployment of a service and refuse every one after it.
+    SwarmDeploymentDriver driver = driver();
+    driver.registryAuth = true;
+
+    assertTrue(
+        driver
+            .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+            .contains("--with-registry-auth"));
+    assertTrue(driver.buildUpdateArgv(spec(), "dev-qits-gateway").contains("--with-registry-auth"));
+    // It sits beside --no-resolve-image rather than instead of it: one says do not turn the tag
+    // into a digest, the other says hand the agents a credential for the pull they do later.
+    assertTrue(
+        driver
+            .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+            .contains("--no-resolve-image"));
+  }
+
+  @Test
+  void aRefusedPullIsItsOwnOutcomeInEveryWordingDockerHasForIt() {
+    // Each of these is a real docker phrasing, and the first is the one that used to be read as a
+    // missing image — it carries "repository does not exist" inside it, which is why the refusal
+    // list is asked first.
+    List<String> refusals =
+        List.of(
+            "Error response from daemon: pull access denied for qits/qits-gateway, repository does"
+                + " not exist or may require 'docker login'",
+            "denied: requested access to the resource is denied: authorization failed",
+            "no basic auth credentials",
+            "unauthorized: authentication required");
+
+    for (String refusal : refusals) {
+      SwarmDeploymentDriver driver = driver();
+      cli.script("pull", result(1, refusal));
+
+      DeploymentDriver.PullResult pulled = driver.pull(IMAGE);
+
+      assertEquals(DeploymentDriver.PullOutcome.AUTH_REFUSED, pulled.outcome(), refusal);
+      assertTrue(pulled.detail().contains(refusal), pulled.detail());
+    }
+  }
+
+  @Test
+  void anAbsentTagIsStillAMissingImage() {
+    // The narrowed meaning: the registry answered and has no such thing, which indicts the
+    // repository's own publishing step and nothing about a credential.
+    for (String absence : List.of("manifest unknown", "Error: image not found", "name unknown")) {
+      SwarmDeploymentDriver driver = driver();
+      cli.script("pull", result(1, absence));
+
+      assertEquals(
+          DeploymentDriver.PullOutcome.IMAGE_MISSING, driver.pull(IMAGE).outcome(), absence);
+    }
+  }
+
+  @Test
+  void aFailureNeitherListRecognisesIsStillAnError() {
+    // The narrowness rule, unchanged by the second list: a daemon that is down must never read as
+    // "nothing published this build" and must never read as "check the credential" either.
+    SwarmDeploymentDriver driver = driver();
+    cli.script("pull", result(1, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"));
+
+    assertEquals(DeploymentDriver.PullOutcome.ERROR, driver.pull(IMAGE).outcome());
+  }
+
+  @Test
   void everyExtraIsRenderedInSwarmsOwnSpelling() {
     // Nothing is translated out of a docker argv any more: config states mounts, publishes, groups
     // and environment, and this is what they are called on a service create.

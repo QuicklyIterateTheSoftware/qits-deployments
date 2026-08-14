@@ -1119,6 +1119,20 @@ public class DeployService implements BuildAnnouncements {
             "no image " + imageRef + "\n" + safe(pulled.detail()));
         return;
       }
+      case AUTH_REFUSED -> {
+        // A refusal is a FAILED deployment rather than IMAGE_MISSING, and the detail is why the
+        // two are told apart at all: what has to be fixed is the credential the daemon reads, not
+        // the pipeline that publishes the image.
+        finish(
+            deploymentId,
+            target,
+            PdDeploymentStatus.FAILED,
+            "the registry refused the pull of "
+                + imageRef
+                + " — check the deployer's registry credential\n"
+                + safe(pulled.detail()));
+        return;
+      }
       case ERROR -> {
         finish(deploymentId, target, PdDeploymentStatus.FAILED, safe(pulled.detail()));
         return;

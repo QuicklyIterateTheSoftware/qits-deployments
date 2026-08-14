@@ -369,6 +369,29 @@ update never restates ports. And, like every spec key: **it must ship in the dep
 repository writes the line**, since a spec is read at the built sha and an unknown key fails a
 deployment.
 
+### The registry credential, and the outcome it used to be mistaken for
+
+**`qits.platform.deployments.registry-auth`** (boolean, `false` shipped) adds
+`--with-registry-auth` to the service **create and the update alike**. The flag serialises the
+CLI's stored credential into the service SPEC, which is what the swarm agent pulls with; without
+it only this component's own warm-up `docker pull` is authenticated — that one runs as this
+process, with this process's `DOCKER_CONFIG` — and the task's node-side pull carries nothing. It
+is a key rather than always-on because registry reads are anonymous today, so there would be
+nothing to serialise; unset, both argvs are what they were byte for byte. **The credential itself
+is env wiring**: the container runs as uid 1001 with no HOME, so a deployment points
+`DOCKER_CONFIG` at a mounted `config.json`. No code here writes, reads or logs it. It does not
+conflict with `--no-resolve-image` — one says do not turn the tag into a digest, the other hands
+the agents a credential for a later pull.
+
+**An auth refusal is `PullOutcome.AUTH_REFUSED`, and it is a `FAILED` deployment naming the
+credential.** It was `IMAGE_MISSING`, which sent an operator to a pipeline that had published
+perfectly well. The two marker lists are asked in **order and the order is the whole point**:
+docker's refusal reads `pull access denied for <image>, repository does not exist or may require
+'docker login'`, so it carries a missing-image marker inside it and a first-match-wins list would
+keep calling a refusal a missing image. `IMAGE_MISSING` keeps its narrowed meaning — the registry
+answered and has no such tag (`manifest unknown`, `not found`, `name unknown`). Anything neither
+list recognises is still `ERROR`.
+
 **The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
 one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
 the prior actives of that place decommissioned, another sha is `SUPERSEDED` (swarm's `UpdateStatus`

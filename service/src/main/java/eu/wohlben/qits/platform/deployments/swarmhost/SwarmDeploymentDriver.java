@@ -208,12 +208,30 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * "nothing published an image".
    */
   private static final List<String> IMAGE_MISSING_MARKERS =
+      List.of("manifest unknown", "not found", "name unknown", "repository does not exist");
+
+  /**
+   * What docker says when the registry <b>refused</b> the pull. Matched the same way and read
+   * <b>before</b> {@link #IMAGE_MISSING_MARKERS}, which is the whole point of the order: docker's
+   * own refusal reads {@code pull access denied for <image>, repository does not exist or may
+   * require 'docker login'}, so it carries a missing-image marker inside it and a first-match-wins
+   * list would keep calling a refusal a missing image.
+   *
+   * <p>Which is what it did. The platform's registry sits behind the edge proxy, and the day reads
+   * there stop being anonymous every deployment would have been recorded as "nothing published this
+   * build" — sending an operator to a pipeline that had published perfectly well, while the thing
+   * to fix is the credential the daemon reads.
+   *
+   * <p>The narrowness rule is unchanged: anything neither list recognises is {@code ERROR}.
+   */
+  private static final List<String> AUTH_REFUSED_MARKERS =
       List.of(
-          "manifest unknown",
-          "not found",
-          "name unknown",
-          "repository does not exist",
-          "pull access denied");
+          "pull access denied",
+          "docker login",
+          "authorization failed",
+          "no basic auth credentials",
+          "unauthorized",
+          "authentication required");
 
   @ConfigProperty(name = "qits.platform.deployments.container-runtime")
   String runtime;
@@ -235,6 +253,15 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
 
   @ConfigProperty(name = "qits.platform.deployments.swarm.flat-network")
   String flatNetwork;
+
+  /**
+   * Whether a service create and a service update carry {@code --with-registry-auth}. False
+   * shipped, and then every argv here is what it was byte for byte.
+   *
+   * <p>See {@link #registryAuthFlag} for what the flag does and why the key exists.
+   */
+  @ConfigProperty(name = "qits.platform.deployments.registry-auth")
+  boolean registryAuth;
 
   @ConfigProperty(name = "qits.platform.deployments.output-max-chars")
   int outputMaxChars;
@@ -956,6 +983,9 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    *
    * <p>The wording match is deliberately narrow: anything it does not recognise is {@code ERROR},
    * so a daemon that is down never reads as "nothing published this build".
+   *
+   * <p><b>A refusal is asked about first</b>, because docker's refusal wording contains a
+   * missing-image marker — see {@link #AUTH_REFUSED_MARKERS}.
    */
   @Override
   public PullResult pull(String imageRef) {
@@ -966,6 +996,9 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     }
     String output = safe(result.output());
     String lowered = output.toLowerCase(Locale.ROOT);
+    if (AUTH_REFUSED_MARKERS.stream().anyMatch(lowered::contains)) {
+      return new PullResult(PullOutcome.AUTH_REFUSED, output);
+    }
     boolean missing = IMAGE_MISSING_MARKERS.stream().anyMatch(lowered::contains);
     return new PullResult(missing ? PullOutcome.IMAGE_MISSING : PullOutcome.ERROR, output);
   }
@@ -993,6 +1026,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
                 "--replicas",
                 "1",
                 "--no-resolve-image"));
+    registryAuthFlag(argv);
     // The FULL membership, here and nowhere else: every later --network-add recreates the task.
     for (String network : networks) {
       argv.add("--network");
@@ -1049,6 +1083,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
                 "--no-resolve-image",
                 "--image",
                 spec.imageRef()));
+    registryAuthFlag(argv);
     for (String label : labels(spec)) {
       argv.add("--label-add");
       argv.add(label);
@@ -1102,6 +1137,35 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     argv.add(String.valueOf(healthRetries));
     argv.add("--health-start-period");
     argv.add(healthStartPeriodSeconds + "s");
+  }
+
+  /**
+   * {@code --with-registry-auth}, on a create and on an update alike, when {@code
+   * qits.platform.deployments.registry-auth} says so. Unset — the shipped state — this writes
+   * nothing and both argvs are what they were byte for byte.
+   *
+   * <p><b>What the flag does.</b> It serialises the credential the CLI holds for the registry into
+   * the service spec, so the swarm agent authenticates the task's own pull. Without it only the
+   * warm-up {@code docker pull} above is authenticated — that one runs as this process, with this
+   * process's {@code DOCKER_CONFIG} — and the node-side pull the task then performs carries nothing
+   * and is refused. The image being present in the local image store is not a substitute: swarm
+   * re-pulls per node, and this platform being one node is a coincidence rather than a contract.
+   *
+   * <p><b>Why it is a key rather than always on.</b> The platform's registry reads are anonymous
+   * today, so the flag has nothing to serialise and would only put an empty auth block on every
+   * service spec. The key is what lets the deployer ship ahead of the flip and be turned on with
+   * the deployment that mounts a {@code config.json} — one restart rather than a release.
+   *
+   * <p><b>It does not conflict with {@code --no-resolve-image}.</b> The two answer different
+   * questions: no-resolve tells the CLI not to ask the registry to turn the tag into a digest (the
+   * manager keeps the tag as written, which is what the seed's registry-less {@code qits/*} tags
+   * need), and this one hands the agents a credential for the pull they perform later. Nothing
+   * about carrying auth makes the manager resolve a digest again.
+   */
+  private void registryAuthFlag(List<String> argv) {
+    if (registryAuth) {
+      argv.add("--with-registry-auth");
+    }
   }
 
   /**
