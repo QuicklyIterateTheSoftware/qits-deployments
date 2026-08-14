@@ -90,11 +90,11 @@
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `localhost:8082/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the first build
-# fetches the image from upstream and caches it, every later build is served from local disk. The
-# tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when quay moves
-# it.
-FROM localhost:8082/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+# `mirror.dev.localhost:8080/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the
+# first build fetches the image from upstream and caches it, every later build is served from local
+# disk. The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when
+# quay moves it.
+FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 
@@ -127,9 +127,10 @@ COPY . .
 #   service/src/main/webui is qits-spa-deployments, and it depends on @qits/ui-components. That
 #   package exists ONLY on the platform's own npm registry (qits-platform-artifacts). A RUN step in
 #   a docker build reaches the public internet — Maven Central, npmjs.org, nodejs.org — and can
-#   reach the platform registry by NO address: not a network alias, not localhost:8081, not
-#   host.docker.internal. So the install cannot happen here, and an install that "worked" here would
-#   have resolved the @qits scope against npmjs.org, where that name does not exist and never will.
+#   reach the platform registry by NO address: not a network alias, not registry.dev.localhost:8080,
+#   not host.docker.internal. So the install cannot happen here, and an install that "worked" here
+#   would have resolved the @qits scope against npmjs.org, where that name does not exist and never
+#   will.
 #
 # The bundle is therefore built BEFORE this image, by the pipeline step in
 # .config/qits/ci-post-receive.yml, which runs where the registry is reachable, and arrives in the
@@ -152,7 +153,7 @@ COPY . .
 #
 # One `cp` re-materialises it in the layer that is about to move it. It has to be in THIS `RUN` and
 # not a tidier one of its own — a layer boundary is exactly what it is undoing.
-ARG QITS_MAVEN_REPOSITORY_URL=http://localhost:8081/artifacts/maven/maven
+ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
 ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
 RUN d=service/src/main/webui/dist/qits-spa-deployments/browser; \
     test -f "$d/index.html" || { \
@@ -171,8 +172,8 @@ RUN d=service/src/main/webui/dist/qits-spa-deployments/browser; \
       -Dquarkus.quinoa.package-manager-command.build=--version
 
 # --- runtime --------------------------------------------------------------------------------------
-# `localhost:8082/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
-FROM localhost:8082/redhat/ubi9/ubi-minimal:9.6
+# `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
+FROM mirror.dev.localhost:8080/redhat/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
 # The docker CLI comes from Docker's own repository because no UBI repository carries a

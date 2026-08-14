@@ -14,7 +14,8 @@
 #   because this pipeline pushes one image: the jars this repo builds stay inside it and no maven
 #   release publishes them.
 # - THE NAME IS UNQUALIFIED ON PURPOSE — the registry is `qits-platform-artifacts:8080` inside a
-#   step container and `localhost:8081` outside, and an OCI reference cannot carry a path prefix.
+#   step container and `registry.dev.localhost:8080` outside, and an OCI reference cannot carry a
+#   path prefix.
 # - THE BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file is where the
 #   two halves, the submodule fetch, the lockfile origin swap, the `npm_config_*` environment and
 #   the `--network host` doctrine are explained at length; this one carries the short form and
