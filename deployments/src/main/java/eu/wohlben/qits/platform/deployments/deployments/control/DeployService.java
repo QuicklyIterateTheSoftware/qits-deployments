@@ -492,12 +492,13 @@ public class DeployService implements BuildAnnouncements {
    * before anything is queued and carried by value from there on — the docker work must not need a
    * second query to know where it is going.
    *
-   * <p>{@code healthCmd}, {@code resources} and {@code updateOrder} are the spec's, and are <b>the
-   * only fields here no row holds</b>. They need none: the spec is read fresh from the repository
-   * before every deployment, and the one path that resolves targets from the catalogue instead
-   * ({@link #alreadyRegistered}) records a failure and deploys nothing. Null is the HTTP probe over
-   * {@code healthPath}; an empty resource list is every application that stores nothing; the
-   * default order is {@code start-first}.
+   * <p>{@code healthCmd}, {@code resources}, {@code updateOrder} and {@code publishMode} are the
+   * spec's, and are <b>the only fields here no row holds</b>. They need none: the spec is read
+   * fresh from the repository before every deployment, and the one path that resolves targets from
+   * the catalogue instead ({@link #alreadyRegistered}) records a failure and deploys nothing. Null
+   * is the HTTP probe over {@code healthPath}; an empty resource list is every application that
+   * stores nothing; the default order is {@code start-first} and the default publish mode is
+   * {@code host}.
    */
   record Target(
       String applicationName,
@@ -509,7 +510,8 @@ public class DeployService implements BuildAnnouncements {
       String healthPath,
       String healthCmd,
       List<ResourceProvisioning.Resolved> resources,
-      DeploymentDriver.UpdateOrder updateOrder) {}
+      DeploymentDriver.UpdateOrder updateOrder,
+      DeploymentDriver.PublishMode publishMode) {}
 
   /**
    * One build-succeeded event, start to finish, on the worker thread: read what the repository
@@ -701,7 +703,8 @@ public class DeployService implements BuildAnnouncements {
               healthPath,
               spec.healthCmd(),
               resources,
-              spec.updateOrder()));
+              spec.updateOrder(),
+              spec.publishMode()));
     }
     return List.copyOf(targets);
   }
@@ -787,7 +790,8 @@ public class DeployService implements BuildAnnouncements {
             healthPath,
             spec.healthCmd(),
             resources,
-            spec.updateOrder()));
+            spec.updateOrder(),
+            spec.publishMode()));
   }
 
   /**
@@ -888,6 +892,7 @@ public class DeployService implements BuildAnnouncements {
                   linked.service().healthPath,
                   null,
                   List.of(),
+                  null,
                   null));
     }
     List<Target> targets = new ArrayList<>();
@@ -904,6 +909,7 @@ public class DeployService implements BuildAnnouncements {
                 linked.service().healthPath,
                 null,
                 List.of(),
+                null,
                 null));
       }
     }
@@ -1026,6 +1032,10 @@ public class DeployService implements BuildAnnouncements {
 
     DeploymentDriver.UpdateOrder updateOrder() {
       return target.updateOrder();
+    }
+
+    DeploymentDriver.PublishMode publishMode() {
+      return target.publishMode();
     }
 
     /**
@@ -1304,6 +1314,7 @@ public class DeployService implements BuildAnnouncements {
         plan.target().target(),
         plan.availableOnEnv(),
         plan.updateOrder(),
+        plan.publishMode(),
         bindings);
   }
 

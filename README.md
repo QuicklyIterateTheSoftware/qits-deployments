@@ -78,6 +78,8 @@ deploy_branches: environment/prod    # comma-separated refs; read here, used by 
 health_path: /q/health/ready         # default: /<name without the qits- prefix>/q/health/ready
 health_cmd: pg_isready -U postgres   # instead of health_path; runs inside the container
 resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
+update_order: start-first            # default | stop-first for anything that cannot overlap itself
+publish_mode: host                   # default | ingress for a port swarm's routing mesh holds
 ```
 
 `deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
@@ -154,6 +156,13 @@ and under `start-first` it never stopped serving at all. `update_order: stop-fir
 for an application that cannot be two processes at once: one binder per published port, one process
 per single-writer store. The pull happens first, so replacing the OCI registry's own application
 does not depend on it being up mid-cutover.
+
+`publish_mode: ingress` is how a published port stops being a reason to say `stop-first`: the port
+is held by swarm's routing mesh rather than by the task, so the successor can bind nothing and
+still be reachable while the predecessor serves. The default is `host`, which is the per-node bind
+every publishing service has today. The two keys stay independent — this component never derives
+one from the other — and the mode is part of a service's shape, so changing it takes a `service rm`
+and a redeploy rather than a deployment.
 
 A failed deployment — image missing, the daemon refused, the update never converged — leaves the
 world as it was and says why on the row.

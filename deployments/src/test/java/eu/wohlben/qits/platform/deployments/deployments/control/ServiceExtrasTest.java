@@ -143,6 +143,16 @@ class ServiceExtrasTest {
   }
 
   @Test
+  void thePublishModeIsNotAMemberOfThisFamily() {
+    // Where a port is HELD is publish_mode in the repository's own deployments.yml — one statement
+    // for the whole service, on the service spec. Deployment config states which ports a service
+    // publishes and nothing about their mode, so this key is an unknown element like any other.
+    assertTrue(
+        refused(Map.of(P + "qits-ci.publish_mode", "ingress")).getMessage().contains("publish_mode"));
+    refused(Map.of(P + "qits-ci.publishes[0].mode", "ingress"));
+  }
+
+  @Test
   void everyInterfaceIsTheOneIpSwarmCanHonour() {
     // What the renderers ask, and the reason the artifacts publish states 0.0.0.0 rather than
     // leaving the ip out: it is a decision, and it reads like one.

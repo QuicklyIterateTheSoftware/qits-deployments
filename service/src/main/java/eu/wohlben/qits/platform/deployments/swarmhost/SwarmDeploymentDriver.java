@@ -1015,7 +1015,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--env");
       argv.add(variable);
     }
-    extras(argv, ServiceExtras.of(config, spec.applicationName()));
+    extras(argv, ServiceExtras.of(config, spec.applicationName()), spec.publishMode());
     argv.add(spec.imageRef());
     return List.copyOf(argv);
   }
@@ -1027,6 +1027,11 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * every part of the spec it is not asked to change, so re-stating them would at best be noise and
    * at worst would append a second copy of a mount. What changes on a deployment is the image, the
    * identity this deployment stamps on the service, and the policy the update itself runs under.
+   *
+   * <p><b>The publish MODE rides with the ports, so changing it is not a deployment.</b> A
+   * repository that starts saying {@code publish_mode: ingress} is describing a different shape of
+   * service, and an existing service keeps the mode it was created with until it is removed and
+   * created again — the {@code service rm} and redeploy every shape change here takes.
    *
    * <p><b>The environment is the exception, and it is re-stated in full</b> — this component's own
    * variables and the deployment config's alike. A variable is a value rather than a shape: config
@@ -1172,7 +1177,7 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * are read, and that is the security property: one application's socket bind cannot ride along
    * on a sibling's deployment.
    */
-  private void extras(List<String> argv, ServiceExtras extras) {
+  private void extras(List<String> argv, ServiceExtras extras, PublishMode publishMode) {
     for (ServiceExtras.Mount mount : extras.mounts()) {
       // Swarm names the kind rather than inferring it from a leading slash, which is what config
       // states — so this is a spelling, not a decision.
@@ -1187,8 +1192,10 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
               + (mount.readOnly() ? ",readonly" : ""));
     }
     for (ServiceExtras.Publish publish : extras.publishes()) {
-      // mode=host rather than the ingress default: it is per node, like a plain `docker run`, and
-      // this platform is one node.
+      // The mode is the repository's `publish_mode`, and it defaults to host: the task binds the
+      // port per node, like a plain `docker run`, which is what every publishing service does
+      // today. `ingress` gives the port to the routing mesh instead, so a replacement can start
+      // while the predecessor still holds the door open.
       //
       // AN IP IS A REFUSAL, NOT A WARNING. Swarm's publish syntax has no ip field in either mode
       // — measured: a host-mode publish listens on 0.0.0.0 — so a spec that asks for loopback
@@ -1209,7 +1216,8 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
               + ",target="
               + publish.target()
               + (publish.protocol() == null ? "" : ",protocol=" + publish.protocol())
-              + ",mode=host");
+              + ",mode="
+              + publishMode.spelling());
     }
     for (String group : extras.groups()) {
       argv.add("--group");

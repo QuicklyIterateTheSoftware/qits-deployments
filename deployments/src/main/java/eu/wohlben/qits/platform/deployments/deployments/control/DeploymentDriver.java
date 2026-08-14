@@ -267,6 +267,10 @@ public interface DeploymentDriver {
    * <p>{@code updateOrder} is the repository's, and it reaches the orchestrator as {@code
    * --update-order}. See {@link UpdateOrder}.
    *
+   * <p>{@code publishMode} is the repository's too, and it says where a published host port is
+   * bound. See {@link PublishMode}. It decides nothing when the application publishes no port,
+   * which is most of them.
+   *
    * <p>{@code resources} is what {@code ResourceProvisioning} made exist a moment ago, one entry
    * per resource the repository declared. Empty for every application that stores nothing, which is
    * most of them.
@@ -292,6 +296,7 @@ public interface DeploymentDriver {
       PdDeploymentTarget target,
       boolean availableOnEnv,
       UpdateOrder updateOrder,
+      PublishMode publishMode,
       List<ResourceBinding> resources) {
 
     /** Null lists and empty ones are the same statement: this application declared none. */
@@ -299,6 +304,7 @@ public interface DeploymentDriver {
       networks = networks == null ? List.of() : List.copyOf(networks);
       resources = resources == null ? List.of() : List.copyOf(resources);
       updateOrder = updateOrder == null ? UpdateOrder.START_FIRST : updateOrder;
+      publishMode = publishMode == null ? PublishMode.HOST : publishMode;
     }
 
     /** The one network {@code docker run} can take, and the first one a service declares. */
@@ -333,6 +339,38 @@ public interface DeploymentDriver {
     /** The spelling in {@code .config/qits/deployments.yml}: {@code start-first}/{@code stop-first}. */
     public String spelling() {
       return name().toLowerCase(java.util.Locale.ROOT).replace('_', '-');
+    }
+  }
+
+  /**
+   * Where a published host port is held — {@code publish_mode} in the repository's spec, and the
+   * default is {@code host} because that is what every publishing service does today.
+   *
+   * <p><b>{@code host} binds the port on the node from inside the task</b>, like a plain {@code
+   * docker run -p}. One binder per port, so a replacement cannot start while its predecessor still
+   * holds it — which is why every host-publishing service also declares {@code update_order:
+   * stop-first}.
+   *
+   * <p><b>{@code ingress} hands the port to swarm's routing mesh</b>, which holds it across the
+   * replace. The successor can start while the predecessor is still serving, so an ingress-mode
+   * service may keep {@code start-first} and its lossless rollback. That is what lets the front
+   * door pull its own successor's image through the door that is still up.
+   *
+   * <p><b>Neither mode can name an address.</b> Swarm's publish syntax has no ip field in either
+   * one, so a published port is on every interface — see {@link ServiceExtras.Publish}. The mode
+   * changes who holds the port, not who can reach it.
+   *
+   * <p>The two keys are independent and this component never derives one from the other: {@code
+   * update_order} stays the repository's own statement, and an ingress-mode service that declares
+   * {@code stop-first} gets {@code stop-first}.
+   */
+  enum PublishMode {
+    HOST,
+    INGRESS;
+
+    /** The spelling in {@code .config/qits/deployments.yml}, and docker's own: {@code host}/{@code ingress}. */
+    public String spelling() {
+      return name().toLowerCase(java.util.Locale.ROOT);
     }
   }
 

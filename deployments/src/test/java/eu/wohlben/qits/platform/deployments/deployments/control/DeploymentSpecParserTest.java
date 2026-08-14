@@ -284,6 +284,44 @@ class DeploymentSpecParserTest {
   }
 
   @Test
+  void aServiceWhosePortMustSurviveItsOwnReplacementSaysIngress() {
+    // The default is what every publishing service does today — the task binds the port on the
+    // node — so a file that says nothing is deployed byte-for-byte as before. `ingress` gives the
+    // port to swarm's routing mesh, which keeps holding it while the successor starts.
+    assertEquals(DeploymentDriver.PublishMode.HOST, parse("").publishMode(), "the default");
+    assertEquals(
+        DeploymentDriver.PublishMode.HOST, parse("publish_mode: host\n").publishMode());
+    assertEquals(
+        DeploymentDriver.PublishMode.INGRESS, parse("publish_mode: ingress\n").publishMode());
+  }
+
+  @Test
+  void aPublishModeOutsideThePairIsAnError() {
+    // Refused rather than defaulted: the difference is whether a replacement can start while the
+    // predecessor still holds the port, which is the whole reason the key exists.
+    String message = messageOf("publish_mode: mesh\n");
+    assertTrue(message.contains("host"), message);
+    assertTrue(message.contains("ingress"), message);
+    assertTrue(message.contains("mesh"), "the message names what was written: " + message);
+    // Docker's own spelling is the file's, so neither side has to translate.
+    assertTrue(messageOf("publish_mode: INGRESS\n").contains("publish_mode"));
+  }
+
+  @Test
+  void thePublishModeAndTheUpdateOrderAreIndependentStatements() {
+    // Nothing here derives one from the other. An ingress-mode service keeps the default
+    // start-first — that is the point of ingress — and one that declares stop-first gets it.
+    DeploymentSpec ingress = parse("publish_mode: ingress\n");
+    assertEquals(DeploymentDriver.UpdateOrder.START_FIRST, ingress.updateOrder());
+    DeploymentSpec both = parse("publish_mode: ingress\nupdate_order: stop-first\n");
+    assertEquals(DeploymentDriver.UpdateOrder.STOP_FIRST, both.updateOrder());
+    assertEquals(DeploymentDriver.PublishMode.INGRESS, both.publishMode());
+    // ...and a host-mode service is not pushed onto stop-first either: the repository says so.
+    assertEquals(
+        DeploymentDriver.UpdateOrder.START_FIRST, parse("publish_mode: host\n").updateOrder());
+  }
+
+  @Test
   void anUnknownKeyIsAnError() {
     // A lenient parser answers a typo with a default, which deploys the wrong topology in silence.
     String message = messageOf("deployment_targets: platform\n");
@@ -291,6 +329,7 @@ class DeploymentSpecParserTest {
     // ...and the message lists every key there is, so a typo is answered with the vocabulary.
     assertTrue(message.contains("resources"), message);
     assertTrue(message.contains("update_order"), message);
+    assertTrue(message.contains("publish_mode"), message);
   }
 
   @Test

@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.eventstream.entity.OutboxEvent;
+import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import io.quarkus.hibernate.orm.PersistenceUnit;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
@@ -97,6 +98,7 @@ public class PdSwarmDeployFlowTest {
     assertTrue(applied.networks().contains("qits-net"), applied.networks().toString());
     assertEquals("swarm-green-repo-swarm-green", applied.wireAlias());
     assertEquals(DeploymentDriver.UpdateOrder.START_FIRST, applied.updateOrder(), "the default");
+    assertEquals(DeploymentDriver.PublishMode.HOST, applied.publishMode(), "the default");
     // ...and the verdict was asked about the name the driver chose, not the container-shaped one.
     assertEquals(List.of("swarm-green-repo-swarm-green"), fake.awaited());
     // Nothing to reap: there was no predecessor, and a swarm replace is in place anyway.
@@ -115,6 +117,35 @@ public class PdSwarmDeployFlowTest {
     assertTrue(queued.occurredAt.compareTo(started.occurredAt) <= 0, "queued before started");
     assertTrue(started.occurredAt.compareTo(active.occurredAt) <= 0, "started before active");
     assertNull(only("DeploymentFailed", 0), "a green deployment announces no failure");
+  }
+
+  @Test
+  public void aRepositoryThatDeclaresIngressReachesTheDriverWithIt() {
+    // The plumbing, end to end: publish_mode is read from the repository's spec, carried by value
+    // through the target and the plan, and handed to the orchestrator — and it moves the update
+    // order not at all.
+    String environmentId = createEnvironment("swarm-ingress");
+    specs.script(
+        "repo-swarm-ingress",
+        new SpecSource.DeploymentSpec(
+            PdDeploymentTarget.ENVIRONMENT,
+            false,
+            null,
+            null,
+            null,
+            null,
+            null,
+            DeploymentDriver.PublishMode.INGRESS));
+
+    postBuildSucceeded("run-ingress", "repo-swarm-ingress", "environment/swarm-ingress");
+    awaitSettled(environmentId, 1);
+
+    DeploymentDriver.ServiceSpec applied = fake.applied().get(0);
+    assertEquals(DeploymentDriver.PublishMode.INGRESS, applied.publishMode());
+    assertEquals(
+        DeploymentDriver.UpdateOrder.START_FIRST,
+        applied.updateOrder(),
+        "the publish mode decides nothing about the update order");
   }
 
   @Test

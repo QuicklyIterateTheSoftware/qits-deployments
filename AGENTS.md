@@ -357,6 +357,18 @@ repository, and only the repository knows: a published host port, a single-write
 config volume each make the overlap impossible. This repo says `stop-first`. It reaches the
 orchestrator as `--update-order`.
 
+**`publish_mode` is the second such key** — `host` (default, today's behaviour byte for byte) or
+`ingress`, per repository. Host mode binds the port from inside the task, so two tasks cannot
+overlap and the service also needs `stop-first`; ingress hands the port to swarm's routing mesh,
+which keeps holding it while a successor starts, so an ingress service may keep `start-first` and
+its lossless rollback. It reaches the orchestrator as `mode=` on the publish, and it means nothing
+to an application that publishes no port. **Nothing derives one key from the other**: an ingress
+service that says `stop-first` gets `stop-first`. The mode is part of a service's SHAPE, so an
+existing service keeps the mode it was created with until a `service rm` and a redeploy — an
+update never restates ports. And, like every spec key: **it must ship in the deployer before any
+repository writes the line**, since a spec is read at the built sha and an unknown key fails a
+deployment.
+
 **The startup sweep settles an in-flight row from what is RUNNING** (`DeploymentDriver.runningImage`,
 one read per `STARTING` row that named something): the image carrying the row's sha is `ACTIVE` with
 the prior actives of that place decommissioned, another sha is `SUPERSEDED` (swarm's `UpdateStatus`

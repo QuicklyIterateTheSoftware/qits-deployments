@@ -85,6 +85,12 @@ public record ServiceExtras(
   /**
    * One published host port. {@code ip} is null unless the config named one, {@code protocol} null
    * unless it named one — both are absences a renderer states in its own way rather than guesses.
+   *
+   * <p><b>The publish MODE is not here.</b> Whether the port is held by the task or by swarm's
+   * routing mesh is {@code publish_mode} in the repository's own {@code deployments.yml}, one
+   * statement for the whole service rather than one per port, and it reaches a renderer on the
+   * service spec — see {@code DeploymentDriver.PublishMode}. Deployment config states which ports
+   * a service publishes; the repository states what kind of service it is.
    */
   public record Publish(String ip, int published, int target, String protocol) {
 

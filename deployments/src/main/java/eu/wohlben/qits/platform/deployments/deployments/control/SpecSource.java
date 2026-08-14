@@ -29,7 +29,7 @@ public interface SpecSource {
   DeploymentSpec read(String repoId, String sha);
 
   /**
-   * What a repository declares about how it is deployed. Six keys, all optional, and the shape a
+   * What a repository declares about how it is deployed. Eight keys, all optional, and the shape a
    * repository with no file at all gets is {@link #DEFAULTS}.
    *
    * <p>{@code healthPath} is the exception rather than the rule: a service that says nothing gets
@@ -51,6 +51,11 @@ public interface SpecSource {
    * host port, a single-writer store or a held config volume each make the overlap impossible. See
    * {@link DeploymentDriver.UpdateOrder}.
    *
+   * <p>{@code publishMode} is where a published host port is held — {@code host} unless the
+   * repository says {@code ingress}. Only the repository knows, for the same reason: a front door
+   * that must survive its own replacement wants the routing mesh holding its port, and everything
+   * else keeps the per-node bind it has today. See {@link DeploymentDriver.PublishMode}.
+   *
    * <p><b>{@code deployBranches} is read and not used here</b>, and that is deliberate — see {@link
    * #deployBranches()}.
    */
@@ -61,16 +66,21 @@ public interface SpecSource {
       String healthPath,
       String healthCmd,
       List<ResourceSpec> resources,
-      DeploymentDriver.UpdateOrder updateOrder) {
+      DeploymentDriver.UpdateOrder updateOrder,
+      DeploymentDriver.PublishMode publishMode) {
 
     /** A null list and an empty one are the same statement: the file named none. */
     public DeploymentSpec {
       deployBranches = deployBranches == null ? List.of() : List.copyOf(deployBranches);
       resources = resources == null ? List.of() : List.copyOf(resources);
       updateOrder = updateOrder == null ? DeploymentDriver.UpdateOrder.START_FIRST : updateOrder;
+      publishMode = publishMode == null ? DeploymentDriver.PublishMode.HOST : publishMode;
     }
 
-    /** A spec that says nothing about the order takes the default, which is most of them. */
+    /**
+     * A spec that says nothing about the order or the publish mode takes both defaults, which is
+     * most of them.
+     */
     public DeploymentSpec(
         PdDeploymentTarget target,
         boolean availableOnEnv,
@@ -78,7 +88,7 @@ public interface SpecSource {
         String healthPath,
         String healthCmd,
         List<ResourceSpec> resources) {
-      this(target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, null);
+      this(target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, null, null);
     }
 
     /**
