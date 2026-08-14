@@ -268,7 +268,8 @@ serving, and the sha a rollback would put back.
   argv. There is no `DROP` in the vocabulary and none is coming.
 - **Argv contributions come from deployment config and from this component itself.**
   `qits.platform.deployments.extras.<app>.*` is how a stateful application gets its volume, its
-  published port and its extra env — a structured family each driver renders in its own
+  published port, its extra env and the extra DNS names it answers to on the shared network — a
+  structured family each driver renders in its own
   orchestrator's words (`ServiceExtras`); the `QITS_RESOURCE_<NAME>_*` triple is generated here and
   injected here. **Nothing
   arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as

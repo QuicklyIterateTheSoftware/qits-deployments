@@ -221,6 +221,94 @@ class SwarmDeploymentDriverTest {
     assertTrue(platformCreate.contains("qits-platform"), platformCreate.toString());
   }
 
+  /** Every {@code --network} and the element behind it, in order — the membership as declared. */
+  private static List<String> networkArguments(List<String> argv) {
+    List<String> arguments = new ArrayList<>();
+    for (int index = 0; index < argv.size() - 1; index++) {
+      if ("--network".equals(argv.get(index))) {
+        arguments.add(argv.get(index));
+        arguments.add(argv.get(index + 1));
+      }
+    }
+    return arguments;
+  }
+
+  @Test
+  void aDeclaredAliasRidesTheSharedNetworksAttachmentAndNoOthers() {
+    // The edge carries the platform's vhost names, and docker's embedded DNS cannot synthesize a
+    // *.localhost — so those names resolve only as aliases of the edge's attachment to the network
+    // every service joins. qits-platform is the plane's own network and keeps the short form.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.aliases[0]",
+                    "registry.dev.localhost",
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.aliases[1]",
+                    "mirror.dev.localhost"));
+
+    List<String> argv =
+        driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net", "qits-platform"));
+
+    assertTrue(
+        argv.containsAll(
+            List.of(
+                "--network", "name=qits-net,alias=registry.dev.localhost,alias=mirror.dev.localhost")),
+        argv.toString());
+    assertTrue(argv.containsAll(List.of("--network", "qits-platform")), argv.toString());
+    assertEquals(2, argv.stream().filter("--network"::equals).count(), argv.toString());
+    assertEquals(IMAGE, argv.get(argv.size() - 1));
+  }
+
+  @Test
+  void aServiceWithNoAliasesGetsTheShortFormItAlwaysGot() {
+    // The pin: `--network <net>` and `--network name=<net>` mean the same thing to swarm, and only
+    // one of them is what every service on this platform was created with.
+    List<String> argv =
+        driver().buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net", "qits-platform"));
+
+    assertEquals(
+        List.of("--network", "qits-net", "--network", "qits-platform"),
+        networkArguments(argv),
+        argv.toString());
+    assertTrue(argv.stream().noneMatch(argument -> argument.startsWith("name=")), argv.toString());
+  }
+
+  @Test
+  void aliasesWithNoSharedNetworkToHoldThemRefuseTheDeployment() {
+    // The publish-with-an-ip stance: a name asked for and quietly not registered is a peer
+    // resolving nothing, hours later and somewhere else.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.aliases[0]",
+                "registry.dev.localhost"));
+    driver.flatNetwork = "";
+
+    assertThrows(
+        ServiceExtras.Refused.class,
+        () -> driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-platform")));
+  }
+
+  @Test
+  void anUpdateStatesNoNetworkSoItStatesNoAliasEither() {
+    // Swarm has no add-an-alias: an attachment is restated whole, and --network-add of a network
+    // the service is already on is an error. Changing an alias is network-rm/network-add by hand,
+    // or a service rm and a redeploy — never a deployment.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.aliases[0]",
+                "registry.dev.localhost"));
+
+    List<String> argv = driver.buildUpdateArgv(spec(), "dev-qits-gateway");
+
+    assertTrue(argv.stream().noneMatch(argument -> argument.startsWith("--network")), argv.toString());
+    assertTrue(argv.stream().noneMatch(argument -> argument.contains("alias=")), argv.toString());
+    assertTrue(
+        argv.stream().noneMatch(argument -> argument.contains("registry.dev.localhost")),
+        argv.toString());
+  }
+
   @Test
   void aServiceThatExistsIsUpdatedInPlaceAndKeepsWhatItWasCreatedWith() {
     SwarmDeploymentDriver driver = driver();
