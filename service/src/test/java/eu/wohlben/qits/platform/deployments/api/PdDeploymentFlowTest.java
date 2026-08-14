@@ -247,6 +247,30 @@ public class PdDeploymentFlowTest {
   }
 
   @Test
+  public void aRefusedRegistryIsAFailedDeploymentThatNamesTheCredential() {
+    driver.scriptPull(
+        new DeploymentDriver.PullResult(
+            DeploymentDriver.PullOutcome.AUTH_REFUSED,
+            "pull access denied for qits/repo-denied, repository does not exist or may require"
+                + " 'docker login'"));
+    String environmentId = createEnvironment("flow-denied");
+    postBuildSucceeded("repo-denied", "environment/flow-denied", SHA_A);
+
+    List<Map<String, Object>> deployments = awaitDeployments(environmentId, 1);
+    // FAILED rather than IMAGE_MISSING: the image may well be published, and what has to be fixed
+    // is the credential rather than the pipeline.
+    assertEquals("FAILED", deployments.get(0).get("status"));
+    String detail = (String) deployments.get(0).get("detail");
+    assertTrue(detail.contains("registry credential"), "the detail says what to fix: " + detail);
+    assertTrue(
+        detail.contains("qits-platform-artifacts:8080/qits/repo-denied:" + SHA_A),
+        "...and which reference it was refused: " + detail);
+    // Nothing was applied and nothing reaped — the previous state is untouched.
+    assertEquals(List.of(), driver.applied());
+    assertEquals(List.of(), driver.reaped());
+  }
+
+  @Test
   public void aSuccessorThatNeverConvergesLeavesTheOldOneServing() {
     String environmentId = createEnvironment("flow-unhealthy");
     postBuildSucceeded("repo-unhealthy", "environment/flow-unhealthy", SHA_A);

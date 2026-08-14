@@ -392,6 +392,17 @@ public interface DeploymentDriver {
     OK,
     /** The registry answered and has no such image — the deployment's {@code IMAGE_MISSING}. */
     IMAGE_MISSING,
+    /**
+     * The registry <b>refused</b> the pull: no credential, a rejected one, or one without access to
+     * this repository.
+     *
+     * <p>It is its own outcome because it is a different thing to fix. {@code IMAGE_MISSING} says
+     * nothing published this build and points at the repository's own last pipeline step; this says
+     * the image may well be there and the deployer was not allowed to see it, which points at the
+     * credential the daemon reads. Reading one as the other sent an operator to a pipeline that had
+     * published perfectly well.
+     */
+    AUTH_REFUSED,
     /** The runtime failed some other way (daemon absent, registry unreachable, ...). */
     ERROR
   }
