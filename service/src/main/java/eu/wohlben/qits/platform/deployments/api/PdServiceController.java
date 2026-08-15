@@ -96,6 +96,7 @@ public class PdServiceController {
       description = "A platform service cannot become an environment service")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response upsert(@PathParam("name") String name, UpsertServiceRequest request) {
     machineAuth.require();
     UpsertServiceRequest body =
@@ -129,6 +130,7 @@ public class PdServiceController {
   @GET
   @Operation(summary = "Every service, with the environments each is linked into")
   @APIResponse(responseCode = "200", description = "The services")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:admin")
   public ListServicesResponse list() {
     return new ListServicesResponse(
         reads.call("The service catalogue listing", catalog::list).stream()
@@ -151,6 +153,7 @@ public class PdServiceController {
   @APIResponse(responseCode = "404", description = "No such service")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response delete(@PathParam("name") String name) {
     machineAuth.require();
     catalog.delete(name);

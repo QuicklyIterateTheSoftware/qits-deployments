@@ -40,6 +40,7 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 @Path("/events")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits-platform:system")
 public class PdEventController {
 
   @Inject BuildAnnouncements announcements;

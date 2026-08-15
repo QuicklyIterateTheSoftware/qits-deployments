@@ -38,6 +38,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  */
 @Path("/pins")
 @Produces(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits-platform:system")
 public class PdPinController {
 
   @Inject RollbackPins pins;
