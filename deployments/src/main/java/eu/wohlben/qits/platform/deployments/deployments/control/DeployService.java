@@ -14,6 +14,7 @@ import eu.wohlben.qits.platform.deployments.environments.control.ServiceCatalog.
 import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import eu.wohlben.qits.platform.deployments.environments.entity.PdEnvironment;
 import eu.wohlben.qits.platform.deployments.events.DeploymentActive;
+import eu.wohlben.qits.platform.deployments.events.DeploymentEndpoint;
 import eu.wohlben.qits.platform.deployments.events.DeploymentFailed;
 import eu.wohlben.qits.platform.deployments.events.DeploymentQueued;
 import eu.wohlben.qits.platform.deployments.events.DeploymentStarted;
@@ -492,7 +493,7 @@ public class DeployService implements BuildAnnouncements {
    * before anything is queued and carried by value from there on — the docker work must not need a
    * second query to know where it is going.
    *
-   * <p>{@code healthCmd}, {@code resources}, {@code updateOrder} and {@code publishMode} are the
+   * <p>{@code healthCmd}, {@code resources}, routing and the orchestrator options are the
    * spec's, and are <b>the only fields here no row holds</b>. They need none: the spec is read
    * fresh from the repository before every deployment, and the one path that resolves targets from
    * the catalogue instead ({@link #alreadyRegistered}) records a failure and deploys nothing. Null
@@ -511,7 +512,11 @@ public class DeployService implements BuildAnnouncements {
       String healthCmd,
       List<ResourceProvisioning.Resolved> resources,
       DeploymentDriver.UpdateOrder updateOrder,
-      DeploymentDriver.PublishMode publishMode) {}
+      DeploymentDriver.PublishMode publishMode,
+      List<String> routes,
+      int upstreamPort,
+      String navigationLabel,
+      Integer navigationPosition) {}
 
   /**
    * One build-succeeded event, start to finish, on the worker thread: read what the repository
@@ -704,7 +709,11 @@ public class DeployService implements BuildAnnouncements {
               spec.healthCmd(),
               resources,
               spec.updateOrder(),
-              spec.publishMode()));
+              spec.publishMode(),
+              spec.routes(),
+              spec.upstreamPort(),
+              spec.navigationLabel(),
+              spec.navigationPosition()));
     }
     return List.copyOf(targets);
   }
@@ -791,7 +800,11 @@ public class DeployService implements BuildAnnouncements {
             spec.healthCmd(),
             resources,
             spec.updateOrder(),
-            spec.publishMode()));
+            spec.publishMode(),
+            spec.routes(),
+            spec.upstreamPort(),
+            spec.navigationLabel(),
+            spec.navigationPosition()));
   }
 
   /**
@@ -893,6 +906,10 @@ public class DeployService implements BuildAnnouncements {
                   null,
                   List.of(),
                   null,
+                  null,
+                  List.of(),
+                  DeploymentSpecParser.DEFAULT_UPSTREAM_PORT,
+                  null,
                   null));
     }
     List<Target> targets = new ArrayList<>();
@@ -909,6 +926,10 @@ public class DeployService implements BuildAnnouncements {
                 linked.service().healthPath,
                 null,
                 List.of(),
+                null,
+                null,
+                List.of(),
+                DeploymentSpecParser.DEFAULT_UPSTREAM_PORT,
                 null,
                 null));
       }
@@ -1047,6 +1068,25 @@ public class DeployService implements BuildAnnouncements {
      */
     String wireAlias() {
       return PdNetworks.alias(environmentName(), applicationName());
+    }
+
+    /**
+     * The event's complete route projection. The host is resolved only after the target is known,
+     * from the same wire alias the runtime registered; a consumer must never recreate that naming
+     * convention. Navigation is application-level configuration carried by the primary route.
+     */
+    List<DeploymentEndpoint> endpoints() {
+      List<DeploymentEndpoint> resolved = new ArrayList<>();
+      for (int i = 0; i < target.routes().size(); i++) {
+        resolved.add(
+            new DeploymentEndpoint(
+                target.routes().get(i),
+                wireAlias(),
+                target.upstreamPort(),
+                i == 0 ? target.navigationLabel() : null,
+                i == 0 ? target.navigationPosition() : null));
+      }
+      return List.copyOf(resolved);
     }
   }
 
@@ -1480,7 +1520,8 @@ public class DeployService implements BuildAnnouncements {
                     plan.sha(),
                     plan.runId(),
                     containerName,
-                    finishedAt),
+                    finishedAt,
+                    plan.endpoints()),
                 plan.cause()));
   }
 

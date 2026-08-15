@@ -15,6 +15,8 @@ import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeResourceProvisioner;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
+import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource.DeploymentSpec;
+import eu.wohlben.qits.platform.deployments.environments.entity.PdDeploymentTarget;
 import io.quarkus.hibernate.orm.PersistenceUnit;
 import io.quarkus.narayana.jta.QuarkusTransaction;
 import io.quarkus.test.junit.QuarkusTest;
@@ -156,6 +158,39 @@ public class PdDeployPublishTest {
     assertNotNull(only("DeploymentQueued"));
     assertNotNull(only("DeploymentStarted"));
     assertNull(only("DeploymentActive", 0), "nothing was cut over");
+  }
+
+  @Test
+  public void theActiveEventPublishesTheResolvedRoutesAndPrimaryNavigation() {
+    String environmentId = createEnvironment("pub-routes");
+    specs.script(
+        "repo-pub-routes",
+        new DeploymentSpec(
+            PdDeploymentTarget.ENVIRONMENT,
+            false,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            List.of("/refinement", "/refinement/api"),
+            8181,
+            "Refinement",
+            9));
+
+    postBuildSucceeded("run-pub-routes", "repo-pub-routes", "environment/pub-routes", null);
+    awaitSettled(environmentId, 1);
+
+    String payload = only("DeploymentActive").payload;
+    // The resolver publishes the runtime address rather than requiring the edge to reproduce the
+    // environment-qualified wire-alias convention.
+    assertTrue(payload.contains("\"path\":\"/refinement\""), payload);
+    assertTrue(payload.contains("\"upstreamHost\":\"pub-routes-repo-pub-routes\""), payload);
+    assertTrue(payload.contains("\"upstreamPort\":8181"), payload);
+    assertTrue(payload.contains("\"navigationLabel\":\"Refinement\""), payload);
+    assertTrue(payload.contains("\"navigationPosition\":9"), payload);
+    assertTrue(payload.contains("\"path\":\"/refinement/api\""), payload);
   }
 
   @Test

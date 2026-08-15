@@ -3,6 +3,7 @@ package eu.wohlben.qits.platform.deployments.bus;
 import eu.wohlben.qits.eventstream.control.EventEnvelope;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.events.DeploymentActive;
+import eu.wohlben.qits.platform.deployments.events.DeploymentEndpoint;
 import eu.wohlben.qits.platform.deployments.events.DeploymentFailed;
 import eu.wohlben.qits.platform.deployments.events.DeploymentQueued;
 import eu.wohlben.qits.platform.deployments.events.DeploymentStarted;
@@ -34,12 +35,12 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * </ul>
  *
  * <p><b>The PUBLISHING path joined it when this component got events of its own to announce</b>, and
- * it is the four records plus a pair from the library:
+ * it is the four lifecycle records, their nested endpoint record, and a pair from the library:
  *
  * <ul>
- *   <li>{@link DeploymentQueued}, {@link DeploymentStarted}, {@link DeploymentActive} and {@link
- *       DeploymentFailed} — what {@code DeployEventAnnouncer} serializes. Unregistered, the binary
- *       publishes an empty payload rather than failing.
+ *   <li>{@link DeploymentQueued}, {@link DeploymentStarted}, {@link DeploymentActive}, {@link
+ *       DeploymentEndpoint} and {@link DeploymentFailed} — what {@code DeployEventAnnouncer}
+ *       serializes. Unregistered, the binary publishes an empty payload rather than failing.
  *   <li>{@link EventEnvelope} — the wrapper every publish is sent as.
  *   <li>The {@code CanonicalJson$QitsEventMixin}, by string name because it is a nested type inside
  *       the library. <b>This is the quiet one</b>, and qits-ci paid for it: the mix-in is what keeps
@@ -56,6 +57,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       DeploymentQueued.class,
       DeploymentStarted.class,
       DeploymentActive.class,
+      DeploymentEndpoint.class,
       DeploymentFailed.class
     },
     classNames = {

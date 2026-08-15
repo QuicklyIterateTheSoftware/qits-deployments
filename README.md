@@ -80,11 +80,23 @@ health_cmd: pg_isready -U postgres   # instead of health_path; runs inside the c
 resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
 update_order: start-first            # default | stop-first for anything that cannot overlap itself
 publish_mode: host                   # default | ingress for a port swarm's routing mesh holds
+routes: /artifacts,/artifacts/api    # optional public path prefixes, ordered
+upstream_port: 8080                  # default; target port behind every declared route
+navigation: Artifacts:3              # optional label:positive-position for the first route
 ```
 
 `deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
 environment rows' answer, not the file's. It is accepted because qits-workspaces' release flow reads
 the same file for its promotion targets, and this parser fails a deployment on an unknown key.
+
+`routes:` is the service-owned public surface: comma-separated, unique absolute lowercase path
+prefixes. `upstream_port:` is shared by those prefixes and defaults to `8080`. `navigation:` is
+optional, splits on its final colon into a visible label and a positive position, and belongs to
+the first declared route. After cutover, `DeploymentActive` publishes the complete resolved list:
+each route carries its path, the deployment's runtime wire alias, port, and (for the first route)
+navigation metadata. Consumers replace their projection from that snapshot; an empty list removes
+the application's previous routes and navigation entry. A declaration without `routes:` remains
+valid and publishes an empty list, which is the compatibility posture for every existing service.
 
 `health_cmd` and `health_path` are **alternatives, and a file setting both fails**. The path names a
 URL a `curl` inside the container fetches; the command replaces that mechanism whole. It is for the

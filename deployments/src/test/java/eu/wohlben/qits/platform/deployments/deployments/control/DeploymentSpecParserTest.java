@@ -70,6 +70,39 @@ class DeploymentSpecParserTest {
   }
 
   @Test
+  void routesNavigationAndPortAreAnOrderedServiceOwnedPublicSurface() {
+    DeploymentSpec spec =
+        parse(
+            """
+            routes: /refinement,/refinement/api
+            upstream_port: 8181
+            navigation: Refinement:12
+            """);
+
+    assertEquals(List.of("/refinement", "/refinement/api"), spec.routes());
+    assertEquals(8181, spec.upstreamPort());
+    assertEquals("Refinement", spec.navigationLabel());
+    assertEquals(12, spec.navigationPosition());
+  }
+
+  @Test
+  void noRouteDeclarationIsTheCompatibleEmptySnapshot() {
+    assertEquals(List.of(), DeploymentSpec.DEFAULTS.routes());
+    assertEquals(8080, DeploymentSpec.DEFAULTS.upstreamPort());
+    assertNull(DeploymentSpec.DEFAULTS.navigationLabel());
+    assertNull(DeploymentSpec.DEFAULTS.navigationPosition());
+  }
+
+  @Test
+  void routesAndNavigationAreStrictBecauseTheyBecomeTheEdgesPublicSurface() {
+    assertTrue(messageOf("routes: refinement\n").contains("routes"));
+    assertTrue(messageOf("routes: /refinement,/refinement\n").contains("twice"));
+    assertTrue(messageOf("routes: /refinement\nupstream_port: 0\n").contains("upstream_port"));
+    assertTrue(messageOf("navigation: Refinement:3\n").contains("navigation"));
+    assertTrue(messageOf("routes: /refinement\nnavigation: Refinement:0\n").contains("navigation"));
+  }
+
+  @Test
   void aResourceTypeThisComponentCannotProvisionIsAnError() {
     // The strictness that matters most here: a typo answered with a default would be a deployment
     // whose application boots without the credential it declared it needs.
