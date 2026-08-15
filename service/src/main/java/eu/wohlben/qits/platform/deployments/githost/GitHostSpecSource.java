@@ -78,6 +78,8 @@ public class GitHostSpecSource implements SpecSource {
       HttpRequest request =
           HttpRequest.newBuilder(URI.create(url))
               .timeout(Duration.ofSeconds(timeoutSeconds))
+              .header("X-Qits-User", "qits-deployments")
+              .header("X-Qits-Roles", "qits:system")
               .GET()
               .build();
       response = client().send(request, HttpResponse.BodyHandlers.ofString());
