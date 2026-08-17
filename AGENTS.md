@@ -861,6 +861,13 @@ each is easy to undo by accident:
   Without them the first self-deploy takes the reconcile arm and rotates the passwords its own
   connection pools are holding open.
 
+  **No `QITS_ENVIRONMENT` means the platform plane, not "skip".** The swarm driver writes that
+  variable for environment applications only, and this component is a platform service — so the
+  boot records its rows with a null environment name, which is the key `ResourceProvisioning` looks
+  a platform service's rows up by. Returning early there would have stopped these rows being
+  written at all, silently. Rows left from the per-tier era keep their tier name and are read by
+  nobody.
+
   **It declares TWO resources now** — `db` (this component's registry) and `eventstream` (the bus
   client's claim ledger and outbox, a store of its own with its own Flyway lineage) — so
   `BootResourceRegistration` records both, over `RESOURCES`. A third entry in
@@ -1309,13 +1316,20 @@ tarballs by the absolute URL in the lockfile and ignores the configured registry
 `--replace-registry-host` is broken for a registry mounted under a path prefix. The committed
 lockfile keeps the developer-host origin, which is correct locally.
 
-**This repo is its own deployer**, and it is an **environment service** — one instance per
-environment, deploying that environment. Its `.config/qits/deployments.yml` takes the default
-target and names no branch at all: a push to the branch an environment listens to is a deployment.
-A green run announces this component to itself, and **under swarm** it deploys itself: the manager
-arbitrates the succession, the `/platform-deployments` surface blips mid-cutover (this repo's spec
-says `update_order: stop-first`), and a successor that misses its health gate leaves the predecessor
-serving.
+**This repo is its own deployer**, and it is a **platform service** again — one instance for the
+whole platform, deploying every environment. Its `.config/qits/deployments.yml` spells
+`deployment_target: platform` out and names no branch at all: a push to the branch the *platform*
+environment listens to is a deployment. A green run announces this component to itself, and **under
+swarm** it deploys itself: the manager arbitrates the succession, the `/platform-deployments`
+surface blips mid-cutover (this repo's spec says `update_order: stop-first`), and a successor that
+misses its health gate leaves the predecessor serving.
+
+**The flip itself is the exception, and it takes a hand step** — a service name is its address under
+swarm and swarm cannot rename one, so the deploy that moves this component from
+`<env>-qits-deployments` to bare `qits-deployments` creates the successor beside the predecessor and
+removes nothing. `docker service rm <env>-qits-deployments` once the new one is healthy. README's
+*The plane flip is one deploy, and it needs one hand step* has the whole sequence, including the
+one-time password rotation that comes with it.
 
 **`environment/<name>` is the only deploy ref, on both planes.** A green build deploys wherever an
 *environment* listens to its branch, and what comes out on the platform plane is still

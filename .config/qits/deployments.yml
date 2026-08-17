@@ -7,18 +7,23 @@
 # (`qits.workspaces.release.entry-branch`). `deploy_branches` used to name that branch here, in
 # thirteen copies of one platform-wide answer, and a release pushed onto every entry it named.
 #
-# This component is an ENVIRONMENT service: one instance per environment, deploying that
-# environment. It owns the topology and the docker socket, and one environment's copy answers for
-# one environment — which is what a per-tier deployer is for. It used to be a platform service,
-# back when one instance served every tier.
+# This component is a PLATFORM service: one instance for the whole platform, deploying every
+# environment. It has been both — platform first, then one deployer per tier — and this is the flip
+# back. Two reasons, and neither is the deployer's own convenience:
+#   * ENVIRONMENTS BECOME CROSS-ENVIRONMENT ENTITIES. A hierarchy like "dev gates prod" is a
+#     relation between tiers, and a deployer that only ever sees its own tier cannot hold one.
+#   * ONE TIER'S BUS CANNOT CARRY THAT EITHER. A per-tier deployer publishes DeploymentActive onto
+#     its own tier's bus alone, so nothing outside that tier hears what it did.
 #
-# `deployment_target` is omitted because `environment` is the default, and a default written out is
-# a second place to keep it right. Where a green build deploys is the environment row's answer and
-# never this file's, so nothing here states it.
-#
+# `deployment_target` IS spelled out, against the usual rule that a default should not be repeated:
+# `environment` is the default, this file's answer has now changed twice, and a plane read off an
+# omission is one edit away from being read wrong.
+deployment_target: platform
+
 # TWO DATABASES, and this is the component describing itself with its own mechanism. Each entry is
-# a role and a database of its own on the tier's postgres, created before the successor container
-# starts and injected as QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD — the generic contract,
+# a role and a database of its own on the platform environment's postgres — where a platform
+# service's resources live — created before the successor container starts and injected as
+# QITS_RESOURCE_<NAME>_URL / _USERNAME / _PASSWORD — the generic contract,
 # which the jar that owns each store reads verbatim in its own shipped defaults. THE NAMES ARE NOT
 # FREE: `db` is what the environments jar's datasource reads, `eventstream` is what the
 # qits-eventstream jar's reads, and renaming either here silently stops matching.
@@ -31,8 +36,13 @@
 #
 # SELF-PROVISIONING WORKS HERE AND IS HOW THE SECOND ENTRY ARRIVES. This component is its own
 # deployer, and the spec is read at the BUILT sha — so the running instance reads this file, creates
-# both role/database pairs on the tier's postgres, and injects both triples into the successor it
-# starts. Nothing special happens because the successor is itself.
+# both role/database pairs, and injects both triples into the successor it starts. Nothing special
+# happens because the successor is itself.
+#
+# The flip re-keys both registry rows: a platform service's resources carry no environment name, so
+# the rows move from ('qits-deployments', '<tier>') to the platform plane's null. The databases do
+# not move — the platform plane provisions on the platform environment's postgres, which is the one
+# they are already on. BootResourceRegistration writes the new key at every boot.
 #
 # ADOPTER #1, AND THE ONE THAT CANNOT PROVISION ITSELF FROM COLD. Only the very first container of a
 # fresh platform has no deployer to do it: the bootstrap creates BOTH roles and databases over plain

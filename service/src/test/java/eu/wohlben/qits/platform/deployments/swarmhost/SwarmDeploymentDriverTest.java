@@ -1302,6 +1302,37 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void aFlipToThePlatformPlaneIsACreateBesideTheEnvNamedService() {
+    // What the deployer's own re-planing does here, and it is NOT a self-update. A service name is
+    // its address under swarm, so a platform-shaped spec asks for the bare alias while this process
+    // runs as the env-named one — two different services, which swarm cannot rename into each
+    // other. So the successor is created beside the predecessor, and `reap` removes nothing
+    // (a replace is normally in place). Removing the predecessor is a hand step; README's
+    // "Self-update takes an orchestrator" spells it out.
+    SwarmDeploymentDriver driver = driver();
+    driver.hostnameFile = hostnameFile("this-task-container");
+    cli.script("Config.Labels", result(0, "dev-qits-gateway"));
+    cli.script("--format {{.ID}} qits-gateway", result(1, "no such service"));
+    cli.script("--format {{.ID}} qits_qits-gateway", result(1, "no such service"));
+
+    DeploymentDriver.ApplyResult applied =
+        driver.apply(
+            spec(
+                PdDeploymentTarget.PLATFORM,
+                DeploymentDriver.UpdateOrder.STOP_FIRST,
+                List.of()));
+
+    assertEquals(
+        DeploymentDriver.ApplyOutcome.APPLIED,
+        applied.outcome(),
+        "the env-named predecessor is not this spec's service, so nothing is handed off");
+    List<String> create = cli.matching("service create");
+    assertTrue(create.containsAll(List.of("--name", "qits-gateway")), create.toString());
+    assertTrue(
+        cli.matching("service rm").isEmpty(), "nothing removes the env-named predecessor for us");
+  }
+
+  @Test
   void theSeedTwinIsRemovedBeforeTheSuccessorTakesItsAliasAndPorts() {
     // First pipeline deploy of an application the seed stack still serves: the twin holds the
     // wire alias (DNS would round-robin between the two) and any host-mode ports (the successor

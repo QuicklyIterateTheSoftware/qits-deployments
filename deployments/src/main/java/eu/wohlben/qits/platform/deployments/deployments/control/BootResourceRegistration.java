@@ -42,11 +42,19 @@ import org.jboss.logging.Logger;
  * the truth here; the row is a copy this component keeps so it can reason about itself the way it
  * reasons about every other application.
  *
+ * <p><b>No {@code QITS_ENVIRONMENT} means the platform plane, not "skip".</b> This component is a
+ * platform service now, and the swarm driver writes that variable for environment applications
+ * only — so a boot without it is the normal boot, and returning early would silently stop recording
+ * these rows. Null is what the plane spells "no tier" as everywhere else: {@code
+ * pd_resource.environment_name} is nullable, its unique key treats null as a value ({@code nulls
+ * not distinct}), and {@link ResourceProvisioning} looks a platform service's rows up by exactly
+ * that key.
+ *
  * <p><b>Warn-only, and skipped under TEST</b> — the {@code DeployService.onStart} shape. A
  * component that cannot record its own resource must still start: it is the thing that redeploys
- * the platform, and refusing to boot over a bookkeeping row would be the worst possible trade. An
- * incomplete environment (no {@code QITS_ENVIRONMENT}, or no triple) is not an error either: that
- * is a developer running the jar, and there is nothing to record.
+ * the platform, and refusing to boot over a bookkeeping row would be the worst possible trade. A
+ * resource without its full triple is not an error either: that is a developer running the jar, and
+ * there is nothing to record.
  */
 @ApplicationScoped
 public class BootResourceRegistration {
@@ -84,11 +92,9 @@ public class BootResourceRegistration {
     if (LaunchMode.current() == LaunchMode.TEST) {
       return;
     }
-    Optional<String> environmentName = value(ENVIRONMENT_VARIABLE);
-    if (environmentName.isEmpty()) {
-      LOG.debugf("Not recording this instance's own resources: no %s is set", ENVIRONMENT_VARIABLE);
-      return;
-    }
+    // Null, not a skip: see the class javadoc. A platform service is started without the variable,
+    // and the plane's rows are the ones with no environment name.
+    String environmentName = value(ENVIRONMENT_VARIABLE).orElse(null);
     for (String resourceName : RESOURCES) {
       try {
         Optional<String> url = value(variable(resourceName, "URL"));
@@ -103,7 +109,7 @@ public class BootResourceRegistration {
         }
         // Per resource rather than around the loop: one missing triple must not cost the others
         // their rows, for the same reason this whole observer is warn-only.
-        record(resourceName, url.get(), username.get(), password.get(), environmentName.get());
+        record(resourceName, url.get(), username.get(), password.get(), environmentName);
       } catch (RuntimeException e) {
         LOG.warnf(e, "Could not record this instance's own %s resource row", resourceName);
       }
@@ -119,9 +125,18 @@ public class BootResourceRegistration {
   }
 
   /**
-   * Upsert the row for {@code (this application, this tier, this resource)}. Package-private
-   * because the startup path is skipped under TEST and the suite drives this directly — the
-   * {@code sweepInFlight()} arrangement.
+   * Upsert the row for {@code (this application, this plane, this resource)} — a tier name, or null
+   * for the platform plane. Package-private because the startup path is skipped under TEST and the
+   * suite drives this directly — the {@code sweepInFlight()} arrangement.
+   *
+   * <p><b>The flip leaves the old tier rows behind, deliberately.</b> A platform that ran this per
+   * tier has rows keyed {@code ('qits-deployments', 'dev', …)}, and nothing here reads or rewrites
+   * them: the deploy that performs the flip finds no null-keyed row, rotates both passwords once
+   * and hands the fresh ones to the successor, which records them under the null key at its first
+   * boot. Every self-deploy after that is a no-op again. A fallback to the old tier's row would
+   * spare that single rotation and then have to be carried forever; the leftovers are harmless
+   * (same application name, so the database cross-check still passes) and an operator may delete
+   * them.
    */
   void record(
       String resourceName,
@@ -164,7 +179,7 @@ public class BootResourceRegistration {
             });
     LOG.infof(
         "Recorded this instance's own resource: %s/%s uses database %s as %s",
-        environmentName, resourceName, database, username);
+        environmentName == null ? "platform" : environmentName, resourceName, database, username);
   }
 
   /**

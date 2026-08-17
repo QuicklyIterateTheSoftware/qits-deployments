@@ -244,6 +244,32 @@ it launched a detached referee container, then refused the deployment outright o
 retired — and it is deleted. `qits.platform.deployments.orchestrator` must say `swarm` or the boot
 fails.
 
+### The plane flip is one deploy, and it needs one hand step
+
+This component became a **platform** service (`deployment_target: platform`), and that changes its
+own name: a service name IS its address under swarm, so the deployer moves from
+`<env>-qits-deployments` to bare `qits-deployments`. **Swarm cannot rename a service**, and the
+self-update path matches on the name — so the flip deploy is not a self-update at all. It creates
+the bare-named service beside the env-named one, health-gates it, records the row `ACTIVE`, and
+stops there: `reap` removes nothing under swarm, because a replace is normally in place.
+
+Two deployers are then running on one registry and one config volume. Remove the predecessor by
+hand, once, after the new one is healthy:
+
+```sh
+docker service ps qits-deployments          # the successor is Running/healthy
+docker service rm dev-qits-deployments      # <env>-qits-deployments, the predecessor
+```
+
+Two more things the flip does once, neither of them an error:
+
+- **Both resource passwords rotate.** The registry rows move from the tier key to the platform
+  plane's null one, so the deploy finds no row, takes the reconcile arm and hands fresh credentials
+  to the successor — which records them at its first boot. The databases do not move: a platform
+  service provisions on the platform environment's postgres, which is where they already are.
+- **The old rows stay.** `('qits-deployments', '<env>', …)` is a leftover an operator may delete;
+  it collides with nothing.
+
 ## What it answers
 
 | Route | Who asks |
