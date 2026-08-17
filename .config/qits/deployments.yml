@@ -50,6 +50,9 @@ health_path: /platform-deployments/q/health/ready
 
 # The edge reads this declaration from DeploymentActive rather than routing every application via
 # qits-gateway. `navigation` belongs to the first route and positions its webview option.
+routes: /platform-deployments
+navigation: Deployments:2
+
 resources: postgresql:db, postgresql:eventstream:qits_deployments_eventstream
 
 # STOP-FIRST, AND THIS COMPONENT IS THE REASON THE KEY EXISTS. The default is `start-first`: the
