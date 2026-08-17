@@ -146,9 +146,13 @@ public record ServiceExtras(
    * Read one application's extras. Only keys under its own prefix are looked at, and every one of
    * them has to parse.
    *
-   * <p>Called more than once per deployment, and that is deliberate: it is a pure function of
-   * config, so every reading agrees, and a refusal that arrives before anything is applied is a
-   * deployment that changed nothing.
+   * <p>Called more than once per deployment, and that is deliberate: it is a pure function of the
+   * {@link Config} it is handed, so every reading agrees, and a refusal that arrives before
+   * anything is applied is a deployment that changed nothing.
+   *
+   * <p><b>That Config is a per-argv snapshot, not the boot one</b> — {@link ExtrasSnapshot}, which
+   * argues why: the config volume's file enters the boot config once and then goes stale, so a
+   * deployment reading it would re-stamp whatever the process started with.
    */
   public static ServiceExtras of(Config config, String application) {
     String prefix = DeploymentDriver.EXTRAS_PREFIX + application + ".";

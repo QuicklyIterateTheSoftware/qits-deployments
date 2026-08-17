@@ -3,6 +3,7 @@ package eu.wohlben.qits.platform.deployments.swarmhost;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployedIdentity;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
+import eu.wohlben.qits.platform.deployments.deployments.control.ExtrasSnapshot;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
@@ -268,6 +269,15 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
 
   /** Looked up per key rather than {@code @ConfigProperty}: the key carries the application name. */
   @Inject Config config;
+
+  /**
+   * The properties file the extras are re-read from for every argv, layered over the injected boot
+   * config — see {@link ExtrasSnapshot} for the staleness that costs. Relative to the process's
+   * working directory, Quarkus' config-dir convention, so it names the file the boot config already
+   * read.
+   */
+  @ConfigProperty(name = "qits.platform.deployments.extras-file")
+  String extrasFile;
 
   /**
    * One docker CLI call. A seam so the suite can script the conversation: the argv IS the contract
@@ -1014,9 +1024,11 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * registry can resolve them to a digest.
    */
   List<String> buildCreateArgv(ServiceSpec spec, String name, List<String> networks) {
-    // Read once: the same refusal would otherwise be reached twice, and the aliases belong to the
-    // membership while everything else belongs to the flags below it.
-    ServiceExtras extras = ServiceExtras.of(config, spec.applicationName());
+    // Read once, off ONE snapshot of the config file: the same refusal would otherwise be reached
+    // twice, the aliases belong to the membership while everything else belongs to the flags below
+    // it, and one snapshot is what keeps every reading of one deployment in agreement.
+    ServiceExtras extras =
+        ServiceExtras.of(ExtrasSnapshot.over(config, extrasFile), spec.applicationName());
     List<String> argv =
         new ArrayList<>(
             List.of(
@@ -1145,7 +1157,11 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--env-add");
       argv.add(variable);
     }
-    for (String variable : ServiceExtras.of(config, spec.applicationName()).env()) {
+    // One snapshot for this argv, as the create's is: an update states the environment and nothing
+    // else, so this is the whole of what the file contributes here.
+    ServiceExtras extras =
+        ServiceExtras.of(ExtrasSnapshot.over(config, extrasFile), spec.applicationName());
+    for (String variable : extras.env()) {
       // After this component's own, which is the precedence rule: the last assignment of a key
       // wins, so what config says outranks what this component defaults.
       argv.add("--env-add");

@@ -691,6 +691,18 @@ regression.
 **The family is typed, and an unknown or malformed key is a refused deployment** — never a warning
 and a dropped flag, which is a container that boots, passes its gate and has lost its volume.
 
+**And it is read PER ARGV, not out of the boot config** (`ExtrasSnapshot`, `deployments/control`).
+Quarkus' config-dir source reads `<user.dir>/config/application.properties` once, at boot, so an
+edit on the deployment host's config volume was inert until the process was replaced — and every
+deployment re-stamped the boot snapshot onto the service it updated, which reverted a live
+`service update --env-add` fix on 2026-08-16 and cost a day. Both argv builders take **one**
+snapshot — that file layered over the boot config, at a higher ordinal — and hand it to every
+reading, because `ServiceExtras` rests on "every reading agrees" and that is only true of a fixed
+`Config`. `qits.platform.deployments.extras-file` names the path. **Absent is the boot config
+itself**, byte for byte what a dev run and the clone-alone suite always had; **present and
+unreadable is a REFUSED deployment naming the path**, because a fall-back to boot values is the
+stale value the whole thing exists to kill and would ship a green deployment carrying it.
+
 This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RESOURCE_ATTRIBUTES`
 and its `QUARKUS_`-spelled twin) are written **before** the deployment's own, and docker keeps the
 **last** assignment of a repeated key — measured, not assumed. So they are defaults an operator

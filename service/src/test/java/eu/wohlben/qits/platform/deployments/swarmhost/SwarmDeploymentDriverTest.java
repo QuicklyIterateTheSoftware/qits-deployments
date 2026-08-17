@@ -77,7 +77,14 @@ class SwarmDeploymentDriverTest {
   }
 
   private SwarmDeploymentDriver driver(Map<String, String> properties) {
+    // The shipped default, which no working directory of this suite has a file at: the extras come
+    // from the boot config alone, exactly as they did before the file was read per argv.
+    return driver(properties, "config/application.properties");
+  }
+
+  private SwarmDeploymentDriver driver(Map<String, String> properties, String extrasFile) {
     SwarmDeploymentDriver driver = new SwarmDeploymentDriver();
+    driver.extrasFile = extrasFile;
     driver.runtime = "docker";
     driver.healthIntervalSeconds = 3;
     driver.healthRetries = 3;
@@ -614,6 +621,58 @@ class SwarmDeploymentDriverTest {
 
     assertEquals(IMAGE, argv.get(argv.size() - 1));
     assertTrue(argv.stream().noneMatch(argument -> argument.contains("docker.sock")));
+  }
+
+  @Test
+  void anExtrasFileEditedAfterBootReachesTheNextArgv() throws IOException {
+    // The 2026-08-16 failure, on both argv builders: the boot config had read the config volume's
+    // file once, so a deployment re-stamped last boot's value over a fix applied to the live
+    // service. Both builders read the file, and the file outranks the boot config.
+    Path file = Files.createTempFile("qits-extras", ".properties");
+    file.toFile().deleteOnExit();
+    Files.writeString(
+        file,
+        DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL=http://dev-qits-events:9090\n");
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL",
+                "http://dev-qits-events:8080"),
+            file.toString());
+
+    assertTrue(
+        driver
+            .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+            .containsAll(List.of("--env", "QITS_EVENTS_URL=http://dev-qits-events:9090")),
+        "the file the operator edited, not the config this process booted with");
+
+    // Edited again while this process runs, which is the whole point of reading it per argv.
+    Files.writeString(
+        file,
+        DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL=http://dev-qits-events:9191\n");
+
+    assertTrue(
+        driver
+            .buildUpdateArgv(spec(), "dev-qits-gateway")
+            .containsAll(List.of("--env-add", "QITS_EVENTS_URL=http://dev-qits-events:9191")),
+        "an update states the environment in full, so an edit reaches a live service");
+  }
+
+  @Test
+  void anExtrasFileThatCannotBeReadIsARefusedDeploymentRatherThanTheBootValues() throws IOException {
+    // A fall-back would ship the stale values invisibly: a green deployment carrying whatever the
+    // process booted with. A directory is the portable unreadable file — a chmod 000 one is still
+    // readable to root.
+    Path directory = Files.createTempDirectory("qits-extras");
+    directory.toFile().deleteOnExit();
+    SwarmDeploymentDriver driver = driver(Map.of(), directory.toString());
+
+    cli.script("--format {{.ID}}", result(1, "no such service"));
+    DeploymentDriver.ApplyResult applied = driver.apply(spec());
+
+    assertEquals(DeploymentDriver.ApplyOutcome.REFUSED, applied.outcome());
+    assertTrue(applied.detail().contains(directory.toString()), applied.detail());
+    assertTrue(cli.matching("service create").isEmpty(), "nothing was created");
   }
 
   @Test
