@@ -256,8 +256,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListApplicationsResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Application Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
   /platform-deployments/api/deployments:
     get:
       summary: "One plane's recorded deployments, newest-first — an environment id,\
@@ -278,8 +285,15 @@ paths:
           description: environmentId was not given
         "404":
           description: No such environment
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Deployment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
   /platform-deployments/api/environments:
     get:
       summary: List environments
@@ -290,8 +304,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListEnvironmentsResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
     post:
       summary: "Create an environment: a name, a branch to listen to, a bundle network"
       requestBody:
@@ -313,6 +334,9 @@ paths:
           description: Gate on and the token is for another service
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
   /platform-deployments/api/environments/{environmentId}:
     patch:
       summary: "Rename an environment, point it at another branch, or designate it\
@@ -349,6 +373,9 @@ paths:
           description: Gate on and the token is for another service
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
     get:
       summary: One environment with the applications it tracks
       parameters:
@@ -366,8 +393,15 @@ paths:
                 $ref: "#/components/schemas/EnvironmentResponse"
         "404":
           description: No such environment
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
     delete:
       summary: "Tear an environment down (rows, containers, networks)"
       parameters:
@@ -389,6 +423,9 @@ paths:
           description: Gate on and the token is for another service
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
   /platform-deployments/api/environments/{environmentId}/links:
     get:
       summary: "Every service present in this environment: its links, plus every platform\
@@ -408,8 +445,15 @@ paths:
                 $ref: "#/components/schemas/ListLinksResponse"
         "404":
           description: No such environment
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Environment Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
   /platform-deployments/api/pins:
     get:
       summary: "The image shas deployments pin: what serves, and what a rollback restores"
@@ -421,8 +465,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListPinsResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Pin Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
   /platform-deployments/api/services:
     get:
       summary: "Every service, with the environments each is linked into"
@@ -433,8 +484,15 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListServicesResponse"
+        "401":
+          description: Not Authorized
+        "403":
+          description: Not Allowed
       tags:
       - Pd Service Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:admin
   /platform-deployments/api/services/{name}:
     put:
       summary: "Register or update one service, replacing its environment links"
@@ -471,6 +529,9 @@ paths:
           description: Gate on and the token is for another service
       tags:
       - Pd Service Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
     delete:
       summary: Remove a service and its links
       parameters:
@@ -490,6 +551,9 @@ paths:
           description: Gate on and the token is for another service
       tags:
       - Pd Service Controller
+      security:
+      - SecurityScheme:
+        - qits-platform:system
 info:
   title: qits-platform-deployments API
-  version: 2026.814.122649
+  version: 2026.814.130328

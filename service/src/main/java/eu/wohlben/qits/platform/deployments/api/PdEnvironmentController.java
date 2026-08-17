@@ -38,12 +38,14 @@ import org.jboss.logging.Logger;
  * removes its networks before the rows go. That composition lives in {@code EnvironmentOperations};
  * splitting it across two services is exactly what the merge undid.
  *
- * <p><b>Every write calls {@link MachineAuth#require()}; no read does.</b> The writer here is a
- * machine — the bootstrap and the deploy path — so a bearer is a credential its caller can hold,
- * and the reads are the opposite: a person drives them through qits-gateway's session and the web
- * client polls them, so a guard there would close the surface for both the day the gate flips on.
- * The guard is gated off by {@code qits.auth.machine.required} until qits-platform-idp grants this
- * audience.
+ * <p><b>The writes and the reads want different callers, and the roles say so.</b> The writer here
+ * is a machine — the bootstrap and the deploy path — so the writes take {@code
+ * qits-platform:system}, the role qits-platform-idp puts in a machine token's {@code groups} claim,
+ * and call {@link MachineAuth#require()} on top of it for the audience. The reads are the opposite:
+ * a person drives them through qits-gateway's session and the web client polls them, so they take
+ * {@code qits-platform:admin}, which only a forwarded {@code X-Qits-Roles} header carries. Neither
+ * caller can reach the other's half. {@code MachineAuth} alone is gated off by {@code
+ * qits.auth.machine.required} until qits-platform-idp grants this audience; the roles are not.
  */
 @Path("/environments")
 @Produces(MediaType.APPLICATION_JSON)

@@ -760,17 +760,37 @@ only in which statement runs — a fake there would be asserting the test's own 
 never repeat the segment; tests address the absolute path, which is what makes them catch a prefix
 regression.
 
-**Where `machineAuth.require()` goes.** On a path whose callers are machines: the build-succeeded
-intake, and every topology **write** (environment create/patch/delete, service upsert/delete). Not
-on any read — a person drives those through the gateway's session and the collector polls them, so a
-guard there locks both out the day the gate flips on. That guarded set is the **union** of what the
-two ancestors guarded, and it is the one thing the merge had to decide rather than inherit; apply
-the same question to a new write and answer it in the commit that adds it.
+**Nothing on this surface is open, and the role says who a caller is meant to be.** Every endpoint
+carries a `@RolesAllowed`, and there are exactly two roles:
+
+| role | endpoints | how a caller holds it |
+| --- | --- | --- |
+| `qits-platform:admin` | every read — applications, deployments, the environment listing/aggregate/links, the service listing | the forwarded `X-Qits-Roles` header only: the platform edge asserts it for an authenticated admin session, and the bootstrap asserts it on its own qits-net hop (`PdApi.ADMIN_HEADERS`) |
+| `qits-platform:system` | the pins, every topology **write** (environment create/patch/delete, service upsert/delete) and the build-succeeded intake | a machine bearer: qits-platform-idp copies `qits.idp.client.<id>.roles` into the token's `groups` claim, which quarkus-oidc reads as roles with no configuration at all |
+
+The two sets do not overlap and must not. A machine token never carries `qits-platform:admin`, so
+the read surface is a person's; a browser session never carries `qits-platform:system`, so the
+machine surface is a machine's. **The read half is a change** — reads were open until the surface
+was protected, on the reasoning both ancestors gave — and the collector that reads the pins is a
+machine peer, so it presents its own token rather than nothing.
+
+**Where `machineAuth.require()` goes** is the same question one layer in: on the paths whose callers
+are machines — the intake and every topology write. It re-asks the audience question the token
+already passed at `quarkus.oidc.token.audience`, so the annotation and the guard fail
+independently; apply the same question to a new write and answer it in the commit that adds it.
 
 The guard is **gated off** by `qits.auth.machine.required` (default `false`, shipped by
 `qits-auth-core`). Validation follows the same gate
 (`quarkus.oidc.tenant-enabled=${qits.auth.machine.required:false}`) — gate off, there is no OIDC
 tenant, nothing fetches a JWKS, and a clone-alone build needs no issuer. There is no third state.
+`@RolesAllowed` does **not** follow that gate: it is on in every posture, and what keeps a
+credential-free `./mvnw test` green is `qits-auth-core`'s `%test` dev user, which is granted all
+four platform roles.
+
+**Three doors, and knowing which shut is how a grant is debugged.** A token for another service is
+refused 401 by `quarkus.oidc.token.audience` before any identity exists; a token addressed here but
+minted by a client with no `.roles` line authenticates and is refused **403** by `@RolesAllowed`; a
+call with no credential at all is 401. `MachineGuardEnforcedTest` pins all three.
 
 The intake path is a **cross-repo contract**: qits-ci POSTs
 `/platform-deployments/api/events/build-succeeded` fire-and-forget. A mismatch raises no error
@@ -1076,6 +1096,10 @@ against.
   `service/src/test/resources/machine-token-*.pem`, and `MachineGuardEnforcedProfile` hands
   quarkus-oidc the public half, so the enforced path is exercised end to end with no
   qits-platform-idp to reach. Those PEMs are **test fixtures, not credentials**.
+  **A minted token carries `groups`**, because the idp's does and because `@RolesAllowed` reads
+  nothing else — a fixture that mints only `iss`/`sub`/`aud` produces a caller that authenticates
+  and is then refused 403 on every guarded call. `MachineTokens.rolelessToken` mints exactly that,
+  on purpose, to assert the refusal.
 - `FakeDeploymentDriver` and `FakeSpecSource` are `@Mock` and application-scoped, so they are shared
   across tests: reset both in `@BeforeEach`, use distinct **environment names, repository ids and
   service names** per test, and read their state through their **methods** — the injected reference

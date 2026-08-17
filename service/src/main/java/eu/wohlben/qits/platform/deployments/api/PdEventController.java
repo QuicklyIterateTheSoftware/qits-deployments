@@ -33,9 +33,10 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
  *
  * <p>Hidden from the OpenAPI document (a wire/system API).
  *
- * <p><b>{@link MachineAuth#require()} is here because nothing human reaches this path</b> — qits-ci
- * is its only sender, so a bearer is the only credential its caller could ever hold. The reads next
- * door are the opposite case and carry no guard. That split is the rule, not a phasing.
+ * <p><b>{@code qits-platform:system} and {@link MachineAuth#require()} are both here because
+ * nothing human reaches this path</b> — qits-ci is its only sender, so a bearer is the only
+ * credential its caller could ever hold, and the role is the one an idp-minted token carries. The
+ * reads next door take the admin role no token has. That split is the rule, not a phasing.
  */
 @Path("/events")
 @Produces(MediaType.APPLICATION_JSON)

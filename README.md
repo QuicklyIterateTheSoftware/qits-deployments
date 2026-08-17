@@ -304,10 +304,14 @@ serving, and the sha a rollback would put back.
   bootstrap does not record it. Treat that database with the sensitivity of the
   `qits-deployments-config` volume, which already holds the push token and the idp secrets. No
   statement containing a password is ever logged, and no failure message names one.
-- **Machine writes carry a guard, reads do not.** The build-succeeded intake and the topology writes
-  call `MachineAuth.require()` (audience `qits-platform-deployments`); every read stays open,
-  because a person drives it through qits-gateway's session and the collector polls it. The gate
-  ships **off** — `QITS_AUTH_MACHINE_REQUIRED=true` turns it on, only once the senders are sending.
+- **Every endpoint carries a role, and the role says who the caller is meant to be.** The reads
+  need `qits-platform:admin`, which reaches this service only as a forwarded header — an admin
+  session through the edge, or the bootstrap's own hop. The pins, the topology writes and the
+  build-succeeded intake need `qits-platform:system`, which qits-platform-idp puts in a machine
+  token's `groups` claim. The two sets do not overlap: a machine cannot read the surface and a
+  browser session cannot write it. The writes and the intake additionally call `MachineAuth.require()`
+  (audience `qits-platform-deployments`), behind a gate that ships **off** —
+  `QITS_AUTH_MACHINE_REQUIRED=true` turns it on, only once the senders are sending.
 
 ## Building it
 
