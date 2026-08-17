@@ -43,9 +43,10 @@ import org.eclipse.microprofile.config.spi.ConfigSource;
  * back to the boot values would be the stale value this class exists to kill, and it would be
  * invisible: the deployment goes green carrying whatever the process booted with.
  *
- * <p><b>There is a third layer where a platform runs qits-configuration</b> — {@link #over(Config,
- * Map, String)}, the properties that service resolved for this application, above the file. Which
- * layers exist is {@code DeploymentExtrasSource}'s decision; this class only states the order.
+ * <p><b>There is a second shape where a platform runs qits-configuration</b> — {@link #over(Config,
+ * Map, String)}, the properties that service resolved for this application, over the boot config
+ * and with <b>no file under them at all</b>. Which layers exist is {@code
+ * DeploymentExtrasSource}'s decision; this class only states the order.
  */
 public final class ExtrasSnapshot {
 
@@ -53,9 +54,9 @@ public final class ExtrasSnapshot {
   private static final int FILE_ORDINAL = 1000;
 
   /**
-   * Above the file. qits-configuration is AUTHORITATIVE where it is configured at all, so a
-   * half-migrated platform — the service answering while the old file is still on the volume —
-   * deploys what the service says rather than what somebody forgot to delete.
+   * Above the boot config, and there is nothing between them: qits-configuration is AUTHORITATIVE
+   * where it is configured at all, so its caller hands this the boot config rather than the file.
+   * The ordinal stays above {@link #FILE_ORDINAL} so a snapshot dump reads in source order.
    */
   private static final int SERVED_ORDINAL = 2000;
 
@@ -89,9 +90,10 @@ public final class ExtrasSnapshot {
    * qits.platform.deployments.extras.<app>.<key>} — so it is layered rather than translated, and
    * {@link ServiceExtras} stays the single parser of that grammar.
    *
-   * <p><b>It outranks the file</b>, see {@link #SERVED_ORDINAL}. It does not REPLACE it: what the
-   * service does not state still answers as it did, which is what lets a platform migrate one
-   * application's keys at a time.
+   * <p><b>{@code base} is the boot config, never the file.</b> An authoritative source is the SOLE
+   * source: with a file under this layer, a key deleted from the service is re-served by whatever
+   * the volume still carries, and deleting an entry is exactly what the service exists to make
+   * possible. What the service does not state falls through to the boot config alone.
    *
    * @param source what the snapshot names this layer in a config dump — the url it was read from
    */

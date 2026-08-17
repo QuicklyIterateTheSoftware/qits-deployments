@@ -22,7 +22,7 @@ import org.jboss.logging.Logger;
 
 /**
  * The sole production implementation of {@link DeploymentExtrasSource}: the config volume's file,
- * and — where a deployment names one — qits-configuration on top of it.
+ * or — where a deployment names one — qits-configuration <b>instead of it</b>.
  *
  * <pre>
  * GET &lt;extras-url&gt;/configuration/api/applications/&lt;application&gt;/resolved
@@ -34,11 +34,17 @@ import org.jboss.logging.Logger;
  * String)} — which is what a dev run, the clone-alone suite and every platform that has not adopted
  * the service still get.
  *
- * <p><b>Set, the service is AUTHORITATIVE.</b> Its properties are layered above the file's (see
- * {@code ExtrasSnapshot.SERVED_ORDINAL}), so a half-migrated platform that still carries the old
- * file on its volume cannot have that file shadow what the service says. The map arrives in the
- * full prefixed spelling, so nothing here translates the extras grammar — {@code ServiceExtras}
- * stays its single parser.
+ * <p><b>Set, the service is AUTHORITATIVE — and authoritative means SOLE.</b> The file is not read
+ * at all: the served properties over this process's boot config are the whole snapshot. It used to
+ * be layered above the file, which read well and deployed badly — a key DELETED from the service
+ * came straight back out of a file nobody had emptied, so the one operation the service exists to
+ * make possible was the one it could not perform. Two sources cannot both be authoritative, and a
+ * file left on the volume is the stale one by construction. The map arrives in the full prefixed
+ * spelling, so nothing here translates the extras grammar — {@code ServiceExtras} stays its single
+ * parser.
+ *
+ * <p><b>The rollback is the key.</b> Emptying {@code extras-url} returns this to the file, which may
+ * by then be stale — re-render or export it before leaning on it.
  *
  * <p><b>An unreachable or non-200 service REFUSES the deployment.</b> There is deliberately no
  * fall-back to the file, to the boot config or to anything read earlier: a stale extras value is the
@@ -119,10 +125,10 @@ public class ConfigHostExtrasSource implements DeploymentExtrasSource {
 
   @Override
   public Config forApplication(String application) {
-    Config file = ExtrasSnapshot.over(config, extrasFile);
     String base = extrasUrl.map(String::trim).filter(url -> !url.isEmpty()).orElse(null);
     if (base == null) {
-      return file;
+      // No service named, so the file is the source — WP0's behaviour, byte for byte.
+      return ExtrasSnapshot.over(config, extrasFile);
     }
     String url =
         trimTrailingSlash(base)
@@ -142,7 +148,9 @@ public class ConfigHostExtrasSource implements DeploymentExtrasSource {
             + application
             + " at config-revision="
             + revision(body));
-    return ExtrasSnapshot.over(file, served, url);
+    // Over the BOOT config and not over the file: a deleted entry has to disappear, and a file
+    // under this layer would serve it again at the next deployment.
+    return ExtrasSnapshot.over(config, served, url);
   }
 
   /** The name as it goes into a path segment, refused rather than escaped if it is not one. */

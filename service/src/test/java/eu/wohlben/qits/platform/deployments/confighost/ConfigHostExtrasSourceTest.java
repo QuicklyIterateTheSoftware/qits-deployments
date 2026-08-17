@@ -89,11 +89,12 @@ class ConfigHostExtrasSourceTest {
   }
 
   @Test
-  void theServiceBeatsTheFileForTheSameKey() throws IOException {
-    // The half-migrated platform: the old file is still on the volume and the service is answering.
-    // The service is authoritative, or a file nobody deleted deploys over platform state.
-    Path file =
-        Files.createTempFile("qits-extras", ".properties");
+  void theFileIsNotConsultedAtAll() throws IOException {
+    // AUTHORITATIVE MEANS SOLE. The file was layered under the served map for one release, so a key
+    // DELETED from the service came straight back out of a file nobody had emptied — the one
+    // operation the service exists to make possible was the one it could not perform. With the url
+    // set the file contributes nothing: not a shadowed value, not a value it alone states.
+    Path file = Files.createTempFile("qits-extras", ".properties");
     file.toFile().deleteOnExit();
     Files.writeString(
         file,
@@ -106,9 +107,9 @@ class ConfigHostExtrasSourceTest {
     ConfigHostExtrasSource source = stub.source(boot(Map.of()), file.toString(), NONE);
 
     assertEquals(
-        List.of("ONLY_IN_THE_FILE=kept", "QITS_EVENTS_URL=http://dev-qits-events:8080"),
+        List.of("QITS_EVENTS_URL=http://dev-qits-events:8080"),
         env(source.forApplication("qits-ci")),
-        "the service outranks the file, and what it does not state still answers");
+        "the served map is the whole of it: the file's own key must not reach the argv");
   }
 
   @Test
