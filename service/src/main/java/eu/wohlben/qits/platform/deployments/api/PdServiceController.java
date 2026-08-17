@@ -34,9 +34,11 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * plane flip points at is a {@code DELETE} here, and reading the catalogue is what the web client
  * and a person do.
  *
- * <p><b>Both writes call {@link MachineAuth#require()}; the read does not.</b> The read is driven
- * by people through the client and by anything reconciling, neither of which would survive a guard
- * the day the gate flips on.
+ * <p><b>Both writes take {@code qits-platform:system} and call {@link MachineAuth#require()}; the
+ * read takes {@code qits-platform:admin} and does not.</b> The writes are a machine's, so the role
+ * is the one an idp-minted token carries; the read is driven by people through the client, so the
+ * role is the one the edge asserts for an admin session. See the class javadoc of {@link
+ * PdEnvironmentController} for the whole split.
  */
 @Path("/services")
 @Produces(MediaType.APPLICATION_JSON)
@@ -96,6 +98,7 @@ public class PdServiceController {
       description = "A platform service cannot become an environment service")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response upsert(@PathParam("name") String name, UpsertServiceRequest request) {
     machineAuth.require();
     UpsertServiceRequest body =
@@ -129,6 +132,7 @@ public class PdServiceController {
   @GET
   @Operation(summary = "Every service, with the environments each is linked into")
   @APIResponse(responseCode = "200", description = "The services")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:admin")
   public ListServicesResponse list() {
     return new ListServicesResponse(
         reads.call("The service catalogue listing", catalog::list).stream()
@@ -151,6 +155,7 @@ public class PdServiceController {
   @APIResponse(responseCode = "404", description = "No such service")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response delete(@PathParam("name") String name) {
     machineAuth.require();
     catalog.delete(name);

@@ -32,12 +32,15 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  * nothing but the deployment rows, which is what keeps it answerable regardless of what the
  * topology says today.
  *
- * <p>Read-only and unguarded, exactly like the environment and deployment listings. There is no
- * secret in it — every sha is already on a deployment row this service serves anonymously — and
- * this component authenticates no user anyway (the gateway does).
+ * <p><b>Read-only, and a machine peer's rather than a person's.</b> It takes {@code
+ * qits-platform:system} — the role an idp-minted machine token carries — and not the {@code
+ * qits-platform:admin} the environment and deployment listings take, because its one caller is
+ * qits-platform-artifacts' collector and no browser has business here. The collector's own idp
+ * client is granted this service's audience and that role, so the credential exists to present.
  */
 @Path("/pins")
 @Produces(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits-platform:system")
 public class PdPinController {
 
   @Inject RollbackPins pins;

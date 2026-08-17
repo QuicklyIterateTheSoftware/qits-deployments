@@ -33,6 +33,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  */
 @Path("/deployments")
 @Produces(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits-platform:admin")
 public class PdDeploymentController {
 
   @Inject DeployService deployService;

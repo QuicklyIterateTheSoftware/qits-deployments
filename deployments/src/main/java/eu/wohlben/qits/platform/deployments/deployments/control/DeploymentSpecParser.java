@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * The strict reader of {@code .config/qits/deployments.yml}. Eight scalar keys, no nesting, no YAML
+ * The strict reader of {@code .config/qits/deployments.yml}. Eleven scalar keys, no nesting, no YAML
  * lists — so this is a line reader rather than a YAML library, and being one is what makes every
  * rejection a sentence naming the file and the line.
  *
@@ -22,6 +22,9 @@ import java.util.Set;
  * resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
  * update_order: start-first            # default | stop-first for anything single-writer
  * publish_mode: host                   # default | ingress for a port the routing mesh holds
+ * routes: /artifacts,/v2               # optional public path prefixes, in navigation order
+ * upstream_port: 8080                  # default; the service port behind every route
+ * navigation: Artifacts:3              # optional label:positive-position, for the first route
  * deploy_branches: environment/prod    # RETIRED, accepted and ignored — see below
  * </pre>
  *
@@ -100,6 +103,10 @@ public final class DeploymentSpecParser {
   private static final String RESOURCES = "resources";
   private static final String UPDATE_ORDER = "update_order";
   private static final String PUBLISH_MODE = "publish_mode";
+  private static final String ROUTES = "routes";
+  private static final String UPSTREAM_PORT = "upstream_port";
+  private static final String NAVIGATION = "navigation";
+  static final int DEFAULT_UPSTREAM_PORT = 8080;
 
   /** The only resource type there is. It is spelled in the file so a second one can arrive. */
   private static final String POSTGRESQL = "postgresql";
@@ -122,6 +129,10 @@ public final class DeploymentSpecParser {
     List<DeploymentSpec.ResourceSpec> resources = List.of();
     DeploymentDriver.UpdateOrder updateOrder = DeploymentDriver.UpdateOrder.START_FIRST;
     DeploymentDriver.PublishMode publishMode = DeploymentDriver.PublishMode.HOST;
+    List<String> routes = List.of();
+    int upstreamPort = DEFAULT_UPSTREAM_PORT;
+    String navigationLabel = null;
+    Integer navigationPosition = null;
     Set<String> seen = new HashSet<>();
 
     String[] lines = (yaml == null ? "" : yaml).split("\\R", -1);
@@ -153,6 +164,13 @@ public final class DeploymentSpecParser {
         case RESOURCES -> resources = resources(value, source, lineNumber);
         case UPDATE_ORDER -> updateOrder = updateOrder(value, source, lineNumber);
         case PUBLISH_MODE -> publishMode = publishMode(value, source, lineNumber);
+        case ROUTES -> routes = routes(value, source, lineNumber);
+        case UPSTREAM_PORT -> upstreamPort = upstreamPort(value, source, lineNumber);
+        case NAVIGATION -> {
+          Navigation navigation = navigation(value, source, lineNumber);
+          navigationLabel = navigation.label();
+          navigationPosition = navigation.position();
+        }
         default ->
             throw error(
                 source,
@@ -173,8 +191,14 @@ public final class DeploymentSpecParser {
                     + RESOURCES
                     + ", "
                     + UPDATE_ORDER
+                    + ", "
+                    + PUBLISH_MODE
+                    + ", "
+                    + ROUTES
+                    + ", "
+                    + UPSTREAM_PORT
                     + " and "
-                    + PUBLISH_MODE);
+                    + NAVIGATION);
       }
     }
 
@@ -197,6 +221,15 @@ public final class DeploymentSpecParser {
               + ": true` is not something a platform service can be — it already runs on every"
               + " environment's networks, and the bundle is environment-scoped");
     }
+    if (navigationLabel != null && routes.isEmpty()) {
+      throw new SpecException(
+          source
+              + ": `"
+              + NAVIGATION
+              + "` needs at least one `"
+              + ROUTES
+              + "` entry — navigation has to lead to a published route");
+    }
     return new DeploymentSpec(
         target,
         availableOnEnv,
@@ -205,8 +238,74 @@ public final class DeploymentSpecParser {
         healthCmd,
         resources,
         updateOrder,
-        publishMode);
+        publishMode,
+        routes,
+        upstreamPort,
+        navigationLabel,
+        navigationPosition);
   }
+
+  /** Public path prefixes, one per comma-separated entry. Navigation belongs to the first route. */
+  private static List<String> routes(String value, String source, int line) {
+    List<String> declared = new ArrayList<>();
+    Set<String> seenRoutes = new HashSet<>();
+    for (String candidate : value.split(",", -1)) {
+      String path = candidate.strip();
+      if (!path.matches("/(?:[a-z0-9]+(?:-[a-z0-9]+)*)?(?:/[a-z0-9]+(?:-[a-z0-9]+)*)*")) {
+        throw error(
+            source,
+            line,
+            "`" + ROUTES + "` entries are absolute lowercase path prefixes, got: " + path);
+      }
+      if (!seenRoutes.add(path)) {
+        throw error(source, line, "`" + ROUTES + "` names `" + path + "` twice");
+      }
+      declared.add(path);
+    }
+    return List.copyOf(declared);
+  }
+
+  private static int upstreamPort(String value, String source, int line) {
+    try {
+      int port = Integer.parseInt(value);
+      if (port < 1 || port > 65535) {
+        throw new NumberFormatException();
+      }
+      return port;
+    } catch (NumberFormatException e) {
+      throw error(
+          source,
+          line,
+          "`" + UPSTREAM_PORT + "` must be an integer from 1 to 65535, got: " + value);
+    }
+  }
+
+  /** The final colon is the separator so a visible label may itself contain a colon. */
+  private static Navigation navigation(String value, String source, int line) {
+    int separator = value.lastIndexOf(':');
+    String label = separator < 1 ? "" : value.substring(0, separator).strip();
+    String positionText = separator < 0 ? "" : value.substring(separator + 1).strip();
+    if (label.isBlank() || label.length() > 120 || label.indexOf('\n') >= 0 || label.indexOf('\r') >= 0) {
+      throw error(
+          source,
+          line,
+          "`" + NAVIGATION + "` needs a non-blank label of at most 120 characters");
+    }
+    try {
+      int position = Integer.parseInt(positionText);
+      if (position < 1) {
+        throw new NumberFormatException();
+      }
+      return new Navigation(label, position);
+    } catch (NumberFormatException e) {
+      throw error(
+          source,
+          line,
+          "`" + NAVIGATION + "` ends with a positive position, got: " + value);
+    }
+  }
+
+  private record Navigation(String label, int position) {}
 
   /**
    * Where a published host port is held. Two values and no third, and the file spells them the way

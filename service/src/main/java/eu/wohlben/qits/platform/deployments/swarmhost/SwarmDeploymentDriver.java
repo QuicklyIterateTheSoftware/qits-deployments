@@ -2,7 +2,9 @@ package eu.wohlben.qits.platform.deployments.swarmhost;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployedIdentity;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentExtrasSource;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentIdentifiers;
+import eu.wohlben.qits.platform.deployments.deployments.control.ExtrasSnapshot;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
@@ -18,16 +20,17 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -131,6 +134,42 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    */
   static final String RUNNING_IMAGE_FORMAT =
       "{{.Spec.TaskTemplate.ContainerSpec.Image}}|" + UPDATE_STATUS_FORMAT;
+
+  /**
+   * The environment the live service carries, one {@code KEY=VALUE} per line — what an update
+   * diffs against so it can state a REMOVAL as well as an addition. It reads the SPEC rather than a
+   * running task: the spec is what the next task would inherit, and it is what an update rewrites.
+   */
+  static final String SPEC_ENV_FORMAT =
+      "{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}";
+
+  /** Which tier this application is deployed into — an environment application's, and only one. */
+  static final String ENVIRONMENT_VARIABLE = "QITS_ENVIRONMENT";
+
+  /** Which application this is, on every plane. */
+  static final String APPLICATION_VARIABLE = "QITS_APPLICATION";
+
+  /**
+   * What {@code ResourceProvisioning} injects, as the generic contract: {@code
+   * QITS_RESOURCE_<NAME>_URL} and its two siblings. Config states none of them — the registry row
+   * is the single authority for the credential — so the update diff must not be able to remove one.
+   */
+  static final String RESOURCE_PREFIX = "QITS_RESOURCE_";
+
+  /**
+   * This component's own four, written on every argv before the deployment's own and therefore
+   * never stated by config. They are the exception the update diff needs: measured against the
+   * extras alone, every deployment would remove and immediately re-add all four.
+   *
+   * <p>{@code QITS_RESOURCE_*} is the fifth member of the family and is a PREFIX rather than a
+   * name, which is why it is {@link #RESOURCE_PREFIX} beside this set rather than in it.
+   */
+  static final Set<String> DEPLOYER_OWN_VARIABLES =
+      Set.of(
+          ENVIRONMENT_VARIABLE,
+          APPLICATION_VARIABLE,
+          DeployedIdentity.OTEL_VARIABLE,
+          DeployedIdentity.QUARKUS_OTEL_VARIABLE);
 
   /**
    * How far an update's {@code StartedAt} may sit <i>before</i> the moment this process issued it
@@ -266,8 +305,13 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
   @ConfigProperty(name = "qits.platform.deployments.output-max-chars")
   int outputMaxChars;
 
-  /** Looked up per key rather than {@code @ConfigProperty}: the key carries the application name. */
-  @Inject Config config;
+  /**
+   * Where the extras are read from, ONCE PER ARGV — see {@link DeploymentExtrasSource} and, for the
+   * staleness a boot snapshot costs, {@link ExtrasSnapshot}. It is a seam because the answer may be
+   * qits-configuration's rather than the config volume's, and an HTTP call does not belong in a
+   * driver.
+   */
+  @Inject DeploymentExtrasSource extrasSource;
 
   /**
    * One docker CLI call. A seam so the suite can script the conversation: the argv IS the contract
@@ -1014,9 +1058,11 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * registry can resolve them to a digest.
    */
   List<String> buildCreateArgv(ServiceSpec spec, String name, List<String> networks) {
-    // Read once: the same refusal would otherwise be reached twice, and the aliases belong to the
-    // membership while everything else belongs to the flags below it.
-    ServiceExtras extras = ServiceExtras.of(config, spec.applicationName());
+    // Read once, off ONE snapshot: the same refusal would otherwise be reached twice, the aliases
+    // belong to the membership while everything else belongs to the flags below it, and one
+    // snapshot is what keeps every reading of one deployment in agreement.
+    ServiceExtras extras =
+        ServiceExtras.of(extrasSource.forApplication(spec.applicationName()), spec.applicationName());
     List<String> argv =
         new ArrayList<>(
             List.of(
@@ -1120,6 +1166,10 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
    * variables and the deployment config's alike. A variable is a value rather than a shape: config
    * naming a new address is a change the next deployment is supposed to carry, and {@code
    * --env-add} of an existing key replaces it.
+   *
+   * <p><b>Re-stated in full means REMOVALS too</b>, which it did not until 2026-08-17: see {@link
+   * #envRemovals}. The environment is the one part of the spec this argv owns, so owning it means
+   * the service ends up carrying what config states and nothing else.
    */
   List<String> buildUpdateArgv(ServiceSpec spec, String name) {
     List<String> argv =
@@ -1145,12 +1195,19 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
       argv.add("--env-add");
       argv.add(variable);
     }
-    for (String variable : ServiceExtras.of(config, spec.applicationName()).env()) {
+    // One snapshot for this argv, as the create's is: an update states the environment and nothing
+    // else, so this is the whole of what deployment config contributes here.
+    ServiceExtras extras =
+        ServiceExtras.of(extrasSource.forApplication(spec.applicationName()), spec.applicationName());
+    for (String variable : extras.env()) {
       // After this component's own, which is the precedence rule: the last assignment of a key
       // wins, so what config says outranks what this component defaults.
       argv.add("--env-add");
       argv.add(variable);
     }
+    // ...and what the service still carries that nothing above states any more. See envRemovals:
+    // an update that only ever added is why a deleted entry outlived every deployment.
+    envRemovals(argv, name, extras);
     argv.add(name);
     return List.copyOf(argv);
   }
@@ -1262,9 +1319,9 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
     // QITS_ENVIRONMENT is written for environment applications ONLY: a platform service serves
     // every environment, and telling it that it lives in one would be a statement that is untrue.
     if (spec.environmentName() != null) {
-      variables.add("QITS_ENVIRONMENT=" + spec.environmentName());
+      variables.add(ENVIRONMENT_VARIABLE + "=" + spec.environmentName());
     }
-    variables.add("QITS_APPLICATION=" + spec.applicationName());
+    variables.add(APPLICATION_VARIABLE + "=" + spec.applicationName());
     String identity =
         DeployedIdentity.resourceAttributes(
             spec.commitSha(), spec.environmentName(), spec.wireAlias());
@@ -1278,11 +1335,88 @@ public class SwarmDeploymentDriver implements DeploymentDriver {
           PdIdentifiers.requireResourceName(binding.name())
               .toUpperCase(Locale.ROOT)
               .replace('-', '_');
-      variables.add("QITS_RESOURCE_" + key + "_URL=" + safe(binding.url()));
-      variables.add("QITS_RESOURCE_" + key + "_USERNAME=" + safe(binding.username()));
-      variables.add("QITS_RESOURCE_" + key + "_PASSWORD=" + safe(binding.password()));
+      variables.add(RESOURCE_PREFIX + key + "_URL=" + safe(binding.url()));
+      variables.add(RESOURCE_PREFIX + key + "_USERNAME=" + safe(binding.username()));
+      variables.add(RESOURCE_PREFIX + key + "_PASSWORD=" + safe(binding.password()));
     }
     return List.copyOf(variables);
+  }
+
+  /**
+   * The environment keys the LIVE service carries, so an update can state what is no longer stated.
+   *
+   * <p>Read with the same {@code service inspect} the rest of this class asks its questions with.
+   * An inspect that cannot answer removes NOTHING: a deployment must not lose an application's
+   * environment because one CLI call failed, and the next deployment asks again.
+   */
+  private List<String> currentSpecEnvKeys(String name) {
+    PdProcess.Result inspected =
+        run(List.of(runtime, "service", "inspect", "--format", SPEC_ENV_FORMAT, name),
+            INSPECT_TIMEOUT);
+    if (inspected.exitCode() != 0) {
+      LOG.warnf(
+          "Could not read the environment of %s, so this update removes nothing from it: %s",
+          name, inspected.output());
+      return List.of();
+    }
+    List<String> keys = new ArrayList<>();
+    for (String line : safe(inspected.output()).split("\n")) {
+      // A variable's VALUE may hold anything, newlines included, so a line with no `=` in it is a
+      // continuation rather than a key. Skipping it is what keeps a wrapped value from being read
+      // as a variable nobody set — and an --env-rm of a name that does not exist is not free: it
+      // is a whole deployment refused by the CLI.
+      int equals = line.indexOf('=');
+      if (equals > 0) {
+        keys.add(line.substring(0, equals).strip());
+      }
+    }
+    return keys;
+  }
+
+  /**
+   * {@code --env-rm} for every key the live service carries that the deployment no longer states.
+   *
+   * <p><b>This is the other half of "config is platform state".</b> An update only ever added, so a
+   * variable removed from an application's extras stayed on the running service until somebody
+   * removed the service — measured on 2026-08-17, on the deployment that proved the flip. The diff
+   * closes it, and the consequence is the point of the campaign rather than a side effect: a hand
+   * {@code service update --env-add} no longer survives the next deployment, because the source of
+   * an application's environment is qits-configuration and nothing else.
+   *
+   * <p><b>What is never removed is a family rather than a list of exceptions</b>, and it has three
+   * members:
+   *
+   * <ul>
+   *   <li>everything the deployment ITSELF states — {@code extras.env()}, which is the whole of
+   *       what config says;
+   *   <li>{@link #DEPLOYER_OWN_VARIABLES}, this component's identity set: it writes them on every
+   *       argv and an operator never states them, so a diff against config alone would remove and
+   *       re-add the same four values on every deployment;
+   *   <li>anything under {@link #RESOURCE_PREFIX}, which {@code ResourceProvisioning} injects from
+   *       the registry row. Config cannot state a provisioned credential and must not be able to
+   *       delete one — a removed datasource triple is an application that cannot boot.
+   * </ul>
+   *
+   * <p><b>Only an update does this.</b> A create has no predecessor to diff against, and {@code
+   * service create} has no such flag.
+   */
+  private void envRemovals(List<String> argv, String name, ServiceExtras extras) {
+    Set<String> stated = new HashSet<>();
+    for (String variable : extras.env()) {
+      int equals = variable.indexOf('=');
+      stated.add(equals > 0 ? variable.substring(0, equals) : variable);
+    }
+    // Sorted, so one deployment's argv is the same argv twice and a diff of two run logs is
+    // readable. A HashSet's order is not a contract and a reader would read it as one.
+    for (String key : new TreeSet<>(currentSpecEnvKeys(name))) {
+      if (stated.contains(key)
+          || DEPLOYER_OWN_VARIABLES.contains(key)
+          || key.startsWith(RESOURCE_PREFIX)) {
+        continue;
+      }
+      argv.add("--env-rm");
+      argv.add(key);
+    }
   }
 
   /**

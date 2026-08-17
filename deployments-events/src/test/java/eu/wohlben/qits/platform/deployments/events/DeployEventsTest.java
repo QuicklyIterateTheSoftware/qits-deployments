@@ -164,4 +164,42 @@ class DeployEventsTest {
     assertEquals("container exited 1", failed.detail());
     assertEquals(FINISHED, failed.occurredAt());
   }
+
+  @Test
+  void anActiveEventCarriesTheCompleteResolvedEndpointSnapshot() {
+    DeploymentActive active =
+        new DeploymentActive(
+            "d-1",
+            "qits-refinement",
+            "env-1",
+            "dev",
+            SHA,
+            "run-1",
+            "dev-qits-refinement",
+            FINISHED,
+            List.of(
+                new DeploymentEndpoint(
+                    "/refinement", "dev-qits-refinement", 8080, "Refinement", 3),
+                new DeploymentEndpoint(
+                    "/refinement/api", "dev-qits-refinement", 8080, null, null)));
+
+    String payload = CanonicalJson.payload(active);
+    assertTrue(payload.contains("\"path\":\"/refinement\""), payload);
+    assertTrue(payload.contains("\"upstreamHost\":\"dev-qits-refinement\""), payload);
+    assertTrue(payload.contains("\"upstreamPort\":8080"), payload);
+    assertTrue(payload.contains("\"navigationLabel\":\"Refinement\""), payload);
+    assertFalse(payload.contains("\"navigationLabel\":null"), payload);
+
+    DeploymentActive decoded = CanonicalJson.payloadTo(payload, DeploymentActive.class);
+    assertEquals(active.endpoints(), decoded.endpoints());
+  }
+
+  @Test
+  void anActiveEventWithNoRoutesStillPublishesAnExplicitEmptySnapshot() {
+    String payload = CanonicalJson.payload(anActive());
+
+    // Omission would be ambiguous to the edge: it could mean an older publisher, or it could mean
+    // that this successful deployment removed all routes. The wire must say the latter explicitly.
+    assertTrue(payload.contains("\"endpoints\":[]"), payload);
+  }
 }

@@ -31,6 +31,7 @@ import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
  */
 @Path("/applications")
 @Produces(MediaType.APPLICATION_JSON)
+@jakarta.annotation.security.RolesAllowed("qits-platform:admin")
 public class PdApplicationController {
 
   @Inject ServiceCatalog catalog;

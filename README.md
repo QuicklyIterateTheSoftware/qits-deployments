@@ -80,11 +80,23 @@ health_cmd: pg_isready -U postgres   # instead of health_path; runs inside the c
 resources: postgresql:db             # a database of its own, injected as QITS_RESOURCE_DB_*
 update_order: start-first            # default | stop-first for anything that cannot overlap itself
 publish_mode: host                   # default | ingress for a port swarm's routing mesh holds
+routes: /artifacts,/artifacts/api    # optional public path prefixes, ordered
+upstream_port: 8080                  # default; target port behind every declared route
+navigation: Artifacts:3              # optional label:positive-position for the first route
 ```
 
 `deploy_branches` is parsed, validated and **not acted on**: where a build deploys is the
 environment rows' answer, not the file's. It is accepted because qits-workspaces' release flow reads
 the same file for its promotion targets, and this parser fails a deployment on an unknown key.
+
+`routes:` is the service-owned public surface: comma-separated, unique absolute lowercase path
+prefixes. `upstream_port:` is shared by those prefixes and defaults to `8080`. `navigation:` is
+optional, splits on its final colon into a visible label and a positive position, and belongs to
+the first declared route. After cutover, `DeploymentActive` publishes the complete resolved list:
+each route carries its path, the deployment's runtime wire alias, port, and (for the first route)
+navigation metadata. Consumers replace their projection from that snapshot; an empty list removes
+the application's previous routes and navigation entry. A declaration without `routes:` remains
+valid and publishes an empty list, which is the compatibility posture for every existing service.
 
 `health_cmd` and `health_path` are **alternatives, and a file setting both fails**. The path names a
 URL a `curl` inside the container fetches; the command replaces that mechanism whole. It is for the
@@ -271,10 +283,13 @@ serving, and the sha a rollback would put back.
   published port, its extra env and the extra DNS names it answers to on the shared network — a
   structured family each driver renders in its own
   orchestrator's words (`ServiceExtras`); the `QITS_RESOURCE_<NAME>_*` triple is generated here and
-  injected here. **Nothing
-  arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as
-  before, now that a credential is a thing this component holds: what a repository can NAME is a
-  database of its own, and the VALUES injected for it are ones this component generated.
+  injected here. **Nothing PUSHED over HTTP contributes a credential to a `docker run`** — which is
+  the same sentence as before, now that a credential is a thing this component holds: what a
+  repository can NAME is a database of its own, and the VALUES injected for it are ones this
+  component generated. The family may be **pulled** from qits-configuration where a deployment sets
+  `qits.platform.deployments.extras-url` — this process reading a named service with its own machine
+  identity, which changes the source and not the guard; unset (the shipped state) the config volume's
+  file is the whole of it.
 - **Untrusted strings are validated at the boundary.** Names become network names, aliases and image
   path segments (dns-label charset); shas become image tags (hex only); the health path is
   interpolated into a string the *container's* shell runs, so it gets the strictest allowlist and is
@@ -292,10 +307,14 @@ serving, and the sha a rollback would put back.
   bootstrap does not record it. Treat that database with the sensitivity of the
   `qits-deployments-config` volume, which already holds the push token and the idp secrets. No
   statement containing a password is ever logged, and no failure message names one.
-- **Machine writes carry a guard, reads do not.** The build-succeeded intake and the topology writes
-  call `MachineAuth.require()` (audience `qits-platform-deployments`); every read stays open,
-  because a person drives it through qits-gateway's session and the collector polls it. The gate
-  ships **off** — `QITS_AUTH_MACHINE_REQUIRED=true` turns it on, only once the senders are sending.
+- **Every endpoint carries a role, and the role says who the caller is meant to be.** The reads
+  need `qits-platform:admin`, which reaches this service only as a forwarded header — an admin
+  session through the edge, or the bootstrap's own hop. The pins, the topology writes and the
+  build-succeeded intake need `qits-platform:system`, which qits-platform-idp puts in a machine
+  token's `groups` claim. The two sets do not overlap: a machine cannot read the surface and a
+  browser session cannot write it. The writes and the intake additionally call `MachineAuth.require()`
+  (audience `qits-platform-deployments`), behind a gate that ships **off** —
+  `QITS_AUTH_MACHINE_REQUIRED=true` turns it on, only once the senders are sending.
 
 ## Building it
 

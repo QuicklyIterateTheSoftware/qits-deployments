@@ -67,7 +67,11 @@ public interface SpecSource {
       String healthCmd,
       List<ResourceSpec> resources,
       DeploymentDriver.UpdateOrder updateOrder,
-      DeploymentDriver.PublishMode publishMode) {
+      DeploymentDriver.PublishMode publishMode,
+      List<String> routes,
+      int upstreamPort,
+      String navigationLabel,
+      Integer navigationPosition) {
 
     /** A null list and an empty one are the same statement: the file named none. */
     public DeploymentSpec {
@@ -75,6 +79,7 @@ public interface SpecSource {
       resources = resources == null ? List.of() : List.copyOf(resources);
       updateOrder = updateOrder == null ? DeploymentDriver.UpdateOrder.START_FIRST : updateOrder;
       publishMode = publishMode == null ? DeploymentDriver.PublishMode.HOST : publishMode;
+      routes = routes == null ? List.of() : List.copyOf(routes);
     }
 
     /**
@@ -89,6 +94,31 @@ public interface SpecSource {
         String healthCmd,
         List<ResourceSpec> resources) {
       this(target, availableOnEnv, deployBranches, healthPath, healthCmd, resources, null, null);
+    }
+
+    /** The pre-routing shape: no routes is the compatible, empty endpoint declaration. */
+    public DeploymentSpec(
+        PdDeploymentTarget target,
+        boolean availableOnEnv,
+        List<String> deployBranches,
+        String healthPath,
+        String healthCmd,
+        List<ResourceSpec> resources,
+        DeploymentDriver.UpdateOrder updateOrder,
+        DeploymentDriver.PublishMode publishMode) {
+      this(
+          target,
+          availableOnEnv,
+          deployBranches,
+          healthPath,
+          healthCmd,
+          resources,
+          updateOrder,
+          publishMode,
+          List.of(),
+          8080,
+          null,
+          null);
     }
 
     /**

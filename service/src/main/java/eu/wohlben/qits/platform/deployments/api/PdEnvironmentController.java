@@ -38,12 +38,14 @@ import org.jboss.logging.Logger;
  * removes its networks before the rows go. That composition lives in {@code EnvironmentOperations};
  * splitting it across two services is exactly what the merge undid.
  *
- * <p><b>Every write calls {@link MachineAuth#require()}; no read does.</b> The writer here is a
- * machine — the bootstrap and the deploy path — so a bearer is a credential its caller can hold,
- * and the reads are the opposite: a person drives them through qits-gateway's session and the web
- * client polls them, so a guard there would close the surface for both the day the gate flips on.
- * The guard is gated off by {@code qits.auth.machine.required} until qits-platform-idp grants this
- * audience.
+ * <p><b>The writes and the reads want different callers, and the roles say so.</b> The writer here
+ * is a machine — the bootstrap and the deploy path — so the writes take {@code
+ * qits-platform:system}, the role qits-platform-idp puts in a machine token's {@code groups} claim,
+ * and call {@link MachineAuth#require()} on top of it for the audience. The reads are the opposite:
+ * a person drives them through qits-gateway's session and the web client polls them, so they take
+ * {@code qits-platform:admin}, which only a forwarded {@code X-Qits-Roles} header carries. Neither
+ * caller can reach the other's half. {@code MachineAuth} alone is gated off by {@code
+ * qits.auth.machine.required} until qits-platform-idp grants this audience; the roles are not.
  */
 @Path("/environments")
 @Produces(MediaType.APPLICATION_JSON)
@@ -113,6 +115,7 @@ public class PdEnvironmentController {
   @APIResponse(responseCode = "409", description = "An environment of that name already exists")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response create(@Valid CreateEnvironmentRequest request) {
     machineAuth.require();
     if (request.applications() != null && !request.applications().isEmpty()) {
@@ -152,6 +155,7 @@ public class PdEnvironmentController {
       description = "Another environment already has that name, or the platform designation was cleared rather than moved")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public EnvironmentResponse update(
       @PathParam("environmentId") String environmentId, UpdateEnvironmentRequest request) {
     machineAuth.require();
@@ -175,6 +179,7 @@ public class PdEnvironmentController {
   // The 200 is spelled out because declaring ANY response suppresses the generated one, and this
   // operation had only the generated one — leaving it off would drop the schema from the document.
   @APIResponse(responseCode = "200", description = "The environments")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:admin")
   public ListEnvironmentsResponse list() {
     return new ListEnvironmentsResponse(
         reads.call("The environment listing", environments::list).stream()
@@ -187,6 +192,7 @@ public class PdEnvironmentController {
   @Operation(summary = "One environment with the applications it tracks")
   @APIResponse(responseCode = "200", description = "The environment")
   @APIResponse(responseCode = "404", description = "No such environment")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:admin")
   public EnvironmentResponse get(@PathParam("environmentId") String environmentId) {
     // Both reads inside one bracket — the tier row and the applications it holds are one answer,
     // and a cutover between them would fail the half that ran second.
@@ -210,6 +216,7 @@ public class PdEnvironmentController {
   @Operation(summary = "Every service present in this environment: its links, plus every platform service")
   @APIResponse(responseCode = "200", description = "The services present in this environment")
   @APIResponse(responseCode = "404", description = "No such environment")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:admin")
   public ListLinksResponse links(@PathParam("environmentId") String environmentId) {
     return new ListLinksResponse(
         reads
@@ -236,6 +243,7 @@ public class PdEnvironmentController {
   @APIResponse(responseCode = "409", description = "This is the platform environment")
   @APIResponse(responseCode = "401", description = "Gate on and no machine token presented")
   @APIResponse(responseCode = "403", description = "Gate on and the token is for another service")
+  @jakarta.annotation.security.RolesAllowed("qits-platform:system")
   public Response delete(@PathParam("environmentId") String environmentId) {
     machineAuth.require();
     environments.delete(environmentId);
