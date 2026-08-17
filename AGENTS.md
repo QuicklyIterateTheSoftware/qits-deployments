@@ -729,18 +729,27 @@ itself**, byte for byte what a dev run and the clone-alone suite always had; **p
 unreadable is a REFUSED deployment naming the path**, because a fall-back to boot values is the
 stale value the whole thing exists to kill and would ship a green deployment carrying it.
 
-### The file is one source now, and qits-configuration is the other
+### The file is the cold-boot source, and qits-configuration is the source
 
 **`qits.platform.deployments.extras-url` is optional and UNSET SHIPPED**, and unset is the file
 behaviour above byte for byte: no request, no parse, nothing to configure. Set — a deployment sends
 `QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL=http://dev-qits-configuration:8080` — **that service is
 AUTHORITATIVE**, read once per argv build at
 `GET <url>/configuration/api/applications/<application>/resolved`, whose `properties` map arrives in
-the full `qits.platform.deployments.extras.<app>.*` spelling and is layered **above the file's**
-ordinal. Above, not instead of: a half-migrated platform still carrying the old file on its volume
-must not have that file shadow platform state, while an application whose keys have not moved yet
-still deploys off the file. `ServiceExtras` stays the single parser of the grammar — nothing in
-`confighost` translates a key.
+the full `qits.platform.deployments.extras.<app>.*` spelling. `ServiceExtras` stays the single
+parser of the grammar — nothing in `confighost` translates a key.
+
+**AUTHORITATIVE MEANS SOLE, and that is the 2026-08-17 correction.** With the url set the file is
+**not read at all**: the served map over this process's boot config is the whole snapshot. It was
+layered *above* the file for one release, on the reasoning that a half-migrated platform should keep
+deploying applications whose keys had not moved yet — which read well and deployed badly. A key
+**deleted** from the service came straight back out of a file nobody had emptied (measured: a
+revision serving 2 properties, the file's stale third still winning at ordinal 1000), so the one
+operation the service exists to make possible was the one it could not perform. Two sources cannot
+both be authoritative, and the one left on a volume is the stale one by construction.
+
+**The rollback is the key itself**: empty `extras-url` and the file is the source again — but it may
+be months out of date by then, so re-render or export it before leaning on it.
 
 Five things about it, each easy to undo by accident:
 
@@ -786,6 +795,53 @@ This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RE
 and its `QUARKUS_`-spelled twin) are written **before** the deployment's own, and docker keeps the
 **last** assignment of a repeated key — measured, not assumed. So they are defaults an operator
 overrides, and the ordering is the precedence rule: never reorder them past the extras.
+
+### An update states removals now, and a hand `--env-add` no longer survives one
+
+`buildUpdateArgv` only ever `--env-add`ed, so a variable **removed** from an application's extras
+stayed on the live service until somebody removed the service — measured on 2026-08-17, on the
+deployment that proved the flip: the entry was deleted, the deploy went green, the stale env kept
+serving. So the update reads the live service's own environment
+(`docker service inspect --format {{range .Spec.TaskTemplate.ContainerSpec.Env}}…`, the inspect
+pattern the rest of the driver already uses) and emits `--env-rm` for every key on it that nothing
+in this argv states.
+
+**Read the consequence as the feature, because it is the campaign's whole point:** an operator's
+`docker service update --env-add` on a live service is now REVERTED by the next deployment of that
+application. State moves to qits-configuration; a fix applied to a container is a fix that lives
+until somebody deploys. That is the trade the demotion buys — a config value has one home instead of
+two, and the one that wins is the one that is written down.
+
+**What is never removed is a family, not a list of exceptions**, and it has three members:
+
+- **everything this argv states** — the extras' own `env`, which is the whole of what config says;
+- **`DEPLOYER_OWN_VARIABLES`** — `QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RESOURCE_ATTRIBUTES`
+  and its `QUARKUS_` twin, this component's identity set. It writes them on every argv and config
+  states none of them, so a diff against config alone would remove and re-add all four every time;
+- **anything under `QITS_RESOURCE_`** — `ResourceProvisioning` injects those from the registry row,
+  which is the single authority for the credential. Config cannot state a provisioned password and
+  must not be able to delete one.
+
+Four more things, each easy to undo by accident:
+
+- **Only an UPDATE diffs.** A create has no predecessor and `service create` has no such flag.
+- **An inspect that cannot answer removes NOTHING**, with a WARN. Losing an application's whole
+  environment because one CLI call failed is a worse failure than carrying a stale key one more
+  deployment, and the next deployment asks again.
+- **A line with no `=` is skipped**: an env VALUE may contain a newline, so a wrapped line is a
+  continuation rather than a key — and `--env-rm` of a name that is not there is a refused
+  deployment, not a no-op.
+- **The removals are sorted**, so one deployment's argv is the same argv twice and two run logs
+  diff cleanly.
+
+**The deployer's own self-update is the regression to watch, and it is pinned by a test.** Its
+extras carry the flip — `QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL` and the
+`QUARKUS_OIDC_CLIENT_CONFIGURATION_*` credential the read presents — so they survive because they
+ARE extras. A deployer that env-rm'd its own extras-url mid-self-deploy would come back reading the
+file it was demoted from, silently, on a green deployment.
+`theDeployersOwnSelfUpdateKeepsTheKeysThatPointItAtQitsConfiguration` holds it. **Anything the seed
+stack sets on the deployer and the extras do not state is removed on its first self-deploy** — which
+is why cli-bootstrap spells the deployer's `QITS_PLATFORM_DEPLOYMENTS_*` variables in both places.
 
 ## Resources: what the deployer provisions, and where the truth is
 

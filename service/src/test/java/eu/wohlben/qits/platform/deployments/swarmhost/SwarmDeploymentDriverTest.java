@@ -778,6 +778,114 @@ class SwarmDeploymentDriverTest {
   }
 
   @Test
+  void anUpdateRemovesAnEnvKeyTheExtrasNoLongerState() {
+    // The defect the flip's own proof found on 2026-08-17: an update only ever --env-add'ed, so an
+    // entry DELETED from an application's extras stayed on the live service until somebody removed
+    // the service by hand. Deleting an entry is half of what configuration-as-state is for.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL",
+                "http://dev-qits-events:8080"));
+    cli.script(
+        SwarmDeploymentDriver.SPEC_ENV_FORMAT,
+        result(0, "QITS_EVENTS_URL=http://dev-qits-events:8080\nQITS_GONE_FROM_CONFIG=stale\n"));
+
+    List<String> argv = driver.buildUpdateArgv(spec(), "dev-qits-gateway");
+
+    assertTrue(argv.containsAll(List.of("--env-rm", "QITS_GONE_FROM_CONFIG")), argv.toString());
+    assertTrue(
+        argv.containsAll(List.of("--env-add", "QITS_EVENTS_URL=http://dev-qits-events:8080")),
+        argv.toString());
+    assertFalse(
+        argv.contains("QITS_EVENTS_URL"),
+        "a key config still states is re-added, never removed: " + argv);
+  }
+
+  @Test
+  void anUpdateNeverRemovesThisComponentsOwnVariablesOrAProvisionedTriple() {
+    // The protected family, and it is a family rather than a list of exceptions: this component
+    // writes its own four on every argv and config states none of them, so a diff against config
+    // alone would remove and re-add all four on every deployment. QITS_RESOURCE_* is the fifth
+    // member and is a PREFIX — ResourceProvisioning injects it from the registry row, and config
+    // must not be able to delete a credential it cannot state.
+    SwarmDeploymentDriver driver = driver();
+    cli.script(
+        SwarmDeploymentDriver.SPEC_ENV_FORMAT,
+        result(
+            0,
+            "QITS_ENVIRONMENT=dev\n"
+                + "QITS_APPLICATION=qits-gateway\n"
+                + "OTEL_RESOURCE_ATTRIBUTES=service.version=old\n"
+                + "QUARKUS_OTEL_RESOURCE_ATTRIBUTES=service.version=old\n"
+                + "QITS_RESOURCE_DB_URL=jdbc:postgresql://dev-qits-oci-postgresql:5432/qits_gateway\n"
+                + "QITS_RESOURCE_DB_PASSWORD=0123456789abcdef\n"));
+
+    List<String> argv = driver.buildUpdateArgv(spec(), "dev-qits-gateway");
+
+    assertFalse(argv.contains("--env-rm"), "nothing in the protected family is removed: " + argv);
+  }
+
+  @Test
+  void theDeployersOwnSelfUpdateKeepsTheKeysThatPointItAtQitsConfiguration() {
+    // THE SCARIEST REGRESSION THIS DIFF COULD MAKE. The deployer's own extras carry the flip — the
+    // extras url and the named oidc client that reads it — so a self-update that env-rm'd them
+    // would come back reading the file it was demoted from, silently, with a green deployment.
+    // They survive because they ARE extras: the diff removes what config no longer states, and
+    // config states these.
+    SwarmDeploymentDriver driver =
+        driver(
+            Map.of(
+                DeploymentDriver.EXTRAS_PREFIX
+                    + "qits-gateway.env.QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL",
+                "http://dev-qits-configuration:8080",
+                DeploymentDriver.EXTRAS_PREFIX
+                    + "qits-gateway.env.QUARKUS_OIDC_CLIENT_CONFIGURATION_CLIENT_ENABLED",
+                "true"));
+    cli.script(
+        SwarmDeploymentDriver.SPEC_ENV_FORMAT,
+        result(
+            0,
+            "QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL=http://dev-qits-configuration:8080\n"
+                + "QUARKUS_OIDC_CLIENT_CONFIGURATION_CLIENT_ENABLED=true\n"
+                + "QITS_SOMETHING_NOBODY_STATES=stale\n"));
+
+    List<String> argv = driver.buildUpdateArgv(spec(), "dev-qits-gateway");
+
+    assertFalse(
+        argv.contains("QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL"),
+        "the deployer must never env-rm its own extras-url mid-self-deploy: " + argv);
+    assertFalse(
+        argv.contains("QUARKUS_OIDC_CLIENT_CONFIGURATION_CLIENT_ENABLED"),
+        "nor the credential that read presents: " + argv);
+    assertTrue(
+        argv.containsAll(List.of("--env-rm", "QITS_SOMETHING_NOBODY_STATES")),
+        "and the diff still works around them: " + argv);
+  }
+
+  @Test
+  void aCreateRemovesNothingBecauseThereIsNoPredecessorToDiffAgainst() {
+    SwarmDeploymentDriver driver = driver();
+    cli.script(SwarmDeploymentDriver.SPEC_ENV_FORMAT, result(0, "QITS_GONE_FROM_CONFIG=stale\n"));
+
+    List<String> argv = driver.buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"));
+
+    assertFalse(argv.contains("--env-rm"), argv.toString());
+    assertEquals(0, cli.count(SwarmDeploymentDriver.SPEC_ENV_FORMAT), "and nothing was asked");
+  }
+
+  @Test
+  void anEnvironmentThisDeploymentCouldNotReadRemovesNothing() {
+    // A deployment must not lose an application's environment because one inspect failed. The next
+    // deployment asks again; a removal taken on no evidence would be a container that boots, passes
+    // its gate and has lost the address it dials.
+    SwarmDeploymentDriver driver = driver();
+    cli.script(SwarmDeploymentDriver.SPEC_ENV_FORMAT, result(1, "no such service"));
+
+    assertFalse(driver.buildUpdateArgv(spec(), "dev-qits-gateway").contains("--env-rm"));
+  }
+
+  @Test
   void aProvisionedResourceArrivesAsTheGenericTriple() {
     List<String> argv =
         driver()
