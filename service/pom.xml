@@ -124,6 +124,20 @@
             <artifactId>quarkus-oidc</artifactId>
         </dependency>
         <dependency>
+            <!-- The other direction: a bearer this service PRESENTS, to qits-configuration.
+
+                 It was deleted with the qits-serviceregistry merge — "there is no guarded peer to
+                 present a token to, so there is no client extension, no shipped-off switch and no
+                 secret a deployment has to supply. If this service ever calls a guarded peer
+                 again, all three arrive in that commit." qits-configuration is that peer, and this
+                 is that commit; the switch and the secret are in application.properties.
+
+                 It ships DISABLED (quarkus.oidc-client.configuration.client-enabled=false), so a
+                 clone-alone build needs no idp and reaches no network. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-oidc-client</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>

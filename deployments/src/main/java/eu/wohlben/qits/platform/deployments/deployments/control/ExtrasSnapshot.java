@@ -42,11 +42,22 @@ import org.eclipse.microprofile.config.spi.ConfigSource;
  * <p><b>A file that is there and cannot be read REFUSES the deployment</b>, naming the path. Falling
  * back to the boot values would be the stale value this class exists to kill, and it would be
  * invisible: the deployment goes green carrying whatever the process booted with.
+ *
+ * <p><b>There is a third layer where a platform runs qits-configuration</b> — {@link #over(Config,
+ * Map, String)}, the properties that service resolved for this application, above the file. Which
+ * layers exist is {@code DeploymentExtrasSource}'s decision; this class only states the order.
  */
 public final class ExtrasSnapshot {
 
   /** Above every source the boot config carries — system properties are 400, the environment 300. */
   private static final int FILE_ORDINAL = 1000;
+
+  /**
+   * Above the file. qits-configuration is AUTHORITATIVE where it is configured at all, so a
+   * half-migrated platform — the service answering while the old file is still on the volume —
+   * deploys what the service says rather than what somebody forgot to delete.
+   */
+  private static final int SERVED_ORDINAL = 2000;
 
   private static final int BOOT_ORDINAL = 100;
 
@@ -67,6 +78,27 @@ public final class ExtrasSnapshot {
         .withSources(
             new PropertiesConfigSource(read(path), path.toString(), FILE_ORDINAL),
             new BootConfigSource(boot))
+        .build();
+  }
+
+  /**
+   * The config one argv build reads when a service answered for it: {@code served} over {@code
+   * base}, which is whatever {@link #over(Config, String)} already produced.
+   *
+   * <p>The map arrives in the full prefixed spelling — {@code
+   * qits.platform.deployments.extras.<app>.<key>} — so it is layered rather than translated, and
+   * {@link ServiceExtras} stays the single parser of that grammar.
+   *
+   * <p><b>It outranks the file</b>, see {@link #SERVED_ORDINAL}. It does not REPLACE it: what the
+   * service does not state still answers as it did, which is what lets a platform migrate one
+   * application's keys at a time.
+   *
+   * @param source what the snapshot names this layer in a config dump — the url it was read from
+   */
+  public static Config over(Config base, Map<String, String> served, String source) {
+    return new SmallRyeConfigBuilder()
+        .withSources(
+            new PropertiesConfigSource(served, source, SERVED_ORDINAL), new BootConfigSource(base))
         .build();
   }
 

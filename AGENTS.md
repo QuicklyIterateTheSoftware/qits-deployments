@@ -13,6 +13,11 @@ skipped: `FakeDeploymentDriver` behind `DeploymentDriver` (the orchestrator), `F
 platform's postgres). **Three fakes** — the ancestor's fourth, a stub HTTP server for the topology,
 dissolved when the topology became a repository query.
 
+**The fourth seam, `DeploymentExtrasSource`, has no `@Mock` fake and that is deliberate** — it
+returns a `Config` rather than holding a conversation, so a test states one in a lambda. Nothing
+about it reaches the network in the shipped state either: `qits.platform.deployments.extras-url` is
+unset, so the suite reads the same config it always read. See the extras section below.
+
 The one thing the suite does start is a **postgres of its own**: the component's store is one now,
 and `testdb/EmbeddedPg` spawns zonky's real binaries as a child process. A maven dependency, not a
 container — the rule is no docker, and it still holds.
@@ -68,16 +73,18 @@ Four maven modules, package root `eu.wohlben.qits.platform.deployments`:
 - **`deployments/`** (`…deployments.*`) — the execution: `DeployService`, `EnvironmentOperations`,
   `RollbackPins`, `DeploymentSpecParser`, `DeploymentIdentifiers` (what only reaches an argv),
   `ImageRefs`, `ContainerNames`, `PdProcess`, `ResourceProvisioning` and `BootResourceRegistration`,
-  and the three seams `DeploymentDriver` / `SpecSource` / `ResourceProvisioner` plus the
-  announcement port `BuildAnnouncements` and the ordering collapse `BuildTips` behind it, and the
-  outgoing port `DeployAnnouncer`.
+  and the four seams `DeploymentDriver` / `SpecSource` / `ResourceProvisioner` /
+  `DeploymentExtrasSource` plus the announcement port `BuildAnnouncements` and the ordering collapse
+  `BuildTips` behind it, and the outgoing port `DeployAnnouncer`.
 - **`deployments-events/`** (`…deployments.events.*`) — the event VOCABULARY: four plain records
   over `qits-eventstream` and nothing else, not even quarkus-arc. It is a module rather than a
   package because a vocabulary is what a *consumer* needs: the day another service listens for
   `DeploymentActive` it takes this jar and gets the record plus the bus and no part of the deployer.
   The ci-events and githost-events shape, which is also why the directory carries the repo's name
   rather than a bare role word.
-- **`service/`** (`…api`, `…bus`, `…swarmhost`, `…githost`, `…pghost`) — the adapters. `bus` is the
+- **`service/`** (`…api`, `…bus`, `…swarmhost`, `…githost`, `…pghost`, `…confighost`) — the
+  adapters. `confighost` is the youngest and is the one that presents a credential: it reads
+  qits-configuration's resolved extras and holds the named oidc client that does it. `bus` is the
   event-bus half: the durable `BuildSuccessful` subscriber, the `DeployEventAnnouncer` that
   publishes this component's own four events, and the native-image registration for what the
   library's own `ObjectMapper` binds. Identity is not a package here: the forward-auth pair
@@ -100,11 +107,20 @@ containers. The concrete consequence is `EnvironmentOperations`: creating a tier
 (`environments`) *and* a network (`deployments`), so the composition lives on the execution side and
 `EnvironmentService` stays socketless. Do not put a driver call in `environments/`.
 
-**The seam rule is one rule, applied three times.** Everything the domain modules cannot do — shell
+**The seam rule is one rule, applied four times.** Everything the domain modules cannot do — shell
 out to docker, fetch a file over HTTP, speak DDL to somebody else's server — is an interface there
-and an implementation in `service/`, with a scripted fake in the suite. `ResourceProvisioner` was
-the third and took the shape unchanged; a fourth follows it. Do not put a client in a domain
-module.
+and an implementation in `service/`, with a scripted double in the suite. `ResourceProvisioner` was
+the third; **`DeploymentExtrasSource` is the fourth** and took the shape unchanged. Do not put a
+client in a domain module.
+
+**The fourth one's double is a lambda, not a `@Mock` bean, and that is the seam's own shape.**
+`DeploymentExtrasSource` is a `@FunctionalInterface` returning a `Config`, so a test that wants the
+file behaviour writes `application -> ExtrasSnapshot.over(boot, file)` and a test that wants a
+served one writes the map. There is no `FakeDeploymentExtrasSource` to reset, because nothing here
+is a conversation to script. What IS scripted is the HTTP — `confighost/ExtrasStub`, the JDK's own
+server on a real socket — and only for `ConfigHostExtrasSource`'s own tests, where the request is
+what is under test: the url it is built at, the headers it carries and the patience it spends. A
+fake at the seam there would assert this suite's model of a client.
 
 ## What the merge dissolved (do not bring it back)
 
@@ -113,10 +129,13 @@ The topology was `qits-serviceregistry` for one release, reached over HTTP. All 
 
 - **`RegistryClient` and `HttpRegistryClient`.** Registration writes rows in the same transaction;
   resolution is a repository query. `ServiceCatalog` and `EnvironmentService` are called directly.
-- **`RegistryBearer` and the whole `quarkus-oidc-client` block.** There is no guarded peer to
-  present a token to, so there is no client extension, no shipped-off switch and no secret a
-  deployment has to supply. If this service ever calls a guarded peer again, all three arrive in
-  that commit.
+- **`RegistryBearer`** — the class. **The `quarkus-oidc-client` block came BACK**, and this entry is
+  the promise being kept rather than broken: "if this service ever calls a guarded peer again, all
+  three arrive in that commit". qits-configuration is that peer, and all three arrived —
+  `confighost/IdpExtrasBearer` over a **named** client, the shipped-off switch
+  (`quarkus.oidc-client.configuration.client-enabled=false`) and a secret a deployment supplies.
+  What stays gone is the topology client it used to serve. **The peer count is one**: a second named
+  client is a second peer, and a second peer wants the argument this one made.
 - **`StubRegistry`**, the `@WithTestResource(GLOBAL)` server every `@QuarkusTest` carried.
 - **The registry-outage posture** — `RegistryException` (502), `lastKnownTargets` (the
   deployment-history fallback), `CdRegistryOutageTest`. There is no outage to have a posture about.
@@ -681,12 +700,19 @@ validation stays at the boundary and the belt stays at the argv.
 
 Mounts, published ports, groups, network aliases and extra env in a *started* container's argv come
 from the **deployment's own config and nowhere else** (`qits.platform.deployments.extras.<application>.*`,
-read by `ServiceExtras`). Nothing arriving over HTTP may contribute a token to a `docker run`; the
-API is deliberately open on the platform's networks, and config is the trust domain that already
-holds the socket. `ServiceExtrasTest.anotherApplicationsKeysAreNeverRead`, plus
+read by `ServiceExtras`). **Nothing PUSHED over HTTP may contribute to a `docker run`**; this
+component's own API is deliberately open on the platform's networks, so nothing arriving on it may
+shape an argv. `ServiceExtrasTest.anotherApplicationsKeysAreNeverRead`, plus
 `extrasOfAnotherApplicationDoNotLeakIn` on **both** driver tests, asserts the absence as the
-security property. A `docker exec`, or the family growing an HTTP-writable source, is the
-regression.
+security property. A `docker exec` is the regression, and so is anything the intake can reach.
+
+**The word is PUSHED, and it narrowed on purpose when qits-configuration landed.** The extras may
+now be PULLED — this process, with its own machine identity, reading a named service it was
+configured to trust (see the extras-url section below). That changes the source and not the guard:
+nothing pushes config into a deployment, no caller of this component's API can name a key, and the
+url is deployment config like everything else. The consequence to carry is that
+**qits-configuration is credential-bearing infrastructure** — treat its database and its write
+surface with the sensitivity of the `qits-deployments-config` volume.
 
 **The family is typed, and an unknown or malformed key is a refused deployment** — never a warning
 and a dropped flag, which is a container that boots, passes its gate and has lost its volume.
@@ -702,6 +728,59 @@ reading, because `ServiceExtras` rests on "every reading agrees" and that is onl
 itself**, byte for byte what a dev run and the clone-alone suite always had; **present and
 unreadable is a REFUSED deployment naming the path**, because a fall-back to boot values is the
 stale value the whole thing exists to kill and would ship a green deployment carrying it.
+
+### The file is one source now, and qits-configuration is the other
+
+**`qits.platform.deployments.extras-url` is optional and UNSET SHIPPED**, and unset is the file
+behaviour above byte for byte: no request, no parse, nothing to configure. Set — a deployment sends
+`QITS_PLATFORM_DEPLOYMENTS_EXTRAS_URL=http://dev-qits-configuration:8080` — **that service is
+AUTHORITATIVE**, read once per argv build at
+`GET <url>/configuration/api/applications/<application>/resolved`, whose `properties` map arrives in
+the full `qits.platform.deployments.extras.<app>.*` spelling and is layered **above the file's**
+ordinal. Above, not instead of: a half-migrated platform still carrying the old file on its volume
+must not have that file shadow platform state, while an application whose keys have not moved yet
+still deploys off the file. `ServiceExtras` stays the single parser of the grammar — nothing in
+`confighost` translates a key.
+
+Five things about it, each easy to undo by accident:
+
+- **The seam is `DeploymentExtrasSource`, in `deployments/`, and the HTTP is
+  `confighost/ConfigHostExtrasSource`, in `service/`.** The driver injects the seam and no longer
+  knows what a config file is. **One call is one snapshot**, which is the invariant `ServiceExtras`
+  rests on; calling it twice for one argv is the bug the shape exists to prevent, and both argv
+  builders call it exactly once.
+- **An unreachable or non-200 service REFUSES the deployment**, naming the url, and there is
+  **deliberately no fall-back** — not to the file, not to the boot config, not to anything read
+  earlier. A stale extras value is the failure that cost 2026-08-16 and it ships invisibly, as a
+  green deployment. The refusal is a `ServiceExtras.Refused`, so it reaches the row through the
+  driver's existing refusal arm with nothing created.
+- **A 404 is NOT an answer here**, and that is the one place this differs from the spec read. A
+  repository with no `deployments.yml` really does deploy with the defaults; an application
+  qits-configuration has never heard of is an application whose extras this deployment cannot know
+  it is missing.
+- **The patience is two keys and a bounded budget** — `extras-timeout-seconds` (5) and
+  `extras-attempts` (2, spent a second apart). A service being redeployed is a few seconds of
+  refusals and no deployment should die of one; an outage that outlasts the budget must be a loud
+  refusal rather than an unbounded wait on `pd-deploy-worker`, which is single-threaded with every
+  other event queued behind it. **A body that will not parse is never retried** — it will not parse
+  a second time either.
+- **The credential is the named oidc client and its switch is the extension's own.**
+  `quarkus.oidc-client.configuration.client-enabled` is false shipped, and off the read carries the
+  `X-Qits-User`/`X-Qits-Roles` pair alone — the posture of a platform running qits-configuration
+  behind forward-auth on qits-net during the migration. There is no key of ours beside it, so two
+  spellings cannot disagree; the deployment-side family is `QUARKUS_OIDC_CLIENT_CONFIGURATION_*`,
+  the sibling shape qits-workspaces uses for its git-host client. **The default (unnamed) client is
+  disabled in `application.properties` and must stay disabled**: the extension creates it whether or
+  not anything injects it, and an enabled one with no `auth-server-url` fails the boot naming a key
+  nobody meant to set.
+
+**What is NOT recorded, and it is an open debt rather than an omission.** The read logs
+`config-revision=<headRevision>` at INFO beside the url, and that is the only place the revision a
+deployment was configured with is written down. It does not reach the deployment row's `detail`:
+that is written by `DeployService` out of the driver's verdict, and the extras are read a layer
+below the driver, so a revision could only ride there by widening `ApplyResult` and the seam's
+return type together. Worth doing the day the row's detail is asked to carry more than the
+orchestrator's own words.
 
 This component's own env flags (`QITS_ENVIRONMENT`, `QITS_APPLICATION`, `OTEL_RESOURCE_ATTRIBUTES`
 and its `QUARKUS_`-spelled twin) are written **before** the deployment's own, and docker keeps the
@@ -1042,6 +1121,12 @@ train step rewrites it.
 outbox and catch-up sweeps) and `quarkus-websockets-next` (the stream client, which registers no
 route, so `quarkus.quinoa.ignored-path-prefixes` is unchanged) — and one **mandatory deployment
 resource**, below.
+
+**`quarkus-oidc-client` is back and it is one peer's**, `service/` only: the bearer
+`confighost/IdpExtrasBearer` presents to qits-configuration. It is the other direction from
+`quarkus-oidc`, which validates what arrives. It ships disabled in both spellings — the named client
+and the default one — so a clone-alone build needs no idp, reaches no network and holds no secret;
+see the extras section above for the switch and the deployment-side family.
 
 **`quarkus-undertow` must never be on the classpath.** Its presence breaks Quinoa's production static
 serving — the client 404s from a build that was green — and it arrives *transitively* from anything

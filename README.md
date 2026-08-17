@@ -283,10 +283,13 @@ serving, and the sha a rollback would put back.
   published port, its extra env and the extra DNS names it answers to on the shared network — a
   structured family each driver renders in its own
   orchestrator's words (`ServiceExtras`); the `QITS_RESOURCE_<NAME>_*` triple is generated here and
-  injected here. **Nothing
-  arriving over HTTP contributes a credential to a `docker run`** — which is the same sentence as
-  before, now that a credential is a thing this component holds: what a repository can NAME is a
-  database of its own, and the VALUES injected for it are ones this component generated.
+  injected here. **Nothing PUSHED over HTTP contributes a credential to a `docker run`** — which is
+  the same sentence as before, now that a credential is a thing this component holds: what a
+  repository can NAME is a database of its own, and the VALUES injected for it are ones this
+  component generated. The family may be **pulled** from qits-configuration where a deployment sets
+  `qits.platform.deployments.extras-url` — this process reading a named service with its own machine
+  identity, which changes the source and not the guard; unset (the shipped state) the config volume's
+  file is the whole of it.
 - **Untrusted strings are validated at the boundary.** Names become network names, aliases and image
   path segments (dns-label charset); shas become image tags (hex only); the health path is
   interpolated into a string the *container's* shell runs, so it gets the strictest allowlist and is

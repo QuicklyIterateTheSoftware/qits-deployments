@@ -6,7 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.platform.deployments.confighost.ConfigHostExtrasSource;
+import eu.wohlben.qits.platform.deployments.confighost.ExtrasStub;
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
+import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentExtrasSource;
+import eu.wohlben.qits.platform.deployments.deployments.control.ExtrasSnapshot;
 import eu.wohlben.qits.platform.deployments.deployments.control.HealthGate;
 import eu.wohlben.qits.platform.deployments.deployments.control.PdProcess;
 import eu.wohlben.qits.platform.deployments.deployments.control.ServiceExtras;
@@ -29,6 +33,8 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import org.eclipse.microprofile.config.Config;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -83,8 +89,19 @@ class SwarmDeploymentDriverTest {
   }
 
   private SwarmDeploymentDriver driver(Map<String, String> properties, String extrasFile) {
+    Config boot =
+        new SmallRyeConfigBuilder()
+            .withSources(new PropertiesConfigSource(properties, "test", 100))
+            .build();
+    // The file half of the seam, which is what every argv assertion below is about: the boot config
+    // plus the config volume's file, one snapshot per call. The service half is
+    // ConfigHostExtrasSourceTest's, and the two argvs it reaches are two tests of their own.
+    return driver(application -> ExtrasSnapshot.over(boot, extrasFile));
+  }
+
+  private SwarmDeploymentDriver driver(DeploymentExtrasSource extras) {
     SwarmDeploymentDriver driver = new SwarmDeploymentDriver();
-    driver.extrasFile = extrasFile;
+    driver.extrasSource = extras;
     driver.runtime = "docker";
     driver.healthIntervalSeconds = 3;
     driver.healthRetries = 3;
@@ -92,10 +109,6 @@ class SwarmDeploymentDriverTest {
     driver.updateMonitorSeconds = 30;
     driver.flatNetwork = "qits-net";
     driver.outputMaxChars = 65536;
-    driver.config =
-        new SmallRyeConfigBuilder()
-            .withSources(new PropertiesConfigSource(properties, "test", 100))
-            .build();
     cli = new ScriptedCli();
     driver.scriptCli(cli);
     return driver;
@@ -672,6 +685,75 @@ class SwarmDeploymentDriverTest {
 
     assertEquals(DeploymentDriver.ApplyOutcome.REFUSED, applied.outcome());
     assertTrue(applied.detail().contains(directory.toString()), applied.detail());
+    assertTrue(cli.matching("service create").isEmpty(), "nothing was created");
+  }
+
+  @Test
+  void whatQitsConfigurationServesReachesBothArgvs() {
+    // The whole of WP2 from the argv's side: with an extras-url set, the service is where a
+    // deployment's mounts, ports and environment come from — on the create AND on the update, since
+    // an update states the environment in full and a live service is what an operator is fixing.
+    try (ExtrasStub configuration = new ExtrasStub()) {
+      configuration.resolves(
+          11,
+          DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL",
+          "http://dev-qits-events:8080",
+          DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.mounts[0]",
+          "volume:qits-gateway-data:/data");
+      ConfigHostExtrasSource extras =
+          configuration.source(
+              new SmallRyeConfigBuilder()
+                  .withSources(new PropertiesConfigSource(Map.of(), "test", 100))
+                  .build(),
+              "config/application.properties",
+              Optional::empty);
+      SwarmDeploymentDriver driver = driver(extras);
+
+      assertTrue(
+          driver
+              .buildCreateArgv(spec(), "dev-qits-gateway", List.of("qits-net"))
+              .containsAll(
+                  List.of(
+                      "--env",
+                      "QITS_EVENTS_URL=http://dev-qits-events:8080",
+                      "--mount",
+                      "type=volume,source=qits-gateway-data,target=/data")),
+          "a create carries the whole of what the service states");
+      assertTrue(
+          driver
+              .buildUpdateArgv(spec(), "dev-qits-gateway")
+              .containsAll(List.of("--env-add", "QITS_EVENTS_URL=http://dev-qits-events:8080")),
+          "and an update carries the environment half of it");
+    }
+  }
+
+  @Test
+  void anUnreachableConfigurationServiceRefusesRatherThanDeployingTheFileValues() {
+    // The refusal has to arrive as a REFUSED deployment naming the url, and it has to arrive with
+    // nothing created: a fall-back to the config volume's file would ship the stale value this
+    // service exists to replace, invisibly, as a green deployment.
+    String unreachable = "http://127.0.0.1:1";
+    ConfigHostExtrasSource extras =
+        ExtrasStub.source(
+            new SmallRyeConfigBuilder()
+                .withSources(
+                    new PropertiesConfigSource(
+                        Map.of(
+                            DeploymentDriver.EXTRAS_PREFIX + "qits-gateway.env.QITS_EVENTS_URL",
+                            "http://stale:8080"),
+                        "test",
+                        100))
+                .build(),
+            "config/application.properties",
+            Optional::empty,
+            unreachable);
+    SwarmDeploymentDriver driver = driver(extras);
+
+    cli.script("--format {{.ID}}", result(1, "no such service"));
+    DeploymentDriver.ApplyResult applied = driver.apply(spec());
+
+    assertEquals(DeploymentDriver.ApplyOutcome.REFUSED, applied.outcome());
+    assertTrue(applied.detail().contains(unreachable), applied.detail());
     assertTrue(cli.matching("service create").isEmpty(), "nothing was created");
   }
 
