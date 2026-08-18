@@ -29,6 +29,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
@@ -128,6 +129,15 @@ public class DeployService implements BuildAnnouncements {
    * brackets for the same reason, and one budget spelled twice would drift.
    */
   static final Duration CUTOVER_BUDGET = Duration.ofSeconds(30);
+
+  /**
+   * How hard the startup sweep tries to read a spec it should not have needed — see {@link
+   * #legacyEndpoints}. Deliberately a constant and not a config key: it applies to rows queued
+   * before V3 and there will never be another one, so a knob would outlive everything it tunes.
+   */
+  private static final int ADOPTION_SPEC_ATTEMPTS = 3;
+
+  private static final Duration ADOPTION_SPEC_RETRY = Duration.ofSeconds(2);
 
   @Inject PdDeploymentRepository deployments;
   @Inject DeploymentDriver driver;
@@ -330,9 +340,29 @@ public class DeployService implements BuildAnnouncements {
    * ({@code environment_id = ?} would silently match nothing, and a self-updated instance would
    * come back having failed its own deployment).
    *
+   * <p><b>An adoption ANNOUNCES, and it is the only correction here that does.</b> {@code
+   * DeploymentActive} carries the routing snapshot the platform edge projects its route table from,
+   * so an adopted deployment that said nothing is an application the edge never learns a route for —
+   * and the one application that reaches {@code ACTIVE} through this sweep every single time is
+   * <b>this one</b>, whose self-update is handed to the orchestrator and never announces from {@link
+   * #execute}. That cost it its own route and its own navigation entry: the deployer's UI was
+   * unreachable and absent from the menu on every platform, while every other application announced
+   * normally. {@link DeploymentObserver}'s later corrections still announce nothing — a demotion and
+   * a recovery restate an outcome hours later and a consumer would have to know the second statement
+   * supersedes the first — but an adoption is not a correction: it is the FIRST statement anybody
+   * makes about a deployment that went live, made by the instance that lived to make it.
+   *
+   * <p><b>It announces from the ROW and reaches no peer</b> — V3's routing columns, written at queue
+   * time — because this runs at boot and the boot in question is the one right after a cutover. See
+   * {@link #announceAdopted}; and a snapshot that cannot be established announces <b>nothing</b>
+   * rather than an empty one, because consumers replace rather than merge and an empty snapshot
+   * deletes the routes it could not describe.
+   *
    * <p>The shape is the observation pass's: read the rows in one transaction, ask the runtime
    * outside every one of them — a driver call is a child process, and no bracket of this
-   * component's own may span one — then write each row in a bracket of its own.
+   * component's own may span one — then write each row in a bracket of its own. The announcement
+   * follows that write, the way every other announcement here follows the transaction that made it
+   * true.
    */
   void sweepInFlight() {
     List<InFlight> rows = QuarkusTransaction.requiringNew().call(this::inFlight);
@@ -340,12 +370,15 @@ public class DeployService implements BuildAnnouncements {
     int settled = 0;
     for (InFlight row : rows) {
       Verdict verdict = verdictOn(row);
-      QuarkusTransaction.requiringNew().run(() -> record(row, verdict));
+      Instant recordedAt = QuarkusTransaction.requiringNew().call(() -> record(row, verdict));
       if (verdict.adopt()) {
         adopted++;
         LOG.infof(
             "Adopted deployment %s at startup: %s is running its image",
             row.deploymentId(), row.containerName());
+        if (recordedAt != null) {
+          announceAdopted(row, recordedAt);
+        }
       } else {
         settled++;
       }
@@ -361,14 +394,31 @@ public class DeployService implements BuildAnnouncements {
     }
   }
 
-  /** One in-flight row as plain values — nothing carries an entity across a driver call. */
+  /**
+   * One in-flight row as plain values — nothing carries an entity across a driver call.
+   *
+   * <p>Everything from {@code runId} down is carried for the adoption's announcement alone: it is a
+   * {@code DeploymentActive} like any other and owes the same pointer back to the build, the same
+   * trace edge and the same routing snapshot. They are read here rather than re-read later for the
+   * reason everything else here is — the announcement happens outside every transaction this sweep
+   * opens, and {@link #announceAdopted} must not need one.
+   *
+   * <p>{@code upstreamPort} is the snapshot's sentinel: null is a row queued before V3 added the
+   * columns, not a row without a port. See {@link #adoptedEndpoints}.
+   */
   private record InFlight(
       String deploymentId,
       String applicationName,
       String environmentId,
       PdDeploymentStatus status,
       String containerName,
-      String commitSha) {}
+      String commitSha,
+      String runId,
+      UUID causationId,
+      String routes,
+      Integer upstreamPort,
+      String navigationLabel,
+      Integer navigationPosition) {}
 
   /**
    * What settles this row: the status to write, and the detail that argues it. It carries the word
@@ -395,7 +445,13 @@ public class DeployService implements BuildAnnouncements {
                     row.environmentId,
                     row.status,
                     row.containerName,
-                    row.commitSha))
+                    row.commitSha,
+                    row.runId,
+                    row.causationId,
+                    row.routes,
+                    row.upstreamPort,
+                    row.navigationLabel,
+                    row.navigationPosition))
         .toList();
   }
 
@@ -426,10 +482,15 @@ public class DeployService implements BuildAnnouncements {
             + "]");
   }
 
-  private void record(InFlight row, Verdict verdict) {
+  /**
+   * @return the {@code finished_at} this wrote, which an adoption announces as its {@code
+   *     occurredAt}, or null when there was no row left to write — the same "no row, no event" rule
+   *     {@link #finish} states.
+   */
+  private Instant record(InFlight row, Verdict verdict) {
     PdDeployment deployment = deployments.findById(row.deploymentId());
     if (deployment == null) {
-      return; // the environment was torn down between the read and this write
+      return null; // the environment was torn down between the read and this write
     }
     if (verdict.adopt()) {
       for (PdDeployment previous :
@@ -441,6 +502,185 @@ public class DeployService implements BuildAnnouncements {
     deployment.status = verdict.status();
     deployment.detail = verdict.detail();
     deployment.finishedAt = Instant.now();
+    return deployment.finishedAt;
+  }
+
+  /**
+   * The adopted deployment's {@code DeploymentActive}, made by the instance that survived the
+   * succession — see {@link #sweepInFlight()} for why this one correction speaks.
+   *
+   * <p><b>The routing snapshot comes off the ROW</b> (V3's columns, written at queue time from the
+   * same {@code Target} the deployment was performed with), so this reaches no peer at all. That is
+   * the whole point of storing it: this runs at BOOT, and the boot in question is the one right
+   * after a cutover — asking the git host to re-read a file here would make the deployer's own route
+   * depend on another service answering during the seconds it is coming up, with nothing to retry,
+   * because the row settles {@code ACTIVE} and no later sweep asks again. The only local read left
+   * is the tier's name, which is this component's own database.
+   *
+   * <p><b>What cannot be rebuilt announces NOTHING</b>, and that asymmetry is the whole care in this
+   * method. A consumer replaces its snapshot rather than merging, so an event carrying an empty
+   * endpoint list DELETES an application's routes — which is a strictly worse answer than silence
+   * when the truth is "the tier is gone" or "this row never recorded its routing". A repository that
+   * genuinely declares no routes is a different thing and does announce its empty snapshot.
+   *
+   * <p><b>An adoption is not a claim that the health gate passed</b> — {@link #sweepInFlight()} says
+   * so about the row, and the event inherits it. It costs nothing here: an endpoint's host is the
+   * wire ALIAS, which is the service's own address and is the same whichever task is answering it,
+   * so a route announced for a deployment that turns out to be sick points where a route for it
+   * would have pointed anyway. {@link DeploymentObserver} demotes the row two passes later, and the
+   * routes are the next deployment's to replace.
+   */
+  private void announceAdopted(InFlight row, Instant finishedAt) {
+    String environmentName;
+    try {
+      environmentName =
+          row.environmentId() == null ? null : environments.require(row.environmentId()).name;
+    } catch (RuntimeException gone) {
+      LOG.warnf(
+          "Adopted deployment %s names environment %s, which is no longer there; its routes are"
+              + " announced by nobody",
+          row.deploymentId(), row.environmentId());
+      return;
+    }
+    List<DeploymentEndpoint> endpoints = adoptedEndpoints(row, environmentName);
+    if (endpoints == null) {
+      return; // said why at the point it decided
+    }
+    announce(
+        row.deploymentId(),
+        announcer ->
+            announcer.onActive(
+                new DeploymentActive(
+                    row.deploymentId(),
+                    row.applicationName(),
+                    row.environmentId(),
+                    environmentName,
+                    row.commitSha(),
+                    row.runId(),
+                    row.containerName(),
+                    finishedAt,
+                    endpoints),
+                row.causationId()));
+  }
+
+  /**
+   * {@link Plan#endpoints()} for a row this process did not deploy: the same three rules — the host
+   * is the wire alias, one endpoint per declared route, navigation on the primary one — over the
+   * snapshot the row carries instead of over a live {@code Target}.
+   *
+   * <p><b>A null return is "announce nothing"</b>, and it has exactly one cause: a row queued before
+   * V3 added the columns, which cannot say what it routed. See {@link #legacyEndpoints} for what is
+   * done about those and why it is bounded. An empty LIST is the other answer entirely — an
+   * application that declares no public routes — and it is announced.
+   */
+  private List<DeploymentEndpoint> adoptedEndpoints(InFlight row, String environmentName) {
+    if (row.upstreamPort() == null) {
+      return legacyEndpoints(row, environmentName);
+    }
+    return resolveEndpoints(
+        splitRoutes(row.routes()),
+        PdNetworks.alias(environmentName, row.applicationName()),
+        row.upstreamPort(),
+        row.navigationLabel(),
+        row.navigationPosition());
+  }
+
+  /**
+   * The one deployment that has no snapshot to read is the one that SHIPS the snapshot: the old
+   * build queued its row, this build's successor swept it, and V3's columns were null the whole
+   * time. So this reads the spec at the row's sha after all — the transitional path, and it exists
+   * for exactly one deployment per platform, ever.
+   *
+   * <p><b>It is patient, because it is the one moment the network can cost the deployer its own
+   * route.</b> The read is this component's single outbound call and it runs at boot, seconds after
+   * a cutover; the git host is up on any ordinary platform and briefly unreachable is exactly the
+   * case worth surviving, so it is attempted {@link #ADOPTION_SPEC_ATTEMPTS} times a couple of
+   * seconds apart. The sleeps are safe here and nowhere else in this class: the sweep runs before
+   * the worker is doing anything and nothing is queued behind it.
+   *
+   * <p>Exhausted, it announces nothing rather than an empty snapshot — deleting routes it could not
+   * describe would be worse than leaving them — and the recovery is the application's next
+   * deployment, which will carry the columns and never come back here.
+   */
+  private List<DeploymentEndpoint> legacyEndpoints(InFlight row, String environmentName) {
+    for (int attempt = 1; attempt <= ADOPTION_SPEC_ATTEMPTS; attempt++) {
+      try {
+        DeploymentSpec spec = specs.read(row.applicationName(), row.commitSha());
+        LOG.infof(
+            "Adopted deployment %s predates the routing columns; its snapshot was read from the"
+                + " spec of %s@%s",
+            row.deploymentId(), row.applicationName(), row.commitSha());
+        return resolveEndpoints(
+            spec.routes(),
+            PdNetworks.alias(environmentName, row.applicationName()),
+            spec.upstreamPort(),
+            spec.navigationLabel(),
+            spec.navigationPosition());
+      } catch (RuntimeException unreadable) {
+        LOG.warnf(
+            "Could not read the deployment spec of %s@%s while adopting %s (attempt %d of %d): %s",
+            row.applicationName(),
+            row.commitSha(),
+            row.deploymentId(),
+            attempt,
+            ADOPTION_SPEC_ATTEMPTS,
+            unreadable.getMessage());
+        if (attempt < ADOPTION_SPEC_ATTEMPTS && !pause(ADOPTION_SPEC_RETRY)) {
+          break;
+        }
+      }
+    }
+    LOG.warnf(
+        "The routing of adopted deployment %s could not be established, so it is announced by"
+            + " nobody rather than as an empty snapshot; %s keeps whatever routes it has until its"
+            + " next deployment",
+        row.deploymentId(), row.applicationName());
+    return null;
+  }
+
+  /** One endpoint per route, the host resolved once, navigation on the primary route alone. */
+  private static List<DeploymentEndpoint> resolveEndpoints(
+      List<String> routes,
+      String upstreamHost,
+      int upstreamPort,
+      String navigationLabel,
+      Integer navigationPosition) {
+    List<DeploymentEndpoint> endpoints = new ArrayList<>();
+    for (int i = 0; i < routes.size(); i++) {
+      endpoints.add(
+          new DeploymentEndpoint(
+              routes.get(i),
+              upstreamHost,
+              upstreamPort,
+              i == 0 ? navigationLabel : null,
+              i == 0 ? navigationPosition : null));
+    }
+    return List.copyOf(endpoints);
+  }
+
+  /**
+   * The stored spelling back into the list it was joined from. Blank is no routes — the answer most
+   * applications give — and never a one-element list containing nothing, which would be a route.
+   */
+  private static List<String> splitRoutes(String stored) {
+    if (stored == null || stored.isBlank()) {
+      return List.of();
+    }
+    return Arrays.stream(stored.split(","))
+        .map(String::strip)
+        .filter(route -> !route.isEmpty())
+        .toList();
+  }
+
+  /** @return false when the wait was interrupted, which ends the retry rather than ignoring it. */
+  private static boolean pause(Duration duration) {
+    try {
+      Thread.sleep(duration);
+      return true;
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
   }
 
   /**
@@ -992,6 +1232,14 @@ public class DeployService implements BuildAnnouncements {
     deployment.runId = runId;
     deployment.status = PdDeploymentStatus.QUEUED;
     deployment.createdAt = Instant.now();
+    // The routing snapshot, written where the deployment is written. It is the spec's, and V3's
+    // header argues why a row holds a spec value: a SELF-UPDATE announces from the successor's
+    // startup sweep, which has this row and no live process that read the file. Storing it is what
+    // keeps that announcement off the network — see announceAdopted.
+    deployment.routes = String.join(",", target.routes());
+    deployment.upstreamPort = target.upstreamPort();
+    deployment.navigationLabel = target.navigationLabel();
+    deployment.navigationPosition = target.navigationPosition();
     deployments.persist(deployment);
     return new Queued(deployment.id, target, deployment.createdAt);
   }
@@ -1076,17 +1324,14 @@ public class DeployService implements BuildAnnouncements {
      * convention. Navigation is application-level configuration carried by the primary route.
      */
     List<DeploymentEndpoint> endpoints() {
-      List<DeploymentEndpoint> resolved = new ArrayList<>();
-      for (int i = 0; i < target.routes().size(); i++) {
-        resolved.add(
-            new DeploymentEndpoint(
-                target.routes().get(i),
-                wireAlias(),
-                target.upstreamPort(),
-                i == 0 ? target.navigationLabel() : null,
-                i == 0 ? target.navigationPosition() : null));
-      }
-      return List.copyOf(resolved);
+      // The same builder the startup sweep's adoption uses over the row's stored snapshot, so the
+      // two ways this component can announce a deployment cannot describe one differently.
+      return resolveEndpoints(
+          target.routes(),
+          wireAlias(),
+          target.upstreamPort(),
+          target.navigationLabel(),
+          target.navigationPosition());
     }
   }
 

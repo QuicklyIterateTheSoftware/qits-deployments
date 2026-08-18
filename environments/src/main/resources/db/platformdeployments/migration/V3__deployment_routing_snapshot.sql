@@ -1,0 +1,42 @@
+-- The routing a deployment was performed with, written down where the deployment is written down.
+--
+-- WHY A ROW HOLDS THIS AT ALL, when V1's header says the spec's fields deliberately do not. That
+-- rule was written for a value only the deployment itself needs: the spec is read fresh from the git
+-- host before every deployment, so healthCmd, resources and the orchestrator options have no reader
+-- that outlives the `execute` call which fetched them. Routing grew one. `DeploymentActive` carries
+-- the endpoint snapshot the platform edge projects its whole route table from, and the one
+-- deployment that cannot announce from `execute` is a SELF-UPDATE: it is handed to the orchestrator,
+-- the process dies mid-deployment, and the announcement is made by the successor's startup sweep —
+-- which has the row and nothing else.
+--
+-- Reading the spec back at that point is what these columns replace. It is this component's one
+-- outbound HTTP call, it would run at BOOT, and the boot in question is the one immediately after a
+-- cutover; a git host that is briefly not answering would cost the deployer its own route with
+-- nothing to retry, because the row settles ACTIVE and no later sweep asks again. A snapshot that
+-- travelled with the deployment needs no peer to be up and cannot answer differently later.
+--
+-- Nullable, no backfill, no index — V2's stance, and here the null is load-bearing rather than
+-- merely tolerated:
+--
+--   upstream_port IS THE SENTINEL. The spec's port always has a value (8080 unless a repository says
+--   otherwise), so every row written from this version on carries one, and a null says "this row
+--   predates the snapshot" — not "no port". DeployService reads exactly that and falls back to the
+--   spec for those rows, which are the in-flight rows of the one deployment that ships this file.
+--
+--   routes null or empty is a real answer: an application that declares no public routes. Every
+--   application that stores nothing was that answer before routing existed, and the empty snapshot
+--   it announces is correct rather than a gap.
+--
+-- routes is the spec's own comma-separated spelling (`/artifacts,/v2`), the form a person reads in
+-- .config/qits/deployments.yml and in psql, parsed back by the same rule the spec parser applies.
+-- The upstream HOST is deliberately not here: it is the wire alias, derived from this row's
+-- application and tier the same way every other caller derives it, and a second copy of a derivation
+-- is a second thing to keep in step.
+--
+-- navigation_position is an integer and not a rank: it is the repository's own `Label:2`, and the
+-- consumer sorts on it. navigation_label null means this route creates no navigation option, which
+-- is what qits-stt and qits-platform-idp declare on purpose.
+alter table pd_deployment add column routes text;
+alter table pd_deployment add column upstream_port integer;
+alter table pd_deployment add column navigation_label varchar(64);
+alter table pd_deployment add column navigation_position integer;

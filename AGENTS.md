@@ -1055,10 +1055,10 @@ only by asking this component's API. Four events close it, one per lifecycle poi
 | --- | --- | --- |
 | `DeploymentQueued` | `DeployService.queue`, one per created row | the row's `created_at` |
 | `DeploymentStarted` | after the `QUEUED`→`STARTING` transaction | taken at the transition — there is no `started_at` column |
-| `DeploymentActive` | after the cutover bookkeeping, last thing in `execute` | the row's `finished_at` |
+| `DeploymentActive` | after the cutover bookkeeping, last thing in `execute` — **and from the startup sweep's adoption**, which is the only path a self-update has | the row's `finished_at` |
 | `DeploymentFailed` | the single `finish` funnel, when the status is not `ACTIVE` | the row's `finished_at` |
 
-Five things about it, each easy to undo by accident:
+Six things about it, each easy to undo by accident:
 
 - **Every announcement happens AFTER the transaction that made it true**, so a consumer that reads
   the deployment back finds what the event said. `DeploymentActive` is deliberately the last
@@ -1076,10 +1076,28 @@ Five things about it, each easy to undo by accident:
   carries it: `pd-deploy-worker` is a bare daemon thread with no request context, and the outbox
   needs one to open its transaction in. A `@QuarkusTest` driving the REST door has a context already
   and would not catch its absence — `PdDeployPublishTest` drives the worker.
-- **`DeploymentObserver`'s later corrections announce nothing**, nor does the startup sweep's
-  adoption. They restate an outcome minutes or hours later, and a consumer would first need to know
-  that the second statement supersedes the first. That is a second design and it is not this one.
-  So is `recordRejection`, which writes a `FAILED` row outside the `finish` funnel.
+- **`DeploymentObserver`'s later corrections announce nothing.** They restate an outcome minutes or
+  hours later, and a consumer would first need to know that the second statement supersedes the
+  first. That is a second design and it is not this one. So is `recordRejection`, which writes a
+  `FAILED` row outside the `finish` funnel.
+- **The startup sweep's ADOPTION does announce, and this entry is a reversal.** It used to be in the
+  line above, and that was right while `DeploymentActive` was only a statement for a person to read.
+  It stopped being right when the event grew `endpoints`: the platform edge projects its whole route
+  table from that snapshot, so an adopted deployment that says nothing is an application the edge
+  never learns a route for. **This component is that application, every single time** — its own
+  self-update is `HANDED_OFF` to the orchestrator, `execute` returns before the cutover that
+  announces, and the surviving instance's sweep is where it goes `ACTIVE`. It cost the deployer its
+  own `/platform-deployments` route and its navigation entry on every platform: the old UI was
+  reachable by nobody and missing from the menu, while every other application announced normally.
+  An adoption is not a correction — it is the **first** statement anybody makes about a deployment
+  that went live. `PdSweepAdoptionPublishTest` holds it.
+
+  Two rules inside it. **The snapshot comes off the ROW and this announcement reaches no peer** —
+  V3's routing columns, below — because it runs at BOOT, and the boot in question is the one right
+  after a cutover. And **a snapshot that cannot be established announces NOTHING** — a tier that is
+  gone, a row that recorded no routing — because a consumer replaces rather than merges, so an empty
+  endpoint list would *delete* the routes it could not describe. A repository that genuinely declares
+  none is a different thing and does announce its empty snapshot.
 
 The vocabulary jar is `qits-platform-deployments-events`. It depends on `qits-eventstream` and
 nothing else — see the partition above for why it is a module.
@@ -1123,6 +1141,15 @@ per-entity decisions, each argued in the entity's own javadoc and enforced by `A
 | `PdService` | `CausedRow` | explicit on the derived path, stamped on the operator's `PUT`. Created once and updated in place, which is what insert-only stamping is for |
 | `PdServiceLink` | `@Uncaused` | none. Every upsert deletes and re-inserts the row, so the column would record the last rewrite rather than a cause |
 | `PdResource` | `@Uncaused` | none. A converging registry entry rather than a record of an occurrence, and its other writer is boot self-registration with no event behind it |
+
+**`V3__deployment_routing_snapshot.sql` is the one place a row holds a SPEC value**, and V1's header
+says the spec's fields deliberately do not — so read its own header before adding a second. The rule
+it bends was written for values whose only reader is the `execute` call that fetched them; routing
+grew a reader that outlives the process, because a **self-update** is announced by the successor's
+startup sweep, which has the row and no live process that read the file. Storing it is what keeps
+that announcement off the network at boot. `upstream_port` is the **sentinel**: the spec always
+resolves a port, so null means "queued before these columns" and never "no port", and `routes` being
+null or empty is the ordinary answer of an application with no public routes.
 
 **The store is PostgreSQL, and the lineage restarted at V1 to say so.** The H2 lineage (V1 + V2) was
 deleted rather than continued, and that was a decision with one precondition: the migration onto
