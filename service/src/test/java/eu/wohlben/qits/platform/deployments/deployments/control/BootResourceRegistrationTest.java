@@ -19,7 +19,9 @@ import org.junit.jupiter.api.Test;
  * <p>The startup observer is skipped under TEST (a suite boots dozens of times and has no
  * deployment environment), so this drives the package-private {@code record} directly — the
  * {@code PdSweepAdoptionTest} arrangement. Each test uses its own environment name, because the
- * suite shares one database and the application name is a constant here by design.
+ * suite shares one database and the application name is a constant here by design. The two
+ * platform-plane tests have no environment name to differ in — there is one null key per resource —
+ * so they take one resource each.
  */
 @QuarkusTest
 public class BootResourceRegistrationTest {
@@ -142,6 +144,64 @@ public class BootResourceRegistrationTest {
     assertEquals("an-eventstream-password", eventstream.password);
     // Two rows for one tier, one per resource — neither overwrites the other.
     assertEquals("qits_deployments_d", rowOf("boot-d").databaseName);
+  }
+
+  @Test
+  public void aPlatformBootRecordsOnThePlaneAndLeavesTheOldTierRowAlone() {
+    // The row a platform that still ran this per tier has.
+    registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
+        "jdbc:postgresql://boot-e-qits-oci-postgresql:5432/qits_deployments_e",
+        "qits_deployments_e",
+        "the-tier-password",
+        "boot-e");
+
+    // After the flip the swarm driver injects no QITS_ENVIRONMENT, so the boot records with none:
+    // environment_name null is the key ResourceProvisioning looks a platform service's rows up by,
+    // and a row under any other key would send the next self-deploy down the reconcile arm.
+    registration.record(
+        BootResourceRegistration.RESOURCE_NAME,
+        "jdbc:postgresql://boot-e-qits-oci-postgresql:5432/qits_deployments_plane",
+        "qits_deployments_plane",
+        "the-platform-password",
+        null);
+
+    PdResource plane = rowOf(null);
+    assertNull(plane.environmentName, "a platform service belongs to no tier");
+    assertEquals("qits_deployments_plane", plane.databaseName);
+    assertEquals("the-platform-password", plane.password);
+    // The tier row is a leftover, not a conflict: same application name, so the cross-application
+    // database check still passes, and nothing rewrites it.
+    assertEquals("the-tier-password", rowOf("boot-e").password);
+  }
+
+  @Test
+  public void aSecondPlatformBootRewritesTheOnePlaneRow() {
+    registration.record(
+        BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME,
+        "jdbc:postgresql://boot-f-qits-oci-postgresql:5432/qits_deployments_plane_eventstream",
+        "qits_deployments_plane_eventstream",
+        "first-plane-password",
+        null);
+    String id = rowOf(null, BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME).id;
+
+    registration.record(
+        BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME,
+        "jdbc:postgresql://boot-f-qits-oci-postgresql:5432/qits_deployments_plane_eventstream",
+        "qits_deployments_plane_eventstream",
+        "second-plane-password",
+        null);
+
+    PdResource row = rowOf(null, BootResourceRegistration.EVENTSTREAM_RESOURCE_NAME);
+    assertEquals(id, row.id, "the same row, rewritten — null is a value in the unique key");
+    assertEquals("second-plane-password", row.password);
+    assertEquals(
+        1,
+        QuarkusTransaction.requiringNew()
+            .call(
+                () ->
+                    resources.listByDatabase("qits_deployments_plane_eventstream").size()),
+        "one row for one database, however many times the process boots");
   }
 
   @Test
