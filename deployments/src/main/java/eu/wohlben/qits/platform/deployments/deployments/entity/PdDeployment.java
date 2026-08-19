@@ -106,6 +106,33 @@ public class PdDeployment extends PanacheEntityBase implements CausedRow {
   public Instant finishedAt;
 
   /**
+   * The public path prefixes this deployment was performed with, in the spec's own comma-separated
+   * spelling ({@code /artifacts,/v2}) — see V3's header for why the row holds a spec value at all
+   * when V1's says it does not.
+   *
+   * <p>Null or empty is an application that declares no public routes, which is most of them. The
+   * column that says "this row predates the snapshot" is {@link #upstreamPort}, not this one.
+   */
+  @Column(name = "routes", columnDefinition = "text")
+  public String routes;
+
+  /**
+   * The port the routes reach this deployment on, and <b>the sentinel for the whole snapshot</b>:
+   * the spec always resolves a port, so a null here means the row was queued by a build that had no
+   * routing columns to fill and never means "no port". {@code DeployService} reads exactly that.
+   */
+  @Column(name = "upstream_port")
+  public Integer upstreamPort;
+
+  /** The navigation label the PRIMARY route carries, or null when it creates no menu option. */
+  @Column(name = "navigation_label", length = 64)
+  public String navigationLabel;
+
+  /** Where that label sits in the platform's navigation; null whenever the label is. */
+  @Column(name = "navigation_position")
+  public Integer navigationPosition;
+
+  /**
    * The listing tiebreak, assigned by the database (V1's identity column) and never written here —
    * which is why it reads null on a freshly persisted instance.
    *
