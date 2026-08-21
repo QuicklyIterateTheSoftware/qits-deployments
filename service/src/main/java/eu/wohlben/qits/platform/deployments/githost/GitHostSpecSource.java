@@ -81,32 +81,29 @@ public class GitHostSpecSource implements SpecSource {
 
   @Override
   public DeploymentSpec read(RepositoryRef repository, String sha) {
-    String url =
-        trimTrailingSlash(gitHostUrl)
-            + "/git/"
-            + address(repository)
-            + "/blob/"
-            + sha
-            + "/"
-            + SPEC_PATH;
-    HttpResponse<String> response;
-    try {
-      HttpRequest request =
-          HttpRequest.newBuilder(URI.create(url))
-              .timeout(Duration.ofSeconds(timeoutSeconds))
-              .header("X-Qits-User", "qits-deployments")
-              .header("X-Qits-Roles", "qits:system")
-              .GET()
-              .build();
-      response = client().send(request, HttpResponse.BodyHandlers.ofString());
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new SpecException("interrupted while reading " + url, e);
-    } catch (Exception e) {
-      throw new SpecException("could not read " + url + ": " + e, e);
-    }
+    String url = blobUrl(address(repository), sha);
+    HttpResponse<String> response = get(url);
 
     if (response.statusCode() == 404) {
+      // A NAME-addressed 404 can be a false miss rather than "no spec". The name route resolves
+      // through qits-projects and its database, and the very read that decides how to deploy an
+      // infrastructure service (the database, or qits-projects itself) can land in the window that
+      // service is being cut over — the resolver answers 404 and this deploys the DEFAULTS, whose
+      // HTTP health gate a plain postgres cannot pass, so it crash-loops and never recovers. The
+      // id-addressed route needs no resolver, so a name-addressed miss is retried there before it
+      // is believed. A true no-spec repository 404s on both and still gets the defaults.
+      if (repository.nameAddressed()) {
+        String idUrl = blobUrl(repository.repoId(), sha);
+        HttpResponse<String> byId = get(idUrl);
+        if (byId.statusCode() == 200) {
+          return DeploymentSpecParser.parse(
+              byId.body(), SPEC_PATH + " of " + repository.applicationName() + "@" + sha);
+        }
+        if (byId.statusCode() != 404) {
+          throw new SpecException(
+              "could not read " + idUrl + ": the git host answered " + byId.statusCode());
+        }
+      }
       LOG.debugf(
           "%s carries no %s at %s — deploying with the defaults",
           repository.applicationName(), SPEC_PATH, sha);
@@ -118,6 +115,28 @@ public class GitHostSpecSource implements SpecSource {
     }
     return DeploymentSpecParser.parse(
         response.body(), SPEC_PATH + " of " + repository.applicationName() + "@" + sha);
+  }
+
+  private String blobUrl(String addressSegment, String sha) {
+    return trimTrailingSlash(gitHostUrl) + "/git/" + addressSegment + "/blob/" + sha + "/" + SPEC_PATH;
+  }
+
+  private HttpResponse<String> get(String url) {
+    try {
+      HttpRequest request =
+          HttpRequest.newBuilder(URI.create(url))
+              .timeout(Duration.ofSeconds(timeoutSeconds))
+              .header("X-Qits-User", "qits-deployments")
+              .header("X-Qits-Roles", "qits:system")
+              .GET()
+              .build();
+      return client().send(request, HttpResponse.BodyHandlers.ofString());
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new SpecException("interrupted while reading " + url, e);
+    } catch (Exception e) {
+      throw new SpecException("could not read " + url + ": " + e, e);
+    }
   }
 
   /**
