@@ -3,6 +3,7 @@ package eu.wohlben.qits.platform.deployments.api;
 import eu.wohlben.qits.auth.MachineAuth;
 import eu.wohlben.qits.eventstream.CausationScope;
 import eu.wohlben.qits.platform.deployments.deployments.control.BuildAnnouncements;
+import eu.wohlben.qits.platform.deployments.deployments.control.RepositoryRef;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -48,14 +49,25 @@ public class PdEventController {
   @Inject MachineAuth machineAuth;
 
   /**
-   * One green pipeline for one commit. The triple that matters is (repoId, branch, commitSha) — the
-   * image is resolved from it by convention and everything after that is this component's. {@code
-   * runId} is optional and drives nothing: it is recorded on each deployment this queues so a
-   * reader can walk from a deployment row to {@code /ci/runs/<runId>}, the only edge between the two
-   * services' histories. A sender that omits it still deploys; the row simply names no build.
+   * One green pipeline for one commit. The triple that matters is (repository, branch, commitSha) —
+   * the image is resolved from it by convention and everything after that is this component's.
+   * {@code runId} is optional and drives nothing: it is recorded on each deployment this queues so
+   * a reader can walk from a deployment row to {@code /ci/runs/<runId>}, the only edge between the
+   * two services' histories. A sender that omits it still deploys; the row simply names no build.
+   *
+   * <p><b>{@code projectId} and {@code repoName} are the repository's public address and both are
+   * OPTIONAL</b> — the payload shape stays what it was, so a bootstrap replaying an event by hand
+   * and any sender written before the identity rollback keep working byte for byte. Present, the
+   * name is what this build deploys under and what the spec is read by; absent, the {@code repoId}
+   * is, which is the pre-rollback behaviour and correct there because the id WAS the name.
    */
   public record BuildSucceededEvent(
-      String runId, @NotBlank String repoId, @NotBlank String branch, @NotBlank String commitSha) {}
+      String runId,
+      @NotBlank String repoId,
+      String projectId,
+      String repoName,
+      @NotBlank String branch,
+      @NotBlank String commitSha) {}
 
   /**
    * Accepts the event and returns immediately — deployments execute on the worker. 202 also when no
@@ -82,7 +94,7 @@ public class PdEventController {
     // Null for a hand-made bootstrap POST, which is a rootless deployment and not an error.
     announcements.announce(
         event.runId(),
-        event.repoId(),
+        new RepositoryRef(event.repoId(), event.projectId(), event.repoName()),
         event.branch(),
         event.commitSha(),
         CausationScope.current());

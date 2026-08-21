@@ -38,6 +38,34 @@ public class PdBuildSuccessfulPayloadTest {
   }
 
   @Test
+  public void theNameFieldsBindWhenThePublisherSendsThem() {
+    // Post-rollback qits-ci fills the repository's public address from the push route. repoId is
+    // the opaque storage key, and the NAME is what the deployment is named after.
+    BuildSuccessfulPayload build =
+        CanonicalJson.payloadTo(
+            "{\"branch\":\"environment/dev\",\"commitSha\":\""
+                + SHA
+                + "\",\"projectId\":\"qits\","
+                + "\"repoId\":\"6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88\","
+                + "\"repoName\":\"qits-gateway\"}",
+            BuildSuccessfulPayload.class);
+
+    assertEquals("6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88", build.repoId());
+    assertEquals("qits", build.projectId());
+    assertEquals("qits-gateway", build.repoName());
+  }
+
+  @Test
+  public void anEventPublishedBeforeTheNameFieldsExistedBindsThemNull() {
+    // The compatibility arm: a replayed old event names no project and no repository, and the
+    // announcement falls back to the repoId — which before the rollback WAS the name.
+    BuildSuccessfulPayload build = CanonicalJson.payloadTo(PAYLOAD, BuildSuccessfulPayload.class);
+
+    assertNull(build.projectId());
+    assertNull(build.repoName());
+  }
+
+  @Test
   public void fieldsThisComponentDoesNotBindAreIgnoredRatherThanFatal() {
     // qits-ci's event carries imageDigest and finishedAt as well, and will carry a seventh field
     // one day. An arriving payload with more in it than this record names must not fail: the

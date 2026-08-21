@@ -30,22 +30,31 @@ public class FakeSpecSource implements SpecSource {
     failures.clear();
   }
 
-  /** What {@code repoId} declares, whatever sha is asked for. */
-  public void script(String repoId, DeploymentSpec spec) {
-    specs.put(repoId, spec);
+  /**
+   * What this application declares, whatever sha is asked for.
+   *
+   * <p><b>Keyed by the APPLICATION NAME</b>, which is the repository's name when the announcement
+   * carried one and its storage id when it did not — the same answer {@link
+   * RepositoryRef#applicationName()} gives the deployment. A test that announces an id alone
+   * scripts by that id, exactly as it always did; a test that announces the name pair scripts by
+   * the name. Keying by the raw id instead would make a name-addressed test script a spec no read
+   * could find.
+   */
+  public void script(String applicationName, DeploymentSpec spec) {
+    specs.put(applicationName, spec);
   }
 
-  /** Script the git host being unreachable, or the file being unreadable, for this repository. */
-  public void scriptFailure(String repoId, String message) {
-    failures.put(repoId, message);
+  /** Script the git host being unreachable, or the file being unreadable, for this application. */
+  public void scriptFailure(String applicationName, String message) {
+    failures.put(applicationName, message);
   }
 
   @Override
-  public DeploymentSpec read(String repoId, String sha) {
-    String failure = failures.get(repoId);
+  public DeploymentSpec read(RepositoryRef repository, String sha) {
+    String failure = failures.get(repository.applicationName());
     if (failure != null) {
       throw new SpecException(failure);
     }
-    return specs.getOrDefault(repoId, DeploymentSpec.DEFAULTS);
+    return specs.getOrDefault(repository.applicationName(), DeploymentSpec.DEFAULTS);
   }
 }

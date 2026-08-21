@@ -647,8 +647,9 @@ Two validators, split by the module boundary rather than by taxonomy:
 - **`PdIdentifiers`** (`environments`) — names, branches, health paths, resource names, database
   names: what the topology **stores**, checked where it is stored. Names become docker network
   names, aliases and image path segments, so the charset is the dns-label one.
-- **`DeploymentIdentifiers`** (`deployments`) — shas, repository ids, run ids, resource-attribute
-  values: what only ever reaches an argv, checked beside the argv.
+- **`DeploymentIdentifiers`** (`deployments`) — shas, repository ids, repository names and their
+  project ids, run ids, resource-attribute values: what only ever reaches an argv or the spec
+  read's URL, checked beside it.
 
 **The health path is the strictest and stays that way.** It is the one value interpolated into a
 string a *shell inside the container* runs (`--health-cmd`), so it gets an allowlist, no exceptions,
@@ -1007,6 +1008,49 @@ queued, which it must: the handler is holding that transaction open while it run
 a real platform (the superproject's `event-delivery-guarantees-plan.md`, work package 6). Until then
 both doors deliver every green build, which is two deployments of one commit — the same thing two
 POSTs always were, and the cutover absorbs it.
+
+### The application name is the repository's NAME, never its storage id (2026-08-21)
+
+qits-githost is dumb blob storage now: its repository key is an opaque UUID and `/git/<uuid>` is an
+internal URL only qits-projects speaks. The public identity is `(projectId, repoName)`, and both
+doors carry it — the intake payload and the `BuildSuccessful` payload each gained a **nullable**
+`projectId` and `repoName`.
+
+**`applicationName = repoName != null ? repoName : repoId`, resolved ONCE in `announce` and threaded
+by value from there.** That string is the image tag `qits/<name>:<sha>`, the wire alias, the
+container name, the provisioned database and role, the `ApplicationKeys` key and the GC pin. Every
+pipeline yml pushes its image as a literal `qits/<name>`, so an application named after a storage
+UUID is every deployment ending `IMAGE_MISSING` **and** the orchestrator's collector deleting the
+images that are live. `RepositoryRef` is the pair travelling together; below `announce` nothing takes
+a repository id where a name is meant, and `deploy` is the one method holding both — the reference
+for the spec read, the name for everything else.
+
+**The fallback is compatibility, not a guess.** Before the rollback the storage id WAS the name, so
+an announcement carrying neither field derives every identifier from the id, byte for byte what it
+always did. `PdRegistrationTest` holds both arms.
+
+**Where the id genuinely stays the id**: the spec source's address (below), and `BuildTips`' tip map,
+which is keyed by `repoId` because the storage id is the repository's stable reference. Its
+deployment-row **floor** follows the name — `pd_deployment` records an application name and knows no
+repository id at all, so asking the rows by an id finds none and loses the cross-restart floor.
+
+**No schema change was needed and none should be added.** `pd_deployment` and `pd_resource` have
+always stored the application NAME and never a repository id (the no-FK, no-foreign-identity stance
+in *Adding a dependency on another context*), so `applicationName`-as-name is the columns doing what
+they already said.
+
+**`GitHostSpecSource` reads one blob at two addresses.** With the name pair,
+`GET <git-host-url>/git/<projectId>/<repoName>/blob/<sha>/.config/qits/deployments.yml`; without it,
+the id-addressed URL it always used. Half a pair is no pair and takes the id route.
+`GitHostSpecSourceTest` is plain JUnit over the JDK's own server — the two config values are
+package-private fields, so no `@QuarkusTest` is involved — and it holds both arms, the 404 answer and
+the 5xx refusal.
+
+**`qits.platform.deployments.git-host-url` shipped a WRONG default for several releases**
+(`http://qits-platform-artifacts:8080/artifacts`, the address the byte plane answered on before the
+git host was split out of it). It is `http://qits-githost:8080` now, the sibling qits-ci's spelling.
+Every deployment overrides the key, which is why it cost nothing and hid this long — and it is why
+the shipped value carries no environment prefix: a prefixed hostname is deployment config.
 
 ### The cause rides the seam, because the scope cannot (2026-08-10)
 

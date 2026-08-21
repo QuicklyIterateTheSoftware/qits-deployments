@@ -132,10 +132,16 @@ never a guess, because a guessed topology is a container on the wrong networks u
 
     green build ──┬─▶ BuildSuccessful on qits-events ─▶ the durable subscriber (the ordinary door)
                   └─▶ POST /platform-deployments/api/events/build-succeeded (manual / bootstrap)
-                        (runId, repoId, branch, commitSha)
+                        (runId, repoId, [projectId, repoName], branch, commitSha)
+                          │
+                          ▼   the application name is settled here: repoName, or repoId when the
+                          │   announcement carried none (which is what the id was before the
+                          │   githost's key became an opaque UUID)
                           │
                           ▼   one single-threaded worker; the intake returns 202 immediately
                     read the spec at that sha  ─────────────▶  git host (the ONE outbound call)
+                          │                                    /git/<projectId>/<repoName>/blob/…
+                          │                                    or /git/<repoId>/blob/… with no pair
                           │
                     register: upsert the service row, link it into every tier whose branch matches
                           │
@@ -159,6 +165,12 @@ the POST is the manual one, and the only one that works before qits-events exist
 replayed event can be *older* than one already deployed, the subscriber deploys only if the build is
 still the newest for its `(repoId, branch)` and logs the skip otherwise. The POST is deliberately
 not guarded that way: posting a commit is choosing it.
+
+**The application is named after the repository's NAME.** The git host's repository key is an opaque
+storage UUID; the public identity is `(projectId, repoName)`, and the name is what the image tag
+`qits/<name>:<sha>`, the wire alias, the container name, the provisioned database and the rollback
+pins are all derived from — because every pipeline pushes that literal tag. An announcement with no
+name pair falls back to the repository id, which is exactly what the id was before the split.
 
 **The cutover invariant.** A replace is an update of the service the predecessor already is, so
 there is no second copy to arbitrate between and no predecessor to hunt for: the name IS the

@@ -94,6 +94,37 @@ public class PdPinApiTest {
   }
 
   @Test
+  public void aRepositoryWithAUuidStorageIdIsPinnedByItsNameAndNeverByTheUuid() {
+    // The regression the identity rollback could have caused, and the one it would have caused
+    // silently. The pins ARE the GC keep-set, and qits-artifacts matches them against tags every
+    // pipeline pushed as a literal qits/<name>:<sha>. A pin naming a storage UUID would match no
+    // tag at all, so the collector would delete the image the running container was created from.
+    String environmentId = createEnvironment("pins-uuid");
+    deployNamed(
+        "6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88",
+        "repo-pins-named",
+        "environment/pins-uuid",
+        SHA_A,
+        environmentId,
+        1);
+    deployNamed(
+        "6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88",
+        "repo-pins-named",
+        "environment/pins-uuid",
+        SHA_B,
+        environmentId,
+        2);
+
+    assertEquals(List.of(SHA_B, SHA_A), shasOf("repo-pins-named"));
+    assertEquals(
+        List.of(),
+        pins().stream()
+            .filter(pin -> "6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88".equals(pin.get("applicationName")))
+            .toList(),
+        "no pin is keyed by the storage id");
+  }
+
+  @Test
   public void anApplicationThatNeverDeployedIsAbsentRatherThanEmpty() {
     // An environment created and nothing green yet: there is no serving sha, so there is no entry.
     // An empty one would read as "this name is pinned" to a collector that keeps what it is told.
@@ -140,6 +171,35 @@ public class PdPinApiTest {
         .post("/platform-deployments/api/events/build-succeeded")
         .then()
         .statusCode(202);
+    settle(environmentId, expected);
+  }
+
+  /** The same, with the post-rollback payload: an opaque storage id and the public address. */
+  private void deployNamed(
+      String repoId,
+      String repoName,
+      String branch,
+      String sha,
+      String environmentId,
+      int expected) {
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            Map.of(
+                "runId", "run-pins",
+                "repoId", repoId,
+                "projectId", "qits",
+                "repoName", repoName,
+                "branch", branch,
+                "commitSha", sha))
+        .when()
+        .post("/platform-deployments/api/events/build-succeeded")
+        .then()
+        .statusCode(202);
+    settle(environmentId, expected);
+  }
+
+  private void settle(String environmentId, int expected) {
     long deadline = System.currentTimeMillis() + 15_000;
     while (System.currentTimeMillis() < deadline) {
       List<Map<String, Object>> deployments =

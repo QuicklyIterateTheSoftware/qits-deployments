@@ -1,6 +1,7 @@
 package eu.wohlben.qits.platform.deployments.githost;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentSpecParser;
+import eu.wohlben.qits.platform.deployments.deployments.control.RepositoryRef;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecException;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,13 +19,21 @@ import org.jboss.logging.Logger;
  * qits-ci reads a pipeline definition through.
  *
  * <pre>
+ * GET &lt;git-host-url&gt;/git/&lt;projectId&gt;/&lt;repoName&gt;/blob/&lt;sha&gt;/.config/qits/deployments.yml
  * GET &lt;git-host-url&gt;/git/&lt;repoId&gt;/blob/&lt;sha&gt;/.config/qits/deployments.yml
  * </pre>
  *
+ * <p><b>Two addresses for one blob, and the first is the one to use.</b> The git host's repository
+ * key is an opaque storage UUID now, and {@code /git/<repoId>} is its internal scheme; the public
+ * address is {@code (projectId, repoName)} and it is what a build event carries. So an announcement
+ * with the name pair is read name-addressed, and one without it — an older publisher, or a push
+ * that arrived on the internal route — keeps the id URL, which is exactly the request this made
+ * before the pair existed.
+ *
  * <p>This is the component's <b>only</b> outbound HTTP call, and it is deliberately made with the
  * JDK's own client rather than a generated REST client — one request, one path, no model to share.
- * Both path segments were validated at the intake (a repo-id slug, a hex sha) before anything
- * reached here, so neither can leave the path it is written into.
+ * Every path segment was validated at the intake (the slug discipline for the id, the project and
+ * the name; a hex sha) before anything reached here, so none can leave the path it is written into.
  *
  * <p>It used to be one of two: the topology was another service, and every registration and every
  * resolution was a second client with a second failure mode. The merge left this one.
@@ -71,8 +80,15 @@ public class GitHostSpecSource implements SpecSource {
   }
 
   @Override
-  public DeploymentSpec read(String repoId, String sha) {
-    String url = trimTrailingSlash(gitHostUrl) + "/git/" + repoId + "/blob/" + sha + "/" + SPEC_PATH;
+  public DeploymentSpec read(RepositoryRef repository, String sha) {
+    String url =
+        trimTrailingSlash(gitHostUrl)
+            + "/git/"
+            + address(repository)
+            + "/blob/"
+            + sha
+            + "/"
+            + SPEC_PATH;
     HttpResponse<String> response;
     try {
       HttpRequest request =
@@ -91,14 +107,28 @@ public class GitHostSpecSource implements SpecSource {
     }
 
     if (response.statusCode() == 404) {
-      LOG.debugf("%s carries no %s at %s — deploying with the defaults", repoId, SPEC_PATH, sha);
+      LOG.debugf(
+          "%s carries no %s at %s — deploying with the defaults",
+          repository.applicationName(), SPEC_PATH, sha);
       return DeploymentSpec.DEFAULTS;
     }
     if (response.statusCode() != 200) {
       throw new SpecException(
           "could not read " + url + ": the git host answered " + response.statusCode());
     }
-    return DeploymentSpecParser.parse(response.body(), SPEC_PATH + " of " + repoId + "@" + sha);
+    return DeploymentSpecParser.parse(
+        response.body(), SPEC_PATH + " of " + repository.applicationName() + "@" + sha);
+  }
+
+  /**
+   * The path segments that name the repository: the public pair when the event carried one, the
+   * internal storage id when it did not. Package-private so {@code GitHostSpecSourceTest} can hold
+   * both arms without a socket.
+   */
+  static String address(RepositoryRef repository) {
+    return repository.nameAddressed()
+        ? repository.projectId() + "/" + repository.repoName()
+        : repository.repoId();
   }
 
   private static String trimTrailingSlash(String url) {

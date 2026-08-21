@@ -605,7 +605,11 @@ public class DeployService implements BuildAnnouncements {
   private List<DeploymentEndpoint> legacyEndpoints(InFlight row, String environmentName) {
     for (int attempt = 1; attempt <= ADOPTION_SPEC_ATTEMPTS; attempt++) {
       try {
-        DeploymentSpec spec = specs.read(row.applicationName(), row.commitSha());
+        // Id-addressed on purpose: a row carries the application NAME and no storage id, and this
+        // path only ever runs for deployments queued before V3's routing columns existed — which
+        // is to say before the identity rollback, when the id and the name were the same string.
+        DeploymentSpec spec =
+            specs.read(RepositoryRef.ofId(row.applicationName()), row.commitSha());
         LOG.infof(
             "Adopted deployment %s predates the routing columns; its snapshot was read from the"
                 + " spec of %s@%s",
@@ -699,8 +703,18 @@ public class DeployService implements BuildAnnouncements {
    *
    * <p>{@code runId} is optional and is recorded on every row this queues, verbatim: it is the only
    * pointer from a deployment back to the build that caused it, and it is resolved against nothing
-   * — a reader takes it to qits-ci. The triple that actually drives the deployment is (repoId,
+   * — a reader takes it to qits-ci. The triple that actually drives the deployment is (repository,
    * branch, commitSha).
+   *
+   * <p><b>This is where the application name is settled, once and for the whole event.</b> The
+   * repository arrives in two coordinate systems — an opaque storage id, and the public {@code
+   * (projectId, repoName)} pair when the announcement carried one — and {@link
+   * RepositoryRef#applicationName()} picks the name over the id. Everything below takes that string
+   * by value: the catalogue key, the {@link Target}, the health path, the provisioned database and
+   * role, the wire alias, the container name and the image reference. Only the spec read still
+   * needs the reference itself, because the git host addresses a blob by either coordinate. Passing
+   * a repository id where a name is meant is the regression to watch for — it would tag images
+   * {@code qits/<uuid>:<sha>} while every pipeline pushes {@code qits/<name>:<sha>}.
    *
    * <p><b>{@code causationId} is carried by value from here on, and that is the whole reason it is
    * a parameter.</b> {@code CausationScope} is a ThreadLocal: the door's scope — the frame's for the
@@ -712,18 +726,22 @@ public class DeployService implements BuildAnnouncements {
    */
   @Override
   public void announce(
-      String runId, String repoId, String branch, String commitSha, UUID causationId) {
+      String runId, RepositoryRef repository, String branch, String commitSha, UUID causationId) {
     DeploymentIdentifiers.requireRunId(runId);
-    DeploymentIdentifiers.requireRepoId(repoId);
+    RepositoryRef repo = repository.validated();
     PdIdentifiers.requireBranch(branch);
     DeploymentIdentifiers.requireSha(commitSha);
+    String applicationName = repo.applicationName();
     worker.submit(
         () -> {
           try {
-            deploy(runId, repoId, branch, commitSha, causationId);
+            deploy(runId, repo, applicationName, branch, commitSha, causationId);
           } catch (RuntimeException e) {
             LOG.errorf(
-                e, "The build-succeeded event for %s@%s could not be handled", repoId, commitSha);
+                e,
+                "The build-succeeded event for %s@%s could not be handled",
+                applicationName,
+                commitSha);
           }
         });
   }
@@ -769,31 +787,40 @@ public class DeployService implements BuildAnnouncements {
    * exactly as an unknown repository always has.
    */
   private void deploy(
-      String runId, String repoId, String branch, String commitSha, UUID causationId) {
+      String runId,
+      RepositoryRef repository,
+      String applicationName,
+      String branch,
+      String commitSha,
+      UUID causationId) {
     DeploymentSpec spec = null;
     String failure = null;
     try {
-      spec = specs.read(repoId, commitSha);
+      // The reference, not the name: the git host serves this blob name-addressed when the event
+      // carried the public pair and id-addressed when it did not. Everything after this line takes
+      // the application name instead.
+      spec = specs.read(repository, commitSha);
     } catch (RuntimeException e) {
       failure = "[deployment spec unreadable: " + e.getMessage() + "]";
       LOG.warnf(
-          "Could not read the deployment spec of %s@%s: %s", repoId, commitSha, e.getMessage());
+          "Could not read the deployment spec of %s@%s: %s",
+          applicationName, commitSha, e.getMessage());
     }
 
     List<Target> targets;
     if (spec == null) {
-      targets = alreadyRegistered(repoId, branch);
+      targets = alreadyRegistered(applicationName, branch);
     } else {
       try {
-        targets = register(runId, repoId, branch, commitSha, spec, causationId);
+        targets = register(runId, applicationName, branch, commitSha, spec, causationId);
       } catch (RuntimeException e) {
         // Registration is a local transaction, so this is a bug rather than an outage — and a bug
         // here is exactly the shape that once cost an hour of silence: a fire-and-forget sender,
         // no row, no signal. It is recorded where an operator looks, in the tiers this repository
         // is already registered in.
-        LOG.errorf(e, "Registration of %s@%s failed", repoId, branch);
+        LOG.errorf(e, "Registration of %s@%s failed", applicationName, branch);
         failure = "[registration failed: " + e.getMessage() + "]";
-        targets = alreadyRegistered(repoId, branch);
+        targets = alreadyRegistered(applicationName, branch);
       }
     }
 
@@ -824,9 +851,11 @@ public class DeployService implements BuildAnnouncements {
    * caused it is simply never deployed. There is no row to look at afterwards, because a row is
    * what the read was on the way to creating.
    */
-  private Optional<LinkedService> findService(String repoId) {
+  private Optional<LinkedService> findService(String applicationName) {
     return DbRetry.call(
-        "The catalogue lookup of " + repoId, () -> catalog.find(repoId), CUTOVER_BUDGET);
+        "The catalogue lookup of " + applicationName,
+        () -> catalog.find(applicationName),
+        CUTOVER_BUDGET);
   }
 
   /** The tiers listening to a branch — the topology half of the same read. See {@link #findService}. */
@@ -841,22 +870,23 @@ public class DeployService implements BuildAnnouncements {
    */
   private List<Target> register(
       String runId,
-      String repoId,
+      String applicationName,
       String branch,
       String commitSha,
       DeploymentSpec spec,
       UUID causationId) {
-    if (!isDeployableName(repoId)) {
+    if (!isDeployableName(applicationName)) {
       // The application name is the image path segment and the network alias, so it has to be a
-      // dns label. A repository whose id is not one cannot be deployed by convention at all, and
+      // dns label. A repository whose name is not one cannot be deployed by convention at all, and
       // the intake is fire-and-forget — saying so in the log beats a 400 nobody reads.
-      LOG.warnf("Repository %s cannot be an application name, so nothing was registered", repoId);
+      LOG.warnf("%s cannot be an application name, so nothing was registered", applicationName);
       return List.of();
     }
-    Optional<LinkedService> known = findService(repoId);
+    Optional<LinkedService> known = findService(applicationName);
     return spec.target() == PdDeploymentTarget.PLATFORM
-        ? registerPlatform(repoId, branch, spec, known, causationId)
-        : registerInEnvironments(runId, repoId, branch, commitSha, spec, known, causationId);
+        ? registerPlatform(applicationName, branch, spec, known, causationId)
+        : registerInEnvironments(
+            runId, applicationName, branch, commitSha, spec, known, causationId);
   }
 
   /**
@@ -877,7 +907,7 @@ public class DeployService implements BuildAnnouncements {
    */
   private List<Target> registerInEnvironments(
       String runId,
-      String repoId,
+      String applicationName,
       String branch,
       String commitSha,
       DeploymentSpec spec,
@@ -888,13 +918,13 @@ public class DeployService implements BuildAnnouncements {
           "%s is registered as a platform service and its deployments.yml now asks for"
               + " deployment_target: environment. Going back is not a conversion and was refused —"
               + " remediate deliberately (retire the platform service, then push again).",
-          repoId);
+          applicationName);
       recordRejection(
-          repoId,
+          applicationName,
           runId,
           commitSha,
           "[refused: "
-              + repoId
+              + applicationName
               + " is a platform service and this commit asks for deployment_target: environment."
               + " An environment application converts into a platform service, never the reverse —"
               + " there is no one environment to inherit the history and the running platform"
@@ -916,15 +946,17 @@ public class DeployService implements BuildAnnouncements {
     for (PdEnvironment environment : matching) {
       links.add(environment.id);
     }
-    String healthPath = resolveHealthPath(repoId, spec, known);
+    String healthPath = resolveHealthPath(applicationName, spec, known);
     // The spec's databases, with the convention filled in where the file left it out. Resolved
-    // ONCE, here, because this is the first place that knows the application's name — and before
-    // any Target is built, so a collision is one refusal rather than one per tier.
+    // ONCE, here, because this is the first place that holds both the application name and the
+    // spec — and before any Target is built, so a collision is one refusal rather than one per
+    // tier. The name is the repository's, never its storage id: a database called after a UUID
+    // would be a fresh, empty store on the first deployment after the identity rollback.
     List<ResourceProvisioning.Resolved> resources =
-        ResourceProvisioning.resolve(repoId, spec.resources());
+        ResourceProvisioning.resolve(applicationName, spec.resources());
     catalog.upsert(
         new ServiceCatalog.Upsert(
-            repoId,
+            applicationName,
             PdDeploymentTarget.ENVIRONMENT,
             null, // an environment application takes its branch from its tier
             spec.availableOnEnv(),
@@ -935,11 +967,11 @@ public class DeployService implements BuildAnnouncements {
     List<Target> targets = new ArrayList<>();
     for (PdEnvironment environment : matching) {
       if (known.isEmpty() || !known.get().environmentIds().contains(environment.id)) {
-        LOG.infof("Registered %s in environment %s", repoId, environment.name);
+        LOG.infof("Registered %s in environment %s", applicationName, environment.name);
       }
       targets.add(
           new Target(
-              repoId,
+              applicationName,
               environment.id,
               environment.name,
               environment.network,
@@ -987,7 +1019,7 @@ public class DeployService implements BuildAnnouncements {
    * turn, and it is why a second environment is now an ordinary thing to create.
    */
   private List<Target> registerPlatform(
-      String repoId,
+      String applicationName,
       String branch,
       DeploymentSpec spec,
       Optional<LinkedService> known,
@@ -996,14 +1028,14 @@ public class DeployService implements BuildAnnouncements {
       return List.of();
     }
     if (known.isEmpty()) {
-      LOG.infof("Registered %s as a platform service", repoId);
+      LOG.infof("Registered %s as a platform service", applicationName);
     }
-    String healthPath = resolveHealthPath(repoId, spec, known);
+    String healthPath = resolveHealthPath(applicationName, spec, known);
     List<ResourceProvisioning.Resolved> resources =
-        ResourceProvisioning.resolve(repoId, spec.resources());
+        ResourceProvisioning.resolve(applicationName, spec.resources());
     catalog.upsert(
         new ServiceCatalog.Upsert(
-            repoId,
+            applicationName,
             PdDeploymentTarget.PLATFORM,
             null, // the deploy refs are the environments' now — see PdService.branch
             false,
@@ -1014,7 +1046,7 @@ public class DeployService implements BuildAnnouncements {
     QuarkusTransaction.requiringNew()
         .run(
             () -> {
-              List<PdDeployment> scoped = deployments.listEnvironmentScoped(repoId);
+              List<PdDeployment> scoped = deployments.listEnvironmentScoped(applicationName);
               for (PdDeployment deployment : scoped) {
                 if (deployment.status == PdDeploymentStatus.ACTIVE) {
                   deployment.status = PdDeploymentStatus.DECOMMISSIONED;
@@ -1024,13 +1056,14 @@ public class DeployService implements BuildAnnouncements {
               }
               if (!scoped.isEmpty()) {
                 LOG.infof(
-                    "Converted %s from an environment application to a platform service", repoId);
+                    "Converted %s from an environment application to a platform service",
+                    applicationName);
               }
             });
 
     return List.of(
         new Target(
-            repoId,
+            applicationName,
             null,
             null,
             null,
@@ -1123,8 +1156,8 @@ public class DeployService implements BuildAnnouncements {
    * <p>Which is why every target here carries a null {@code healthCmd} and needs nothing better:
    * no container starts off one of them.
    */
-  private List<Target> alreadyRegistered(String repoId, String branch) {
-    Optional<LinkedService> known = findService(repoId);
+  private List<Target> alreadyRegistered(String applicationName, String branch) {
+    Optional<LinkedService> known = findService(applicationName);
     if (known.isEmpty()) {
       return List.of();
     }
@@ -1136,7 +1169,7 @@ public class DeployService implements BuildAnnouncements {
           ? List.of()
           : List.of(
               new Target(
-                  repoId,
+                  applicationName,
                   null,
                   null,
                   null,
@@ -1157,7 +1190,7 @@ public class DeployService implements BuildAnnouncements {
       if (linked.environmentIds().contains(environment.id)) {
         targets.add(
             new Target(
-                repoId,
+                applicationName,
                 environment.id,
                 environment.name,
                 environment.network,
@@ -1823,9 +1856,9 @@ public class DeployService implements BuildAnnouncements {
         .run(() -> deployments.delete("environmentId = ?1", environmentId));
   }
 
-  private static boolean isDeployableName(String repoId) {
+  private static boolean isDeployableName(String applicationName) {
     try {
-      PdIdentifiers.requireName(repoId, "application name");
+      PdIdentifiers.requireName(applicationName, "application name");
       return true;
     } catch (RuntimeException e) {
       return false;

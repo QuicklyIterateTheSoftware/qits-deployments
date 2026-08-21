@@ -3,9 +3,10 @@ package eu.wohlben.qits.platform.deployments.deployments.control;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 
 /**
- * Validates the untrusted strings that reach an argv but are never stored in the topology: the
- * commit sha, the repository id, the ci run id, one value of an OpenTelemetry attribute list, and
- * the health command a repository may declare for itself.
+ * Validates the untrusted strings that reach an argv or the git host's URL but are never stored in
+ * the topology: the commit sha, the repository id, the repository name and its project id, the ci
+ * run id, one value of an OpenTelemetry attribute list, and the health command a repository may
+ * declare for itself.
  *
  * <p>The split from {@code PdIdentifiers} is the module partition, not a taxonomy: names, branches
  * and health paths are values the topology <b>keeps</b>, so they are checked where they are kept;
@@ -19,7 +20,11 @@ import eu.wohlben.qits.platform.deployments.environments.error.BadRequestExcepti
  */
 public final class DeploymentIdentifiers {
 
-  /** Same slug the git host accepts for a repo id — no separators, no leading dash. */
+  /**
+   * Same slug the git host accepts for a repo id — no separators, no leading dash. It is wide
+   * enough for the opaque UUID a storage id is now, and for the repository <b>name</b> and the
+   * project id that arrive beside it.
+   */
   private static final String REPO_ID = "[A-Za-z0-9][A-Za-z0-9-]{0,63}";
 
   /** A hex object id (abbreviated ids are accepted; the registry resolves the tag either way). */
@@ -48,6 +53,41 @@ public final class DeploymentIdentifiers {
       throw new BadRequestException("Invalid repository id");
     }
     return repoId;
+  }
+
+  /**
+   * The repository's public NAME, the half of {@code (projectId, repoName)} the deployer keeps: it
+   * becomes the application name, and from there the image path segment, the wire alias, the
+   * container name and the GC pin key. Optional, because an event published before the name fields
+   * existed carries neither and falls back to the repository id.
+   *
+   * @throws BadRequestException if a present name could escape an argv
+   */
+  public static String requireRepoName(String repoName) {
+    if (repoName == null) {
+      return null;
+    }
+    if (!repoName.matches(REPO_ID)) {
+      throw new BadRequestException("Invalid repository name");
+    }
+    return repoName;
+  }
+
+  /**
+   * The project the repository belongs to — the other half of the public address, and the first
+   * segment of the name-addressed blob URL the spec is read through. Optional for the same reason
+   * {@link #requireRepoName} is.
+   *
+   * @throws BadRequestException if a present project id could escape the path it is written into
+   */
+  public static String requireProjectId(String projectId) {
+    if (projectId == null) {
+      return null;
+    }
+    if (!projectId.matches(REPO_ID)) {
+      throw new BadRequestException("Invalid project id");
+    }
+    return projectId;
   }
 
   /**

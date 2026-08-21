@@ -33,7 +33,11 @@ import java.util.Set;
  * <h2>What "the tip" is measured against, and why it takes two answers</h2>
  *
  * <p>The floor is the newest build this component already acted on for that {@code (repoId,
- * branch)}, and there are two ways to know it, each covering what the other cannot:
+ * branch)}, and there are two ways to know it, each covering what the other cannot. The
+ * <b>repository</b> here is the storage id and stays the storage id — it is the stable reference,
+ * and only the identifiers a deployment DERIVES (the image tag, the alias, the row) moved to the
+ * repository's name. The one place that follows the name is the row lookup below, because a row
+ * knows an application name and nothing else:
  *
  * <ul>
  *   <li><b>What this process announced</b>, remembered in a map. It is the build's own finish time
@@ -98,9 +102,19 @@ public class BuildTips {
    * and the catch-up sweeper — and the read of the floor and the write of the new one have to be
    * one step, or a burst of catch-up rows can each pass a floor none of them then raises.
    *
+   * <p><b>It takes both coordinates, and each answers a different half.</b> The in-memory tip is
+   * keyed by the {@code repoId} — the storage id is the repository's stable reference and does not
+   * move when a repository is renamed, so two names for one repository cannot each hold their own
+   * tip. The deployment-row floor is asked by {@code applicationName}, because {@code
+   * pd_deployment} records the application name and knows no repository id at all; asking it by an
+   * id would find no row, lose the cross-restart floor, and let a replayed stale build through.
+   *
+   * @param repoId the repository's stable reference — the key of the remembered tip
+   * @param applicationName what this build deploys under, and what the deployment rows are keyed by
    * @param finishedAt when the build finished, which is the event's own {@code occurredAt}
    */
-  public synchronized boolean claim(String repoId, String branch, Instant finishedAt) {
+  public synchronized boolean claim(
+      String repoId, String applicationName, String branch, Instant finishedAt) {
     if (finishedAt == null) {
       // An event with no time cannot be ordered against anything. Deploying it is the safe half of
       // the trade — the guard exists to stop a stale build, not to stop an odd one.
@@ -109,7 +123,7 @@ public class BuildTips {
     String key = repoId + "\n" + branch;
     Instant floor = announced.get(key);
     if (floor == null) {
-      floor = newestDeployedAt(repoId, branch);
+      floor = newestDeployedAt(applicationName, branch);
     }
     if (floor != null && !finishedAt.isAfter(floor)) {
       return false;
@@ -127,7 +141,7 @@ public class BuildTips {
    * non-XA resource in one transaction, which Narayana refuses. Suspending it is also the honest
    * shape: this is a read about the world, not part of the claim.
    */
-  private Instant newestDeployedAt(String repoId, String branch) {
+  private Instant newestDeployedAt(String applicationName, String branch) {
     return QuarkusTransaction.requiringNew()
         .call(
             () -> {
@@ -141,7 +155,8 @@ public class BuildTips {
               // The platform plane is included when the platform tier listens to the branch,
               // because that is exactly when a build rolls it — and its rows carry no environment
               // id, so no tier filter can reach them.
-              Optional<PdDeployment> newest = deployments.newestInPlaces(repoId, ids, platform);
+              Optional<PdDeployment> newest =
+                  deployments.newestInPlaces(applicationName, ids, platform);
               return newest.map(deployment -> deployment.createdAt).orElse(null);
             });
   }

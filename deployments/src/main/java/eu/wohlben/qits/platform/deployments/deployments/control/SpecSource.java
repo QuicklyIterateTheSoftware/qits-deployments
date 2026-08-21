@@ -22,11 +22,16 @@ public interface SpecSource {
   /**
    * Read the spec a repository declares at {@code sha}.
    *
+   * <p><b>It takes the whole {@link RepositoryRef} rather than one id</b>, because the git host
+   * serves the same blob under two addresses and only the caller knows which one this build has:
+   * the public {@code /git/<projectId>/<repoName>} when the event carried the name pair, and the
+   * internal {@code /git/<repoId>} when it did not.
+   *
    * @return {@link DeploymentSpec#DEFAULTS} when the repository carries no such file at that commit
    * @throws SpecException when the file exists but could not be fetched or understood — the
    *     deployment fails on it rather than guessing a topology
    */
-  DeploymentSpec read(String repoId, String sha);
+  DeploymentSpec read(RepositoryRef repository, String sha);
 
   /**
    * What a repository declares about how it is deployed. Eight keys, all optional, and the shape a

@@ -2,11 +2,13 @@ package eu.wohlben.qits.platform.deployments.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import eu.wohlben.qits.platform.deployments.deployments.control.DeployService;
+import eu.wohlben.qits.platform.deployments.deployments.control.DeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeDeploymentDriver;
 import eu.wohlben.qits.platform.deployments.deployments.control.FakeSpecSource;
 import eu.wohlben.qits.platform.deployments.deployments.control.SpecSource;
@@ -36,6 +38,9 @@ public class PdRegistrationTest {
 
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
+
+  /** What a githost repository key looks like since the identity rollback: opaque, and internal. */
+  private static final String STORAGE_UUID = "6d0c2b1e-3a44-4b0e-9a5b-2b1c0d9e4f88";
 
   @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
@@ -328,6 +333,60 @@ public class PdRegistrationTest {
   }
 
   @Test
+  public void aBuildCarryingTheNamePairIsNamedAfterTheNameAndNeverAfterTheStorageId() {
+    // THE invariant of the identity rollback. The git host's repository key is an opaque UUID now,
+    // and every pipeline yml still pushes a literal qits/<name>:<sha> — so the moment the deployer
+    // named an application after the storage id, every deployment would end IMAGE_MISSING and the
+    // orchestrator's garbage collector would delete the images that are live. The name wins, and
+    // it wins in all five derived places at once: the catalogue key, the image reference, the wire
+    // alias, the container name and the row the pins are read off.
+    String environmentId = createEnvironment("reg-named", "environment/reg-named");
+    specs.script(
+        "repo-reg-named",
+        new SpecSource.DeploymentSpec(PdDeploymentTarget.ENVIRONMENT, true, null, null, null, null));
+
+    postBuildSucceeded(STORAGE_UUID, "qits", "repo-reg-named", "environment/reg-named", SHA_A);
+    awaitApplied(1);
+
+    Map<String, Object> service = service("repo-reg-named");
+    assertEquals(List.of(environmentId), service.get("environmentIds"));
+    assertEquals(true, service.get("availableOnEnv"), "the spec was read for the NAME");
+    assertNull(service(STORAGE_UUID), "the storage id registered nothing of its own");
+
+    DeploymentDriver.ServiceSpec applied = driver.applied().get(0);
+    assertEquals("repo-reg-named", applied.applicationName());
+    assertEquals("reg-named-repo-reg-named", applied.wireAlias());
+    assertTrue(
+        applied.imageRef().endsWith("/repo-reg-named:" + SHA_A), "image ref: " + applied.imageRef());
+    assertTrue(
+        applied.deploymentName().startsWith("qits-pd-reg-named-repo-reg-named-"),
+        applied.deploymentName());
+    assertFalse(applied.imageRef().contains(STORAGE_UUID), "no UUID anywhere in the image path");
+    assertFalse(applied.deploymentName().contains(STORAGE_UUID), applied.deploymentName());
+  }
+
+  @Test
+  public void aBuildWithNoNamesIsNamedAfterItsRepositoryIdExactlyAsBefore() {
+    // The compatibility arm, byte for byte: before the rollback the storage id WAS the name, so an
+    // announcement carrying neither field derives every identifier from the id, as it always did.
+    createEnvironment("reg-unnamed", "environment/reg-unnamed");
+
+    postBuildSucceeded("repo-reg-unnamed", "environment/reg-unnamed", SHA_A);
+    awaitApplied(1);
+
+    DeploymentDriver.ServiceSpec applied = driver.applied().get(0);
+    assertEquals("repo-reg-unnamed", applied.applicationName());
+    assertEquals("reg-unnamed-repo-reg-unnamed", applied.wireAlias());
+    assertTrue(
+        applied.imageRef().endsWith("/repo-reg-unnamed:" + SHA_A),
+        "image ref: " + applied.imageRef());
+    assertEquals(
+        List.of("repo-reg-unnamed"),
+        List.of((String) service("repo-reg-unnamed").get("name")),
+        "the catalogue is keyed by the same string it always was");
+  }
+
+  @Test
   public void anUnreadableSpecResolvesFromTheLinksTheServiceAlreadyHas() {
     // The spec read is the one remote call left, so it is the one that can still fail. When it
     // does, the failure is recorded where the service is already registered — never guessed at.
@@ -393,6 +452,25 @@ public class PdRegistrationTest {
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("runId", "run-reg", "repoId", repoId, "branch", branch, "commitSha", sha))
+        .when()
+        .post("/platform-deployments/api/events/build-succeeded")
+        .then()
+        .statusCode(202);
+  }
+
+  /** The post-rollback payload: the storage id, plus the public address qits-ci fills in. */
+  private void postBuildSucceeded(
+      String repoId, String projectId, String repoName, String branch, String sha) {
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            Map.of(
+                "runId", "run-reg",
+                "repoId", repoId,
+                "projectId", projectId,
+                "repoName", repoName,
+                "branch", branch,
+                "commitSha", sha))
         .when()
         .post("/platform-deployments/api/events/build-succeeded")
         .then()

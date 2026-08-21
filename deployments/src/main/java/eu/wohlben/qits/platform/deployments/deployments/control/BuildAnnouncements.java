@@ -31,8 +31,14 @@ import java.util.UUID;
  * the tip ({@link BuildTips}) before it calls this. That check belongs to the door, not here: the
  * manual door is an operator choosing a commit, and guarding it would be refusing the choice.
  *
- * <p>Whichever door delivers it, the triple that drives the deployment is {@code (repoId, branch,
- * commitSha)} and the run id is a pointer nothing resolves.
+ * <p>Whichever door delivers it, the triple that drives the deployment is {@code (repository,
+ * branch, commitSha)} and the run id is a pointer nothing resolves.
+ *
+ * <p><b>The repository arrives as a {@link RepositoryRef} rather than as one string</b>, because
+ * the platform has two coordinate systems now: an opaque storage UUID, and the public {@code
+ * (projectId, repoName)} pair. The application name — the image tag, the wire alias, the container
+ * name, the GC pin key — is resolved from the pair exactly ONCE, here at the intake, and is carried
+ * by value from there on. Nothing below this seam passes a repository id where a name is meant.
  *
  * <p><b>The one thing that has changed here, and why it had to.</b> The signature carries a fifth
  * value now, {@code causationId} — the event this announcement is the effect of, recorded on every
@@ -53,6 +59,9 @@ public interface BuildAnnouncements {
    * from its handler rather than wait: it is holding the claim transaction open while it does.
    *
    * @param runId the qits-ci run that produced the image, optional and resolved against nothing
+   * @param repository which repository went green, in both coordinate systems — the storage id
+   *     always, the public {@code (projectId, repoName)} pair when the event carried one. Its
+   *     {@link RepositoryRef#applicationName()} is what this deployment is named after.
    * @param causationId the event this announcement is the effect of, recorded on every row it
    *     produces. Null is a rootless announcement — a bootstrap's hand-made POST — and never a
    *     reason to refuse one: causation is advisory and a deployment must not fail over a column
@@ -60,5 +69,6 @@ public interface BuildAnnouncements {
    * @throws eu.wohlben.qits.platform.deployments.environments.error.BadRequestException if any of
    *     the identifiers could escape an argv or overrun its column
    */
-  void announce(String runId, String repoId, String branch, String commitSha, UUID causationId);
+  void announce(
+      String runId, RepositoryRef repository, String branch, String commitSha, UUID causationId);
 }

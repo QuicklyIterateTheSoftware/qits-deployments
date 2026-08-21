@@ -5,6 +5,7 @@ import eu.wohlben.qits.eventstream.control.CanonicalJson;
 import eu.wohlben.qits.eventstream.control.EventFrame;
 import eu.wohlben.qits.platform.deployments.deployments.control.BuildAnnouncements;
 import eu.wohlben.qits.platform.deployments.deployments.control.BuildTips;
+import eu.wohlben.qits.platform.deployments.deployments.control.RepositoryRef;
 import eu.wohlben.qits.platform.deployments.environments.error.BadRequestException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -59,7 +60,8 @@ public class PdBuildSuccessfulSubscriber implements QitsDurableEventListener {
    * name} column.
    *
    * <p>A string rather than a class, because this component has <b>no compile-time dependency on
-   * another context</b> and does not grow one for an event: the payload is four strings on a wire.
+   * another context</b> and does not grow one for an event: the payload is a handful of strings on
+   * a wire.
    * The cost is that a rename in qits-ci is silent here, which is the cost every cross-repo contract
    * in this component already carries (the intake path is the other).
    */
@@ -75,14 +77,27 @@ public class PdBuildSuccessfulSubscriber implements QitsDurableEventListener {
   static final String CONSUMER_ID = "pd-build-succeeded";
 
   /**
-   * The four fields of the payload this component acts on. The event carries two more —
-   * {@code imageDigest} and {@code finishedAt} — and they are deliberately not bound: the image is
-   * resolved from the triple by convention here, and the finish time is read off the envelope,
-   * where it is the log's own ordering key rather than a field a payload happens to repeat.
-   * Unknown fields are ignored by the library's mapper, which is what lets qits-ci add a seventh.
+   * The fields of the payload this component acts on. The event carries two more — {@code
+   * imageDigest} and {@code finishedAt} — and they are deliberately not bound: the image is
+   * resolved from the repository and the sha by convention here, and the finish time is read off
+   * the envelope, where it is the log's own ordering key rather than a field a payload happens to
+   * repeat. Unknown fields are ignored by the library's mapper, which is what lets qits-ci add
+   * another.
+   *
+   * <p><b>{@code projectId} and {@code repoName} are the repository's public address, and they are
+   * NULLABLE by the same tolerance</b>: an event published before qits-ci carried them binds both
+   * to null, and the announcement then falls back to the {@code repoId} — which is what the id was
+   * before the identity rollback, so a replayed old event deploys exactly as it did. Post-rollover
+   * every build event carries them, and the repository's NAME is what the deployment is named
+   * after.
    */
   public record BuildSuccessfulPayload(
-      String runId, String repoId, String branch, String commitSha) {}
+      String runId,
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String commitSha) {}
 
   @Inject BuildAnnouncements announcements;
 
@@ -131,22 +146,36 @@ public class PdBuildSuccessfulSubscriber implements QitsDurableEventListener {
           frame.name(), frame.id());
       return;
     }
-    if (!tips.claim(build.repoId(), build.branch(), frame.occurredAt())) {
+    // The repository in both coordinate systems: the storage id is the stable reference the tip is
+    // keyed by, the name pair is the public address the deployment is named and addressed by.
+    RepositoryRef repository =
+        new RepositoryRef(build.repoId(), build.projectId(), build.repoName());
+    if (!tips.claim(
+        build.repoId(), repository.applicationName(), build.branch(), frame.occurredAt())) {
       LOG.infof(
           "%s %s is not the tip of %s@%s any more (build finished %s); it is skipped rather than"
               + " deployed over the newer one",
-          frame.name(), frame.id(), build.repoId(), build.branch(), frame.occurredAt());
+          frame.name(),
+          frame.id(),
+          repository.applicationName(),
+          build.branch(),
+          frame.occurredAt());
       return;
     }
     try {
       announcements.announce(
-          build.runId(), build.repoId(), build.branch(), build.commitSha(), causeOf(frame));
+          build.runId(), repository, build.branch(), build.commitSha(), causeOf(frame));
     } catch (BadRequestException e) {
-      // An identifier this component refuses — a sha that could escape an argv, a branch that
-      // overruns its column. Retrying refuses it again, so it is settled and said out loud.
+      // An identifier this component refuses — a sha that could escape an argv, a name or project
+      // that could escape the blob URL, a branch that overruns its column. Retrying refuses it
+      // again, so it is settled and said out loud.
       LOG.warnf(
           "%s %s was refused: %s (%s@%s)",
-          frame.name(), frame.id(), e.getMessage(), build.repoId(), build.commitSha());
+          frame.name(),
+          frame.id(),
+          e.getMessage(),
+          repository.applicationName(),
+          build.commitSha());
     }
   }
 

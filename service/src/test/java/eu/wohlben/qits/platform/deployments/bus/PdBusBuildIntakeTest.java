@@ -40,6 +40,9 @@ public class PdBusBuildIntakeTest {
   private static final String SHA_A = "a".repeat(40);
   private static final String SHA_B = "b".repeat(40);
 
+  /** What a githost repository key looks like since the identity rollback: opaque, and internal. */
+  private static final String STORAGE_UUID = "1b7e5f30-9c21-4d55-8f0a-77aa3c2e1b04";
+
   @Inject FakeDeploymentDriver driver;
   @Inject FakeSpecSource specs;
   @Inject DeployService deployService;
@@ -74,6 +77,58 @@ public class PdBusBuildIntakeTest {
     assertTrue(
         driver.applied().get(0).deploymentName().startsWith("qits-pd-bus-plain-repo-bus-plain-"),
         driver.applied().get(0).deploymentName());
+  }
+
+  @Test
+  public void aBusEventCarryingTheNamePairDeploysUnderTheNameNotTheStorageId() {
+    // Post-rollback qits-ci fills projectId and repoName from the push address, and the repoId is
+    // an opaque storage UUID. The application name — and with it the image tag every pipeline yml
+    // pushes as a literal — has to be the NAME.
+    createEnvironment("bus-named", "environment/bus-named");
+
+    subscriber.onFrame(
+        frame(
+            Instant.now(),
+            STORAGE_UUID,
+            "qits",
+            "repo-bus-named",
+            "environment/bus-named",
+            SHA_A));
+
+    awaitApplied(1);
+    assertEquals("repo-bus-named", driver.applied().get(0).applicationName());
+    assertEquals("bus-named-repo-bus-named", driver.applied().get(0).wireAlias());
+    assertTrue(
+        driver.applied().get(0).imageRef().endsWith("/repo-bus-named:" + SHA_A),
+        driver.applied().get(0).imageRef());
+    assertTrue(
+        driver.applied().get(0).deploymentName().startsWith("qits-pd-bus-named-repo-bus-named-"),
+        driver.applied().get(0).deploymentName());
+  }
+
+  @Test
+  public void aReplayedOlderBuildOfARenamedRepositoryIsStillSkipped() {
+    // The tip is keyed by the repoId, which is the repository's stable reference — but the FLOOR
+    // of last resort is a deployment row, and a row knows an application name and nothing else. A
+    // subscriber that asked the rows by the storage id would find none, lose the cross-restart
+    // floor and roll a replayed stale build over the newer one.
+    String environmentId = createEnvironment("bus-uuid-floor", "environment/bus-uuid-floor");
+    postBuildSucceeded(
+        STORAGE_UUID, "qits", "repo-bus-uuid-floor", "environment/bus-uuid-floor", SHA_B);
+    awaitDeployments(environmentId, 1);
+    driver.reset();
+
+    subscriber.onFrame(
+        frame(
+            Instant.now().minusSeconds(3600),
+            STORAGE_UUID,
+            "qits",
+            "repo-bus-uuid-floor",
+            "environment/bus-uuid-floor",
+            SHA_A));
+    awaitWorkerIdle();
+
+    assertEquals(List.of(), driver.applied(), "an hour-old build did not roll the running one");
   }
 
   @Test
@@ -198,12 +253,34 @@ public class PdBusBuildIntakeTest {
 
   // --- helpers ----------------------------------------------------------------------------------
 
-  /** One frame as qits-events pushes it: a fresh id, the signature, and the canonical payload. */
+  /**
+   * One frame as qits-events pushes it, with no name pair — the payload a publisher wrote before
+   * the identity rollback, kept here so every case above stays the regression it was.
+   */
   private static EventFrame frame(Instant occurredAt, String repoId, String branch, String sha) {
     String payload =
         ("{\"branch\":\"%s\",\"commitSha\":\"%s\",\"finishedAt\":\"%s\",\"repoId\":\"%s\","
                 + "\"runId\":\"run-bus\"}")
             .formatted(branch, sha, occurredAt, repoId);
+    return frame(occurredAt, payload);
+  }
+
+  /** The post-rollback frame: an opaque storage id plus the public {@code (project, name)} pair. */
+  private static EventFrame frame(
+      Instant occurredAt,
+      String repoId,
+      String projectId,
+      String repoName,
+      String branch,
+      String sha) {
+    String payload =
+        ("{\"branch\":\"%s\",\"commitSha\":\"%s\",\"finishedAt\":\"%s\",\"projectId\":\"%s\","
+                + "\"repoId\":\"%s\",\"repoName\":\"%s\",\"runId\":\"run-bus\"}")
+            .formatted(branch, sha, occurredAt, projectId, repoId, repoName);
+    return frame(occurredAt, payload);
+  }
+
+  private static EventFrame frame(Instant occurredAt, String payload) {
     return new EventFrame(
         UUID.randomUUID().toString(), "BuildSuccessful", occurredAt, payload, null, null);
   }
@@ -224,6 +301,24 @@ public class PdBusBuildIntakeTest {
     given()
         .contentType(ContentType.JSON)
         .body(Map.of("runId", "run-http", "repoId", repoId, "branch", branch, "commitSha", sha))
+        .when()
+        .post("/platform-deployments/api/events/build-succeeded")
+        .then()
+        .statusCode(202);
+  }
+
+  private void postBuildSucceeded(
+      String repoId, String projectId, String repoName, String branch, String sha) {
+    given()
+        .contentType(ContentType.JSON)
+        .body(
+            Map.of(
+                "runId", "run-http",
+                "repoId", repoId,
+                "projectId", projectId,
+                "repoName", repoName,
+                "branch", branch,
+                "commitSha", sha))
         .when()
         .post("/platform-deployments/api/events/build-succeeded")
         .then()
